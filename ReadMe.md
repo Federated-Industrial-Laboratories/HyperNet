@@ -28,13 +28,15 @@ Unsupported hosting profiles fail closed.
   membership, durable state and recovery.
 - [Confined hosting](Documentation/Hosting.md): signed consent, isolation,
   resource limits, installation and local withdrawal.
+- [Pages](Documentation/Pages.md): inert text and exact-content approval.
 - [Authority protocol](Documentation/Protocol.md): independent client interface.
 - [Requirements](Documentation/Requirements.md): the broader product scope.
 
 [HyperNetSuite](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite)
 is an independently built and packaged client. The daemon does not depend on it.
-This version maintains trusted membership and hosting readiness. Pages, mail,
-transfers, federation and shell services remain future capabilities.
+This version maintains trusted membership, hosting readiness and manually approved
+Pages with scoped replication. Mail, transfers, federation and shell services
+remain future capabilities.
 
 The implementation is not yet a qualified production Internet release. The
 replication profile assumes trusted administrators and crash faults; it does not

@@ -28,14 +28,15 @@ Run three voters with unique peer identities, persistent private storage, mutual
 TLS for peers and clients, and `--tls-min-version=TLS1.3`. Restrict peer ingress
 to the registered voters and client ingress to the authority brokers. Use etcd
 authentication and grant each broker identity read/write permission only on
-`/HyperNet/<network>/Authority`. Keep the root administrative credential outside
+`/HyperNet/<network>/Authority` and the prefix `/HyperNet/<network>/Pages/`.
+Keep the root administrative credential outside
 the broker container. The broker also checks the cluster's registered voting
 membership; three, five or seven voters are accepted. Learners do not count.
 
 The broker uses a dedicated etcd namespace and performs a linearizable read
 before every operation. A compare-and-swap transaction checks the exact state
-revision before committing. Invitations, grants, revocations, consent and
-idempotency receipts therefore share one ordered history. No serializable read,
+revision before committing. Invitations, grants, revocations, consent, page
+publication and idempotency receipts therefore share one ordered history. No serializable read,
 local permission cache, timestamp merge or unilateral fallback grants access.
 The broker installs a TLS-1.3-only cipher provider for its etcd client as well as
 its ingress listener; dependency feature unification cannot re-enable TLS 1.2.
@@ -85,8 +86,9 @@ It atomically creates a previously absent network namespace and records the
 cluster identity, revision and observed time in `AuthorityFloor.json`. It refuses
 to replace an existing namespace. The administrator's public key is not a secret;
 its private key remains in the client. The initial administrator has membership,
-hosting and administration permissions without an expiry. Subsequent membership
-renewals are limited to seven days.
+hosting and administration permission bits without an expiry. Hosting consent
+nevertheless requires a separate device key without administration permission.
+Subsequent membership renewals are limited to seven days.
 
 Prepare a configuration directory containing `Authority.json`,
 `AuthorityCertificate.pem`, `AuthorityKey.pem`, `HostingCa.pem`, `VoterCa.pem`,
@@ -163,8 +165,20 @@ document for the exact profile and resources, and submits that document's digest
 and transport-certificate fingerprint to the authority. The nonvoting host
 requires a current authority heartbeat and enforces the intersection of network
 grant and local consent. A grant alone cannot widen the local runtime profile.
-The host does not provide shell, content, mail or transfer services in this
-protocol version; those require separate protocols and permissions.
+Version-1 consent enables heartbeat operation only. Version-2 consent can
+add the Pages replica service for an exact namespace list and bounded volatile
+cache; see [Hosting.md](Hosting.md). Shell, mail and file-transfer services are
+not provided by this protocol version.
+
+Use separate keys for administrators, readers/authors and hosting services.
+Any retained hosting-consent record permanently designates that key as a service
+identity, including after withdrawal or removal of its hosting grant. Such a key
+cannot use ordinary Pages commands or administration commands, and `Grant` cannot
+add administration to it. A hosting grant without administration also designates
+a service identity. These checks prevent a host from reading outside its signed
+namespace scope through the ordinary reader API. An unconsented administrator
+can manage Pages with the initial permission mask; it cannot register hosting
+consent until administration is removed.
 
 Use `Grant` to replace a device's grant mask and expiry. Use `Revoke` to remove
 its membership permanently. Re-enrolment uses a new device key. The final active
@@ -181,6 +195,39 @@ need fresh authority. Systems need trustworthy wall clocks; broker clocks must
 remain within two seconds of the highest recorded observation. A larger backward
 step stops authorisation until time is corrected. Client requests have their
 separate 60-second past and 30-second future tolerance.
+
+## Publish and replicate Pages
+
+Authors submit bounded `HyperNetPage/1` text into quarantine. Only its author or
+an administrator can inspect a pending object. An administrator must explicitly
+approve the exact author signature, content digest, namespace, audience and
+revision. A pending replacement leaves the previous approved object readable;
+rejection discards the pending replacement. Withdrawal removes pending and
+published objects and retains an ordered version tombstone. Every mutation uses
+the expected current version, so a delayed approval cannot restore withdrawn
+content. The complete command and proof formats are in [Protocol.md](Protocol.md).
+
+The authority state contains manifests and replica tickets. Submitted envelopes
+and approved proof bundles use separate etcd keys under `Pages/Quarantine/`,
+`Pages/Published/` and `Pages/Delivery/`. Blob reads use the revision of the fresh
+authority snapshot. Publication, withdrawal and delivery commit their blob
+changes and authority state in one compare-and-swap transaction. Hosts never
+connect to this database.
+
+Normal discovery and reading expose only current publications whose author and
+administrative reviewer are still authorised. Readers verify both retained
+signatures and the fresh authoritative publication descriptor. The signed proof
+alone is not permission to serve a page. Replies have at most five seconds of
+freshness; permission and publication are checked again for each new read.
+Downloaded text cannot be recalled from its recipient.
+
+Version-2 hosts poll a fresh namespace-scoped inventory and remove obsolete cache
+entries. Replica reads use an explicitly selected host and a short rendezvous
+ticket. The host delivers its verified cached bundle through the broker, which
+rechecks the reader, host consent and exact current publication both on delivery
+and on release to the reader. An unavailable replica does not trigger an origin
+fallback. Hosting withdrawal or loss of authority stops new replication work;
+old cached approval bytes never authorise a later read.
 
 ## Restart and recover
 
@@ -215,6 +262,19 @@ first causes an explicit capacity error. These are small-network limits, not
 unlimited federation claims. Increasing or compacting them requires a reviewed
 state migration that preserves revocation and invitation history.
 
+Each non-administrative device is limited to 64 outstanding mutation receipts;
+64 global slots are reserved for administrative mutations. Read-only commands
+do not consume these receipts. A client receiving `RateLimited` must wait for
+its outstanding receipts to expire before issuing more mutations.
+
+Pages add at most 256 lifetime page identifiers, 16 per author and four pending
+submissions per author. Quarantine and published objects have independent logical
+budgets of 4 MiB and 8 MiB. A proof bundle is at most 56 KiB. Replica tickets are
+limited to 16 globally, two per reader and four per host, and expire after
+15 seconds. These are logical live-data bounds, not an etcd disk quota. Configure
+a backend quota and maintained compaction/defragmentation policy for historical
+MVCC versions. Deletion does not guarantee secure erasure from storage or backups.
+
 Ingress permits at most 32 simultaneous connections. It bounds headers, envelope
 and payload sizes, handshake time, body time and authority execution time. Each
 connection serves one command. These bounds limit resource use; they do not make
@@ -222,7 +282,23 @@ the service immune to denial of service. Deployment ingress and voter storage
 quotas remain necessary. Logs contain readiness and static operational failures,
 not invitation secrets or request bodies. There is no third-party telemetry.
 
-State schema and wire protocol are version 1. Unsupported versions are refused.
+The request wire protocol remains version 1. Brokers accept state schemas 1 and
+2; the first successful Pages command or version-2 consent registration writes
+schema 2. Page metadata and replica tickets default to empty when loading schema
+1. Upgrade every broker and extend its etcd role to the Pages prefix before
+exposing Pages or version-2 hosting consent. Older executables cannot read the
+new state and must not be reintroduced after that migration. Do not delete page
+fields, reset the version or restore an older snapshot to attempt a downgrade.
+
+Before upgrading, migrate any administrator key previously used for hosting to
+a separate administrator identity without a consent history. Create and verify
+that identity using a still-authorised administrator, then remove administration
+from the service key. Previously consented administrators fail closed under the
+new separation rules. If no independent administrator remains after an upgrade,
+use the independent new-network recovery procedure above; modifying authoritative
+records outside the protocol is not a supported recovery method.
+
+Unsupported state and wire versions are refused.
 Keep `Cargo.lock`, run the documented build and validation before installing an
 update, and retain the prior executable for rollback only while its state format
 remains compatible. An update must not broaden mounts, endpoints, role or resource

@@ -8,6 +8,7 @@ pub struct VerifiedRequest {
     pub key: String,
     pub digest: String,
     pub request: Request,
+    pub envelope: Envelope,
 }
 
 pub fn fixed_hex<const N: usize>(value: &str) -> Result<[u8; N], &'static str> {
@@ -28,12 +29,29 @@ pub fn verify(bytes: &[u8], network: &str, now: u64) -> Result<VerifiedRequest, 
         return Err("RequestTooLarge");
     }
     let envelope: Envelope = serde_json::from_slice(bytes).map_err(|_| "InvalidEnvelope")?;
+    let verified = verify_archived(&envelope, network)?;
+    if verified.request.issued_at > now.saturating_add(30)
+        || verified.request.issued_at.saturating_add(60) < now
+    {
+        return Err("StaleRequest");
+    }
+    Ok(verified)
+}
+
+// Archived signatures prove exact bytes, not current membership or publication.
+pub fn verify_archived(
+    envelope: &Envelope,
+    network: &str,
+) -> Result<VerifiedRequest, &'static str> {
     if envelope.network != network {
         return Err("WrongNetwork");
     }
     let network = fixed_hex::<32>(&envelope.network)?;
     let key_bytes = fixed_hex::<32>(&envelope.public_key)?;
     let signature = Signature::from_bytes(&fixed_hex::<64>(&envelope.signature)?);
+    if envelope.payload.len() > MAX_PAYLOAD.div_ceil(3) * 4 {
+        return Err("RequestTooLarge");
+    }
     let payload = URL_SAFE_NO_PAD
         .decode(&envelope.payload)
         .map_err(|_| "InvalidEncoding")?;
@@ -53,13 +71,11 @@ pub fn verify(bytes: &[u8], network: &str, now: u64) -> Result<VerifiedRequest, 
         return Err("UnsupportedVersion");
     }
     fixed_hex::<16>(&request.request_id)?;
-    if request.issued_at > now.saturating_add(30) || request.issued_at.saturating_add(60) < now {
-        return Err("StaleRequest");
-    }
     Ok(VerifiedRequest {
-        key: envelope.public_key,
+        key: envelope.public_key.clone(),
         digest: hex::encode(Sha256::digest(&signed)),
         request,
+        envelope: envelope.clone(),
     })
 }
 

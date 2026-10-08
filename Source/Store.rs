@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
-use crate::{authority, protocol::VerifiedRequest, types::*};
+use crate::{authority, page_authority, protocol::VerifiedRequest, types::*};
 use anyhow::{Context, Result, bail};
 use etcd_client::{
-    Certificate, Client, Compare, CompareOp, ConnectOptions, Identity, TlsOptions, Txn, TxnOp,
+    Certificate, Client, Compare, CompareOp, ConnectOptions, GetOptions, Identity, TlsOptions, Txn,
+    TxnOp,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -250,7 +251,7 @@ impl Store {
             bail!("Authority state exceeds its size bound");
         }
         let state: State = serde_json::from_slice(kv.value())?;
-        if state.version != 1 || state.network != self.network {
+        if (state.version != 1 && state.version != 2) || state.network != self.network {
             bail!("Authority state identity is invalid");
         }
         let now = now()?;
@@ -291,15 +292,64 @@ impl Store {
             if state.network != self.network {
                 bail!("Authority network identity mismatch");
             }
-            let reply =
+            let mut operations = Vec::new();
+            let reply = if page_authority::handles(&request.request.command) {
+                if let Err(code) = page_authority::preflight(&state, request, certificate, now) {
+                    return Ok(Reply::error(code));
+                }
+                let wanted = match page_authority::required_blobs(&state, request, now) {
+                    Ok(keys) => keys,
+                    Err(code) => return Ok(Reply::error(code)),
+                };
+                let prefix = format!("/HyperNet/{}/Pages/", self.network);
+                let mut blobs = std::collections::BTreeMap::new();
+                for key in wanted {
+                    let fetched = self
+                        .client
+                        .get(
+                            format!("{prefix}{key}"),
+                            Some(GetOptions::new().with_revision(header.revision())),
+                        )
+                        .await?;
+                    let fetched_header =
+                        fetched.header().context("Missing page response header")?;
+                    self.accept_floor(fetched_header.cluster_id(), fetched_header.revision(), now)?;
+                    if let Some(value) = fetched.kvs().first() {
+                        if value.value().len() > page_authority::MAX_BUNDLE {
+                            bail!("Page object exceeds its bound");
+                        }
+                        blobs.insert(key, value.value().to_vec());
+                    }
+                }
+                let change = match page_authority::apply(
+                    &mut state,
+                    request,
+                    certificate,
+                    now,
+                    header.revision(),
+                    &blobs,
+                ) {
+                    Ok(change) => change,
+                    Err(code) => return Ok(Reply::error(code)),
+                };
+                for key in change.deletes {
+                    operations.push(TxnOp::delete(format!("{prefix}{key}"), None));
+                }
+                for (key, value) in change.puts {
+                    operations.push(TxnOp::put(format!("{prefix}{key}"), value, None));
+                }
+                change.reply
+            } else {
                 match authority::apply(&mut state, request, certificate, now, header.revision()) {
                     Ok(reply) => reply,
                     Err(code) => return Ok(Reply::error(code)),
-                };
+                }
+            };
             let bytes = serde_json::to_vec(&state)?;
             if bytes.len() > MAX_STATE {
                 return Ok(Reply::error("CapacityExceeded"));
             }
+            operations.push(TxnOp::put(self.namespace.as_str(), bytes, None));
             let transaction = self
                 .client
                 .txn(
@@ -309,7 +359,7 @@ impl Store {
                             CompareOp::Equal,
                             kv.mod_revision(),
                         )])
-                        .and_then([TxnOp::put(self.namespace.as_str(), bytes, None)]),
+                        .and_then(operations),
                 )
                 .await?;
             if transaction.succeeded() {
