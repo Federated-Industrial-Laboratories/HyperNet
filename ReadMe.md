@@ -12,3 +12,5 @@ terminal and command-line clients belong to
 Other clients and integrations can use the same interfaces.
 
 See [Requirements](Documentation/Requirements.md) for the intended contracts.
+
+Licensed under the [MIT License](Licence.txt).
