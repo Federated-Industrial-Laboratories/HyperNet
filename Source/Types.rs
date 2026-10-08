@@ -154,6 +154,17 @@ pub enum Command {
         publication_version: u64,
         descriptor_digest: String,
         allow: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_generation: Option<u64>,
+    },
+    FederationShareStatus {
+        agreement_id: String,
+        page_id: String,
+    },
+    FederationUnshare {
+        agreement_id: String,
+        page_id: String,
+        expected_generation: u64,
     },
     FederationPermit {
         agreement_id: String,

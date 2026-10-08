@@ -195,6 +195,7 @@ pub fn verify_share(
         publication_version,
         descriptor_digest: bound_descriptor,
         allow,
+        ..
     } = &verified.request.command
     else {
         return Err("InvalidAuthorShare");
@@ -221,6 +222,8 @@ pub fn handles(command: &Command) -> bool {
             | Command::BridgeConsent { .. }
             | Command::BridgeWithdraw
             | Command::FederationShare { .. }
+            | Command::FederationUnshare { .. }
+            | Command::FederationShareStatus { .. }
             | Command::FederationPermit { .. }
             | Command::FederationExport { .. }
             | Command::FederationImport { .. }
@@ -364,7 +367,7 @@ pub fn preflight(
     certificate: Option<&str>,
     now: u64,
 ) -> Result<(), &'static str> {
-    if !(1..=3).contains(&state.version) {
+    if !(1..=4).contains(&state.version) {
         return Err("UnsupportedState");
     }
     if state.high_water_time > now.saturating_add(2) {
@@ -432,6 +435,8 @@ pub fn preflight(
             if !matches!(
                 command,
                 Command::FederationShare { .. }
+                    | Command::FederationShareStatus { .. }
+                    | Command::FederationUnshare { .. }
                     | Command::FederationList { .. }
                     | Command::FederationRead { .. }
             ) {
@@ -450,6 +455,54 @@ fn share_key(agreement: &str, page: &str) -> String {
 }
 fn page_key(agreement: &str, page: &str) -> String {
     format!("Foreign/{agreement}/{page}")
+}
+
+fn share_capacity(state: &State, agreement: &str, key: &str) -> Result<(), &'static str> {
+    if !state.federation_shares.contains_key(key) {
+        let prefix = format!("{agreement}/");
+        if state.federation_shares.len() >= 256
+            || state
+                .federation_shares
+                .keys()
+                .filter(|key| key.starts_with(&prefix))
+                .count()
+                >= 32
+        {
+            return Err("FederationQuotaExceeded");
+        }
+    }
+    Ok(())
+}
+
+fn share_owner(
+    state: &State,
+    actor: &str,
+    agreement: &str,
+    page: &str,
+) -> Result<(), &'static str> {
+    protocol::fixed_hex::<16>(agreement)?;
+    protocol::fixed_hex::<16>(page)?;
+    let treaty = &state
+        .federation_agreements
+        .get(agreement)
+        .ok_or("FederationUnavailable")?
+        .treaty;
+    side(state, treaty, true)?;
+    let record = state.pages.get(page).ok_or("PageUnavailable")?;
+    if record.author != actor {
+        return Err("PageOwnerMismatch");
+    }
+    if record.namespace != treaty.source_namespace {
+        return Err("PageVersionConflict");
+    }
+    Ok(())
+}
+
+fn share_status(state: &State, agreement: &str, page: &str) -> serde_json::Value {
+    let record = state.federation_shares.get(&object_key(agreement, page));
+    json!({"agreementId":agreement,"pageId":page,"generation":record.map_or(0, |value| value.generation),
+        "lastWithdrawalGeneration":record.map_or(0, |value| value.last_withdrawal_generation),
+        "allowed":record.is_some_and(|value| value.allowed)})
 }
 
 pub fn required_blobs(
@@ -661,11 +714,14 @@ pub fn apply(
             | Command::BridgeConsent { .. }
             | Command::BridgeWithdraw
             | Command::FederationShare { .. }
+            | Command::FederationUnshare { .. }
             | Command::FederationReview { .. }
             | Command::FederationPageWithdraw { .. }
     );
     if recorded {
-        if let Some(receipt) = state.receipts.get(&receipt_key) {
+        if !matches!(request.request.command, Command::FederationUnshare { .. })
+            && let Some(receipt) = state.receipts.get(&receipt_key)
+        {
             if receipt.digest != request.digest {
                 return Err("RequestConflict");
             }
@@ -801,7 +857,20 @@ pub fn apply(
             publication_version,
             descriptor_digest: bound,
             allow,
+            expected_generation,
         } => {
+            if !allow {
+                return Err("DedicatedWithdrawalRequired");
+            }
+            let generation = expected_generation.ok_or("ShareGenerationRequired")?;
+            let key = object_key(agreement_id, page_id);
+            let current = state.federation_shares.get(&key);
+            if generation != current.map_or(0, |value| value.generation) {
+                return Err("ShareGenerationConflict");
+            }
+            let last_withdrawal_generation =
+                current.map_or(0, |value| value.last_withdrawal_generation);
+            let generation = generation.checked_add(1).ok_or("CapacityExceeded")?;
             let value = agreement(state, agreement_id, now)?;
             side(state, &value.treaty, true)?;
             if &value.digest != agreement_digest {
@@ -818,19 +887,7 @@ pub fn apply(
                 return Err("PageVersionConflict");
             }
             let key = object_key(agreement_id, page_id);
-            if !state.federation_shares.contains_key(&key) {
-                let prefix = format!("{agreement_id}/");
-                if state.federation_shares.len() >= 256
-                    || state
-                        .federation_shares
-                        .keys()
-                        .filter(|key| key.starts_with(&prefix))
-                        .count()
-                        >= 32
-                {
-                    return Err("FederationQuotaExceeded");
-                }
-            }
+            share_capacity(state, agreement_id, &key)?;
             let bytes = encoded(&request.envelope, MAX_PROOF)?;
             state.federation_shares.insert(
                 key,
@@ -838,10 +895,52 @@ pub fn apply(
                     descriptor_digest: bound.clone(),
                     share_digest: request.digest.clone(),
                     allowed: *allow,
+                    generation,
+                    last_withdrawal_generation,
                 },
             );
             puts.push((share_key(agreement_id, page_id), bytes));
-            json!({"agreementId":agreement_id,"pageId":page_id,"allowed":allow,"shareDigest":request.digest})
+            json!({"agreementId":agreement_id,"pageId":page_id,"allowed":allow,"shareDigest":request.digest,"generation":generation,"lastWithdrawalGeneration":last_withdrawal_generation})
+        }
+        Command::FederationShareStatus {
+            agreement_id,
+            page_id,
+        } => {
+            share_owner(state, &request.key, agreement_id, page_id)?;
+            share_status(state, agreement_id, page_id)
+        }
+        Command::FederationUnshare {
+            agreement_id,
+            page_id,
+            expected_generation,
+        } => {
+            share_owner(state, &request.key, agreement_id, page_id)?;
+            let key = object_key(agreement_id, page_id);
+            let current = state.federation_shares.get(&key);
+            let generation = current.map_or(0, |value| value.generation);
+            let withdrawn = current.map_or(0, |value| value.last_withdrawal_generation);
+            // A bound retry cannot revoke a newer explicit grant after its withdrawal committed.
+            if withdrawn <= *expected_generation {
+                if generation != *expected_generation {
+                    return Err("ShareGenerationConflict");
+                }
+                share_capacity(state, agreement_id, &key)?;
+                let generation = generation.checked_add(1).ok_or("CapacityExceeded")?;
+                let record = state
+                    .federation_shares
+                    .entry(key)
+                    .or_insert(FederationShareRecord {
+                        descriptor_digest: String::new(),
+                        share_digest: String::new(),
+                        allowed: false,
+                        generation: 0,
+                        last_withdrawal_generation: 0,
+                    });
+                record.allowed = false;
+                record.generation = generation;
+                record.last_withdrawal_generation = generation;
+            }
+            share_status(state, agreement_id, page_id)
         }
         Command::FederationPermit {
             agreement_id,
@@ -1257,7 +1356,7 @@ pub fn apply(
     if changed {
         state.epoch = state.epoch.checked_add(1).ok_or("CapacityExceeded")?;
     }
-    state.version = 3;
+    state.version = 4;
     state.high_water_time = state.high_water_time.max(now);
     let reply = Reply::success(state.epoch, result);
     encoded(&reply, 256 * 1024)?;

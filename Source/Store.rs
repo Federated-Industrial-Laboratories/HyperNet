@@ -287,7 +287,7 @@ impl Store {
             bail!("Authority state exceeds its size bound");
         }
         let state: State = serde_json::from_slice(kv.value())?;
-        if !(1..=3).contains(&state.version) || state.network != self.network {
+        if !(1..=4).contains(&state.version) || state.network != self.network {
             bail!("Authority state identity is invalid");
         }
         let now = now()?;

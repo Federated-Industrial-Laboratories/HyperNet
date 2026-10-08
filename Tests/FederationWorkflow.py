@@ -260,6 +260,67 @@ class FederationWorkflow:
         self.check('withdrawn immutable treaty cannot be silently reaccepted',
             d.cli('Administrator','federation','accept','--treaty',self.treaty_path,good=False).returncode!=0)
 
+    def exercise_withdrawal(self):
+        s = self.source
+        self.share(); self.wait_pending(); self.review()
+        self.wait_read('Original shared content.')
+        backup = s.client('BackupAdministrator'); s.admit('BackupAdministrator', backup, 5)
+        s.call('BackupAdministrator', 'grant', '--device-key', s.admin, '--grants', '1',
+               '--expires', str(int(time.time())+3600))
+        result = json.loads(self.share(withdraw=True).stdout)
+        self.check('author withdrawal confirms while source reviewer lacks approval authority',
+                   result['withdrawal'] == 'Confirmed' and result['sharing'] == 'Withdrawn')
+        s.call('BackupAdministrator', 'grant', '--device-key', s.admin, '--grants', '7',
+               '--expires', str(int(time.time())+3600))
+        time.sleep(6)
+        self.check('restoring reviewer authority does not reactivate withdrawn sharing', self.read(good=False).returncode != 0)
+        self.share(); self.wait_read('Original shared content.')
+        s.snapshot=s.root/'PreviousAuthority.db'
+        s.authctl('snapshot','save',s.snapshot,endpoints=f'https://127.0.0.1:{s.store_port+1}')
+        s.snapshot.chmod(0o600)
+        for index in [2,3]: s.run('podman','pause',s.prefix+f'Voter{index}')
+        try:
+            failed = s.cli('Author','federation','share','--agreement',self.agreement,'--page-id',self.page,'--withdraw',good=False)
+            pending = json.loads(failed.stdout)
+            self.check('lost quorum saves private signed pending intent without confirming global withdrawal',
+                       failed.returncode != 0 and pending['withdrawal'] == 'Pending'
+                       and pending['expectedGeneration'] is None
+                       and Path(pending['pendingFile']).stat().st_mode & 0o077 == 0)
+            blocked = s.cli('Author','federation','share','--agreement',self.agreement,'--page-id',self.page,good=False)
+            self.check('pending withdrawal blocks an accidental local re-share', blocked.returncode != 0 and 'pending withdrawal' in blocked.stderr)
+        finally:
+            for index in [2,3]: s.run('podman','unpause',s.prefix+f'Voter{index}')
+        for _ in range(30):
+            status = s.cli('Author','federation','share-status','--agreement',self.agreement,'--page-id',self.page,good=False)
+            if status.returncode == 0: break
+            time.sleep(.2)
+        retry = s.cli('Author','federation','retry-withdrawal','--agreement',self.agreement,'--page-id',self.page,good=False)
+        pending = json.loads(retry.stdout)
+        self.check('offline intent requires explicit current-generation confirmation after recovery',
+                   retry.returncode != 0 and pending['reason'] == 'GenerationConfirmationRequired')
+        result = s.call('Author','federation','retry-withdrawal','--agreement',self.agreement,'--page-id',self.page,
+                        '--expected-generation',str(pending['current']['generation']))
+        self.check('explicit retry commits withdrawal and removes private pending intent',
+                   result['withdrawal'] == 'Confirmed' and not Path(pending['pendingFile']).exists())
+        s.run('podman','restart','--time','3',s.broker,timeout=45)
+        time.sleep(6)
+        persisted=s.call('Author','federation','share-status','--agreement',self.agreement,'--page-id',self.page)
+        self.check('withdrawal tombstone and generation survive actual broker restart',
+                   persisted['allowed'] is False and persisted['generation'] == result['current']['generation']
+                   and persisted['lastWithdrawalGeneration'] == result['current']['lastWithdrawalGeneration'])
+        self.check('committed withdrawal expires destination access', self.read(good=False).returncode != 0)
+        self.share()
+        s.call('Author','pages','withdraw','--page-id',self.page,'--expected-version','2')
+        s.call('Administrator','federation','withdraw','--agreement',self.agreement,'--expected-version','1')
+        result = json.loads(self.share(withdraw=True).stdout)
+        self.check('inactive treaty and withdrawn native publication cannot block author withdrawal',
+                   result['withdrawal'] == 'Confirmed' and result['sharing'] == 'Withdrawn')
+        self.stop_bridge(remove=True)
+        s.restore_previous_snapshot()
+        inspection=json.loads(s.run('podman','inspect',s.broker).stdout)[0]
+        self.check('older positive-share snapshot is refused under the retained authority rollback floor',
+                   inspection['State']['Status'] == 'exited' and inspection['State']['ExitCode'] != 0)
+
     def exercise_expiry(self):
         s,d=self.source,self.destination
         self.share(); self.wait_pending(); self.review()
@@ -296,10 +357,11 @@ class FederationWorkflow:
         error=None
         try:
             self.setup()
-            if getattr(self.args,'expiry_only',False): self.exercise_expiry()
+            if getattr(self.args,'withdrawal_only',False): self.exercise_withdrawal()
+            elif getattr(self.args,'expiry_only',False): self.exercise_expiry()
             else: self.exercise()
-        except Exception as caught:
-            error=str(caught)
+        except BaseException as caught:
+            error=f"{type(caught).__name__}: {caught}"
             raise
         finally:
             self.stop_bridge(remove=True)
@@ -316,6 +378,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     for field in ['suite','node','image','etcd-directory','seccomp','output']:
         parser.add_argument('--'+field,required=True)
+    parser.add_argument('--withdrawal-only',action='store_true',help='Check durable sharing withdrawal, pending retries and old snapshot rejection')
     parser.add_argument('--expiry-only',action='store_true',help='Check installed worker and relay expiry, including stopped processes')
     FederationWorkflow(parser.parse_args()).execute()
 
