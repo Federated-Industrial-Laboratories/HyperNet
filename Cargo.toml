@@ -1,0 +1,43 @@
+[package]
+name = "hypernet"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Permissioned network authority and confined hosting"
+build = "Build.rs"
+
+[[bin]]
+name = "HyperNet"
+path = "Source/Main.rs"
+
+[[bin]]
+name = "HyperNetGate"
+path = "Tools/NetworkGate.rs"
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.22"
+bytes = "1.10"
+clap = { version = "4.5", features = ["derive"] }
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+etcd-client = { version = "=0.20.0", features = ["tls-ring"] }
+hex = "0.4"
+http-body-util = "0.1"
+hyper = { version = "1.7", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+libc = "0.2"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tokio = { version = "1.47", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync", "io-util"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+zeroize = "1.8"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
