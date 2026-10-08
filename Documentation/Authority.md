@@ -268,7 +268,9 @@ old network identity can resurrect revoked authority and is unsupported. Establi
 a new network identity and fresh roots through an independently authenticated
 recovery channel, then issue new device-bound invitations. A restored cluster
 identity mismatch or revision rollback is a hard failure. A snapshot is an aid
-to recovering reviewed non-authoritative data, not permission to restore grants.
+to recovering reviewed non-authoritative data, not permission to restore grants
+or author sharing. Fresh network identity requires fresh treaties and explicit
+author opt-ins; do not transplant prior sharing permissions or withdrawal floors.
 The guard cannot protect against an administrator who replaces both the entire
 trusted cluster and every client's trust material and rollback floor.
 
@@ -303,9 +305,10 @@ quotas remain necessary. Logs contain readiness and static operational failures,
 not invitation secrets or request bodies. There is no third-party telemetry.
 
 The request wire protocol remains version 1. Brokers accept state schemas 1, 2
-and 3. Pages and version-2 consent use at least schema 2; a successful Federation
-command writes schema 3. Missing feature maps default to empty for earlier
-schemas. Later Pages and hosting operations preserve schema 3. Upgrade every
+and 4, including earlier schema 3. Pages and version-2 consent use at least schema
+2; a successful Federation command writes schema 4, which retains monotonic author
+sharing generations and withdrawal tombstones. Missing feature maps default to
+empty for earlier schemas. Later Pages and hosting operations preserve schema 4. Upgrade every
 broker and extend its etcd role to the required Pages and Federation prefixes
 before enabling those features. Configure the dedicated Federation signer on
 each broker serving bilateral agreements. Older executables cannot read the new

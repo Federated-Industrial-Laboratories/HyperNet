@@ -49,6 +49,8 @@ fn source_share_capacity_preserves_existing_refresh_after_excess_admission() {
                 descriptor_digest: hex::encode([0; 32]),
                 share_digest: hex::encode([0; 32]),
                 allowed: false,
+                generation: 0,
+                last_withdrawal_generation: 0,
             },
         );
     }
@@ -74,6 +76,7 @@ fn source_share_capacity_preserves_existing_refresh_after_excess_admission() {
             publication_version: 2,
             descriptor_digest: descriptor_digest(&additional_descriptor).unwrap(),
             allow: true,
+            expected_generation: Some(0),
         },
         100,
     );
@@ -297,6 +300,21 @@ impl Fixture {
     }
 
     fn share(&self, allow: bool) -> Command {
+        let generation = self
+            .source
+            .federation_shares
+            .get(&object_key(
+                &self.treaty.agreement_id,
+                &self.descriptor.page_id,
+            ))
+            .map_or(0, |value| value.generation);
+        if !allow {
+            return Command::FederationUnshare {
+                agreement_id: self.treaty.agreement_id.clone(),
+                page_id: self.descriptor.page_id.clone(),
+                expected_generation: generation,
+            };
+        }
         Command::FederationShare {
             agreement_id: self.treaty.agreement_id.clone(),
             agreement_digest: treaty_digest(&self.treaty).unwrap(),
@@ -304,6 +322,7 @@ impl Fixture {
             publication_version: 2,
             descriptor_digest: descriptor_digest(&self.descriptor).unwrap(),
             allow,
+            expected_generation: Some(generation),
         }
     }
 
@@ -405,7 +424,7 @@ fn bilateral_sharing_requires_author_opt_in_and_exact_local_review() {
     for _ in 0..70 {
         assert_eq!(fixture.transfer(false).unwrap()["version"], 2);
     }
-    assert_eq!(fixture.destination.version, 3);
+    assert_eq!(fixture.destination.version, 4);
     fixture.call(true, 3, fixture.share(false), 100).unwrap();
     assert_eq!(fixture.transfer(false).err(), Some("AuthorShareRequired"));
     assert!(fixture.call(false, 4, fixture.read(), 105).is_err());
@@ -670,5 +689,95 @@ fn authority_signing_and_bilateral_consent_are_separate() {
         )
         .err(),
         Some("DedicatedAuthorityKeyRequired")
+    );
+}
+
+#[test]
+fn withdrawal_survives_review_loss_inactive_treaty_and_delayed_consent() {
+    let mut fixture = Fixture::new();
+    fixture.call(true, 3, fixture.share(true), 100).unwrap();
+    let delayed = fixture.share(true);
+    let withdrawal = fixture.share(false);
+    fixture.source.members.get_mut(&public(1)).unwrap().grants = MEMBER;
+    assert!(fixture.transfer(true).is_err());
+    let result = fixture.call(true, 3, withdrawal.clone(), 100).unwrap();
+    assert_eq!(result.result["allowed"], false);
+    assert_eq!(result.result["generation"], 2);
+    fixture.source = serde_json::from_slice(&serde_json::to_vec(&fixture.source).unwrap()).unwrap();
+    fixture.source.receipts.clear();
+    fixture.source.members.get_mut(&public(1)).unwrap().grants = MEMBER | ADMIN;
+    assert!(fixture.transfer(true).is_err());
+    assert_eq!(
+        fixture.call(true, 3, delayed, 100).err(),
+        Some("ShareGenerationConflict")
+    );
+    fixture.call(true, 3, fixture.share(true), 100).unwrap();
+    fixture.transfer(true).unwrap();
+    let retried = fixture.call(true, 3, withdrawal, 100).unwrap();
+    assert_eq!(retried.result["generation"], 3);
+    assert_eq!(retried.result["lastWithdrawalGeneration"], 2);
+    assert_eq!(retried.result["allowed"], true);
+    fixture.transfer(false).unwrap();
+    fixture
+        .source
+        .pages
+        .get_mut(&fixture.descriptor.page_id)
+        .unwrap()
+        .published = None;
+    fixture
+        .source
+        .federation_agreements
+        .get_mut(&fixture.treaty.agreement_id)
+        .unwrap()
+        .active = false;
+    let result = fixture.call(true, 3, fixture.share(false), 100).unwrap();
+    assert_eq!(result.result["allowed"], false);
+    assert_eq!(result.result["generation"], 4);
+}
+
+#[test]
+fn withdrawal_requires_exact_live_owner_and_fences_concurrent_first_grant() {
+    let mut fixture = Fixture::new();
+    let delayed = fixture.share(true);
+    assert_eq!(
+        fixture.call(true, 1, fixture.share(false), 100).err(),
+        Some("PageOwnerMismatch")
+    );
+    fixture.source.members.get_mut(&public(3)).unwrap().revoked = true;
+    assert_eq!(
+        fixture.call(true, 3, fixture.share(false), 100).err(),
+        Some("PermissionDenied")
+    );
+    fixture.source.members.get_mut(&public(3)).unwrap().revoked = false;
+    fixture
+        .source
+        .federation_agreements
+        .get_mut(&fixture.treaty.agreement_id)
+        .unwrap()
+        .treaty
+        .expires = 99;
+    fixture.call(true, 3, fixture.share(false), 100).unwrap();
+    fixture
+        .source
+        .federation_agreements
+        .get_mut(&fixture.treaty.agreement_id)
+        .unwrap()
+        .treaty
+        .expires = 1000;
+    assert_eq!(
+        fixture.call(true, 3, delayed, 100).err(),
+        Some("ShareGenerationConflict")
+    );
+    let mut legacy = fixture.share(true);
+    if let Command::FederationShare {
+        expected_generation,
+        ..
+    } = &mut legacy
+    {
+        *expected_generation = None;
+    }
+    assert_eq!(
+        fixture.call(true, 3, legacy, 100).err(),
+        Some("ShareGenerationRequired")
     );
 }

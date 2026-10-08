@@ -59,16 +59,41 @@ new owner consent and registration. Neither authority can widen that consent.
 
 The author first publishes through the ordinary native Pages review procedure.
 The author then submits `FederationShare` with the agreement ID and digest, the
-page ID, exact publication version, descriptor digest and `allow: true`. The
+page ID, exact publication version, descriptor digest, `expectedGeneration` and
+`allow: true`. Read the current generation with `FederationShareStatus`. The
 authority checks current author membership and ownership. An administrator
 cannot substitute for this author signature. The descriptor digest is SHA-256
 of ASCII `HyperNet/FederationPage/1`, one zero byte, and compact typed
 `PageDescriptor` JSON in the order defined in [Protocol.md](Protocol.md).
 
-`allow: false` requires the same current publication bindings. If source review
-authority is unavailable, export already stops but a failed sharing withdrawal
-leaves the earlier opt-in intact. It can resume after review authority recovers.
-Repeat the withdrawal after recovery or withdraw the native page as its author.
+`FederationUnshare` removes permission independently of publication approval.
+It binds `agreementId`, `pageId` and `expectedGeneration`, requires current author
+membership and immutable native ownership, and works with an expired or inactive
+treaty, a withdrawn native publication or an unavailable reviewer. It does not
+accept a revoked key or let an administrator withdraw another author's consent.
+`allow: false` is refused; use the dedicated withdrawal command.
+
+Each grant or withdrawal advances a persistent share generation. Both commands
+compare the expected generation before changing permission. A withdrawal retains
+a tombstone and `lastWithdrawalGeneration`, including when no grant existed.
+A delayed grant cannot cross that barrier. Re-sharing requires explicit fresh
+consent against the current generation and a currently approved publication.
+Reviewer restoration and broker restart cannot undo the tombstone.
+
+A retry whose expected generation precedes `lastWithdrawalGeneration` succeeds
+without changing permission. Its response reports the current `allowed` value,
+`generation` and `lastWithdrawalGeneration`; a later explicit grant may already
+have superseded that withdrawal. Never present this as currently withdrawn when
+`allowed` is true. Receipt expiry does not remove the withdrawal barrier.
+Generation conflicts require reading current state and explicitly selecting a
+new expected generation; do not silently renew an old positive grant.
+
+Withdrawal is confirmed only after the quorum commits it. During an outage, a
+client may retain a private pending request, but must not claim global success.
+An intent created without an observed generation must require explicit generation
+confirmation before later submission. Previously issued destination permissions
+expire within five seconds after committed withdrawal; an offline intention does
+not start that bound and cannot stop an authority that has not received it.
 
 The bridge obtains a destination permit, fetches only the approved and explicitly
 shared source inventory, and imports each verified proof bundle into destination
@@ -92,8 +117,8 @@ descriptor bindings, local network, treaty and evidence expiry before rendering.
 Display the source network and namespace separately from the local destination
 namespace. Links never create a treaty or import content automatically.
 
-The author can stop export with `FederationShare` and `allow: false` for the
-current exact publication. Withdrawing the native publication, removing its
+The author can stop export with `FederationUnshare` for the
+current sharing generation. Withdrawing the native publication, removing its
 author or reviewer, or withdrawing the source treaty also stops new exports.
 A destination administrator can withdraw its treaty or imported publication;
 the bridge owner can withdraw consent locally or in either authority. Stop the
@@ -113,7 +138,9 @@ bridge service calls also require their registered mTLS certificate.
 | `FederationAgreements` | None | Member; `entries`, local `authorityKey`, `authorityRevision` |
 | `BridgeConsent` | `agreementId`, `profile`, `expires`, `certificate`, `document` | Named local bridge; registers dual-signed exact document |
 | `BridgeWithdraw` | None | Own member, including revoked membership; disables local bridge consent |
-| `FederationShare` | `agreementId`, `agreementDigest`, `pageId`, `publicationVersion`, `descriptorDigest`, `allow` | Original author; exact publication sharing decision |
+| `FederationShare` | `agreementId`, `agreementDigest`, `pageId`, `publicationVersion`, `descriptorDigest`, `allow: true`, `expectedGeneration` | Original author; exact current publication opt-in |
+| `FederationShareStatus` | `agreementId`, `pageId` | Original author; `allowed`, `generation`, `lastWithdrawalGeneration` |
+| `FederationUnshare` | `agreementId`, `pageId`, `expectedGeneration` | Original author; durable withdrawal or current result of a previously committed withdrawal |
 | `FederationPermit` | `agreementId`, `profile` | Destination bridge; signed `admission` |
 | `FederationExport` | `agreementId`, `profile`, `admission`, optional `pageId`, `includeBundle` | Source bridge; inventory or exact signed export |
 | `FederationImport` | `agreementId`, `profile`, `admission`, `export`, optional `bundle`, optional `authorShare` | Destination bridge; imported page ID, local version and state |
@@ -201,7 +228,7 @@ protect against a compromised authority signing key or malicious trusted quorum.
 
 ## Storage and limits
 
-Federation uses schema 3. Its authority metadata and source revision floors share
+Federation uses schema 4. Its authority metadata and source revision floors share
 the ordinary quorum and compare-and-swap history. Foreign bundles use
 `/HyperNet/<network>/Federation/Foreign/`; author share envelopes use
 `/HyperNet/<network>/Federation/Share/`. Native and imported objects remain
@@ -221,7 +248,9 @@ Deleting or suppressing publication is not secure erasure from backups.
 
 Upgrade every broker before enabling Federation, extend its database role, and
 preserve its rollback floor. Native Pages and version-1/version-2 hosting retain
-their existing consent semantics. After schema 3 is written, older executables
+their existing consent semantics. Existing share records acquire generation zero;
+new grants must include `expectedGeneration`. Existing archived author signatures
+remain verifiable. After schema 4 is written, older executables
 are not a supported downgrade path. See Authority.md for new-network recovery
 when authoritative state or trust roots are lost.
 
@@ -241,6 +270,8 @@ The fixture uses synthetic identities and content, then removes its containers,
 networks and private files. It checks sharing, review, navigation, partition,
 recovery and withdrawal. Add `--expiry-only` to focus on actual host and bridge
 process termination, including processes deliberately stopped with a signal.
+Use `--withdrawal-only` to check reviewer loss, private pending retry, quorum
+loss, broker restart and rejection of a snapshot containing older positive grants.
 Public Internet qualification requires separately authorised external routing;
 the local fixture alone does not establish Internet or remote failure-domain
 coverage.
