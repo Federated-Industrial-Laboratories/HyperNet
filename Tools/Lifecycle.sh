@@ -25,3 +25,10 @@ podman() {
     # Detached container supervisors must not extend the lifecycle lock lifetime.
     command podman "$@" 9>&-
 }
+
+consent_lifetime() {
+    local expires=$1 now
+    now=$(date +%s)
+    [[ "$expires" =~ ^[0-9]+$ ]] && (( expires > now && expires-now <= 604800 )) || return 1
+    printf '%s\n' "$((expires-now))"
+}

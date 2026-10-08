@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
-use crate::{authority, page_authority, protocol::VerifiedRequest, types::*};
+use crate::{authority, federation_authority, page_authority, protocol::VerifiedRequest, types::*};
 use anyhow::{Context, Result, bail};
+use ed25519_dalek::SigningKey;
 use etcd_client::{
     Certificate, Client, Compare, CompareOp, ConnectOptions, GetOptions, Identity, TlsOptions, Txn,
     TxnOp,
@@ -13,6 +14,7 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use zeroize::Zeroize;
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -87,10 +89,36 @@ pub struct Store {
     floor: Floor,
     floor_path: PathBuf,
     _lock: File,
+    federation_signing_key: Option<SigningKey>,
 }
 
 impl Store {
     pub async fn connect(config: &AuthorityConfig) -> Result<Self> {
+        let federation_signing_key = config
+            .federation_signing_key
+            .as_ref()
+            .map(|path| -> Result<SigningKey> {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields, rename_all = "camelCase")]
+                struct Identity {
+                    secret_key: String,
+                    public_key: String,
+                }
+                let mut bytes = read_private(path, 4096)?;
+                let parsed = serde_json::from_slice::<Identity>(&bytes);
+                bytes.zeroize();
+                let mut identity = parsed.context("Invalid federation signing identity")?;
+                let parsed = crate::protocol::fixed_hex::<32>(&identity.secret_key);
+                identity.secret_key.zeroize();
+                let mut secret = parsed.map_err(anyhow::Error::msg)?;
+                let key = SigningKey::from_bytes(&secret);
+                secret.zeroize();
+                if hex::encode(key.verifying_key().as_bytes()) != identity.public_key {
+                    bail!("Federation signing identity mismatch");
+                }
+                Ok(key)
+            })
+            .transpose()?;
         crate::protocol::fixed_hex::<32>(&config.network).map_err(anyhow::Error::msg)?;
         if config.etcd_endpoints.len() < 3 || config.etcd_endpoints.len() > 7 {
             bail!("Configure three to seven authority voter endpoints");
@@ -176,6 +204,7 @@ impl Store {
             floor,
             floor_path,
             _lock: lock,
+            federation_signing_key,
         })
     }
 
@@ -205,6 +234,13 @@ impl Store {
     }
 
     pub async fn initialise(&mut self, admin: &str) -> Result<()> {
+        if self
+            .federation_signing_key
+            .as_ref()
+            .is_some_and(|key| hex::encode(key.verifying_key().as_bytes()) == admin)
+        {
+            bail!("Federation signing key must be separate from membership");
+        }
         let key = crate::protocol::fixed_hex::<32>(admin).map_err(anyhow::Error::msg)?;
         ed25519_dalek::VerifyingKey::from_bytes(&key)
             .context("Invalid initial administrator key")?;
@@ -251,7 +287,7 @@ impl Store {
             bail!("Authority state exceeds its size bound");
         }
         let state: State = serde_json::from_slice(kv.value())?;
-        if (state.version != 1 && state.version != 2) || state.network != self.network {
+        if !(1..=3).contains(&state.version) || state.network != self.network {
             bail!("Authority state identity is invalid");
         }
         let now = now()?;
@@ -292,6 +328,14 @@ impl Store {
             if state.network != self.network {
                 bail!("Authority network identity mismatch");
             }
+            if let Command::Invite { device_key, .. } = &request.request.command
+                && self
+                    .federation_signing_key
+                    .as_ref()
+                    .is_some_and(|key| hex::encode(key.verifying_key().as_bytes()) == *device_key)
+            {
+                return Ok(Reply::error("DedicatedAuthorityKeyRequired"));
+            }
             let mut operations = Vec::new();
             let reply = if page_authority::handles(&request.request.command) {
                 if let Err(code) = page_authority::preflight(&state, request, certificate, now) {
@@ -328,6 +372,61 @@ impl Store {
                     now,
                     header.revision(),
                     &blobs,
+                ) {
+                    Ok(change) => change,
+                    Err(code) => return Ok(Reply::error(code)),
+                };
+                for key in change.deletes {
+                    operations.push(TxnOp::delete(format!("{prefix}{key}"), None));
+                }
+                for (key, value) in change.puts {
+                    operations.push(TxnOp::put(format!("{prefix}{key}"), value, None));
+                }
+                change.reply
+            } else if federation_authority::handles(&request.request.command) {
+                if let Err(code) =
+                    federation_authority::preflight(&state, request, certificate, now)
+                {
+                    return Ok(Reply::error(code));
+                }
+                let wanted = match federation_authority::required_blobs(&state, request, now) {
+                    Ok(keys) => keys,
+                    Err(code) => return Ok(Reply::error(code)),
+                };
+                let prefix = format!("/HyperNet/{}/Federation/", self.network);
+                let mut blobs = std::collections::BTreeMap::new();
+                for key in wanted {
+                    let path = if let Some(native) = key.strip_prefix("Native/") {
+                        format!("/HyperNet/{}/Pages/{native}", self.network)
+                    } else {
+                        format!("{prefix}{key}")
+                    };
+                    let fetched = self
+                        .client
+                        .get(
+                            path,
+                            Some(GetOptions::new().with_revision(header.revision())),
+                        )
+                        .await?;
+                    let fetched_header = fetched
+                        .header()
+                        .context("Missing federation response header")?;
+                    self.accept_floor(fetched_header.cluster_id(), fetched_header.revision(), now)?;
+                    if let Some(value) = fetched.kvs().first() {
+                        if value.value().len() > federation_authority::MAX_BLOB {
+                            bail!("Federation object exceeds its bound");
+                        }
+                        blobs.insert(key, value.value().to_vec());
+                    }
+                }
+                let change = match federation_authority::apply(
+                    &mut state,
+                    request,
+                    certificate,
+                    now,
+                    header.revision(),
+                    &blobs,
+                    self.federation_signing_key.as_ref(),
                 ) {
                     Ok(change) => change,
                     Err(code) => return Ok(Reply::error(code)),

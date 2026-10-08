@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: MIT
 #[path = "Authority.rs"]
 mod authority;
+#[path = "Bridge.rs"]
+mod bridge;
 #[path = "Confinement.rs"]
 mod confinement;
+#[path = "FederationAuthority.rs"]
+mod federation_authority;
 #[path = "Host.rs"]
 mod host;
 #[path = "Markup.rs"]
@@ -51,6 +55,11 @@ enum Command {
     },
     /// Run a confined nonvoting host with signed local consent.
     Host {
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Run a consenting bridge between two independently administered networks.
+    Bridge {
         #[arg(long)]
         config: PathBuf,
     },
@@ -104,7 +113,7 @@ fn run() -> Result<()> {
         Command::Authority { config: path } => {
             let config = authority_config(&path)?;
             let tls = transport::tls_config(&config)?;
-            let reads = vec![
+            let mut reads = vec![
                 path,
                 config.certificate.clone(),
                 config.private_key.clone(),
@@ -113,6 +122,9 @@ fn run() -> Result<()> {
                 config.etcd_certificate.clone(),
                 config.etcd_key.clone(),
             ];
+            if let Some(path) = &config.federation_signing_key {
+                reads.push(path.clone());
+            }
             let mut ports = Vec::new();
             for endpoint in &config.etcd_endpoints {
                 let url = reqwest::Url::parse(endpoint)?;
@@ -148,6 +160,18 @@ fn run() -> Result<()> {
                 &config.connect_ports(),
             )?;
             runtime()?.block_on(host::run(config, profile))?;
+        }
+        Command::Bridge { config: path } => {
+            let config = bridge::load(&path)?;
+            let mut reads = config.read_paths();
+            reads.push(path);
+            let profile = confinement::enter(
+                &config.state_directory,
+                &reads,
+                &[],
+                &config.connect_ports(),
+            )?;
+            runtime()?.block_on(bridge::run(config, profile))?;
         }
         Command::CheckConfinement { state } => {
             let profile = confinement::enter(&state, &[], &[], &[])?;

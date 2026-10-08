@@ -65,8 +65,8 @@ initialise() {
     [[ "$gate_port" =~ ^[0-9]+$ && "$gate_port" -gt 0 && "$gate_port" -le 65535 ]] || fail 'Invalid authority port'
     jq --arg relay "$gate_address:$gate_port" '.relayAddress=$relay | .stateDirectory="/State" | .identity="/Config/Identity.json" | .caCertificate="/Config/Ca.pem" | .clientCertificate="/Config/Client.pem" | .clientKey="/Config/ClientKey.pem" | .consentFile="/Config/Consent.json"' \
         "$source/Host.json" > "$directory/Config/Host.json"
-    jq -n --arg listen "$gate_address:$gate_port" --arg destination "$destination" --arg source "$host_address" \
-        '{listen:$listen,destination:$destination,allowedSource:$source,bytesPerSecond:1048576,maximumConnections:16,maximumConnectionBytes:16777216}' > "$directory/Gate/Gate.json"
+    jq -n --arg listen "$gate_address:$gate_port" --arg destination "$destination" --arg source "$host_address" --argjson expires "$(jq -er '.expires' <<< "$consent")" \
+        '{listen:$listen,destination:$destination,allowedSource:$source,expires:$expires,bytesPerSecond:1048576,maximumConnections:16,maximumConnectionBytes:16777216}' > "$directory/Gate/Gate.json"
     bash "$(dirname "$0")/Seccomp.sh" "$directory/Seccomp.json"
     jq -n --arg name "$name" --arg image "$image" --arg network "$network" --arg egress "$egress" \
         --arg hostAddress "$host_address" --arg gateAddress "$gate_address" --argjson consent "$consent" \
@@ -109,13 +109,17 @@ start() {
     pids=$(jq -er '.consent.pids' "$control")
     quota=$(jq -er '.consent.cpuQuota' "$control")
     storage=$(jq -er '.consent.stateBytes' "$control")
-    podman run -d --name "${name}Gate" "${common[@]}" --memory=134217728 --memory-swap=134217728 \
+    lifetime=$(consent_lifetime "$(jq -er '.consent.expires' "$control")") || fail 'Consent expired during startup'
+    if ! podman run -d --name "${name}Gate" "${common[@]}" --timeout="$lifetime" --memory=134217728 --memory-swap=134217728 \
         --pids-limit=32 --cpu-period=100000 --cpu-quota=50000 \
         --tmpfs=/State:rw,noexec,nosuid,nodev,size=8388608,mode=0700 \
         --network="$network:ip=$gate_address" --network="$egress" \
         --volume="$directory/Gate:/Config:ro,nosuid,nodev,noexec" \
-        --entrypoint=/HyperNetGate "$image" /Config/Gate.json >/dev/null
-    if ! podman run -d --name "$name" "${common[@]}" --memory="$memory" --memory-swap="$memory" \
+        --entrypoint=/HyperNetGate "$image" /Config/Gate.json >/dev/null; then
+        stop; fail 'Relay start failed'
+    fi
+    lifetime=$(consent_lifetime "$(jq -er '.consent.expires' "$control")") || { stop; fail 'Consent expired during startup'; }
+    if ! podman run -d --name "$name" "${common[@]}" --timeout="$lifetime" --memory="$memory" --memory-swap="$memory" \
         --pids-limit="$pids" --cpu-period=100000 --cpu-quota="$quota" \
         --tmpfs="/State:rw,noexec,nosuid,nodev,size=$storage,mode=0700" \
         --network="$network:ip=$host_address" --volume="$directory/Config:/Config:ro,nosuid,nodev,noexec" \

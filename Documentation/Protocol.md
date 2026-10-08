@@ -57,9 +57,10 @@ An administrator can subsequently renew it with `Grant`. Same-device redemption
 retries do not resurrect revoked or expired membership. Device revocation is
 permanent; re-enrolment requires a new key.
 
-The grant mask uses bit 0 for membership, bit 1 for hosting and bit 2 for
-administration. Membership is required for every other grant. Unknown bits are
-rejected. An administrator cannot remove the final active administrator.
+The grant mask uses bit 0 for membership, bit 1 for hosting, bit 2 for
+administration and bit 3 for Federation service. Accepted masks are 1, 3, 5, 7
+and 9. Federation requires a separate member key with mask 9; it cannot combine
+with hosting or administration. An administrator cannot remove the final active administrator.
 `Grant` replaces the current mask and expiry; it does not add hidden privileges.
 
 `profile` is the SHA-256 digest of the exact local hosting consent document.
@@ -80,6 +81,11 @@ administration also denotes a service credential. Administrator credentials cann
 register hosting consent, and a consented credential cannot receive administration.
 An administrator without consent can retain the historical grant mask 7; that
 mask does not permit the key to become a host.
+
+A retained bridge-consent record has the same permanent service separation.
+Neither hosting nor bridge consent can be used to change between service roles.
+Federation commands and evidence use this request envelope, with the additional
+purpose-separated signatures and bilateral checks in [Federation.md](Federation.md).
 
 For Pages, `document` contains the unpadded base64url encoding of the exact signed
 version-2 consent file, including its JSON whitespace and final newline. Its

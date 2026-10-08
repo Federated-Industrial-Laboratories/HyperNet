@@ -143,6 +143,8 @@ class LifecycleTests(unittest.TestCase):
         value = {'name':name,'image':'sha256:'+'0'*64,'network':'Network','egress':'Egress',
                  'state':str(self.root/'State'),'publication':'127.0.0.1:8443:8443',
                  'hostAddress':'192.0.2.2','gateAddress':'192.0.2.3',
+                 'bridgeAddress':'192.0.2.2','sourceGateAddress':'192.0.2.3',
+                 'destinationGateAddress':'192.0.2.4','sourceEgress':'Source','destinationEgress':'Destination',
                  'consent':{'expires':int(time.time())+3600,'memoryBytes':67108864,
                     'pids':16,'cpuQuota':1000,'stateBytes':1048576}}
         (profile / 'Control.json').write_text(json.dumps(value))
@@ -168,6 +170,21 @@ class LifecycleTests(unittest.TestCase):
     def test_restart_cannot_resurrect_withdrawn_host(self):
         self.host_race('Restart')
 
+    def test_bridge_withdrawal_removes_both_relays_after_concurrent_restart(self):
+        profile = self.profile('Bridge')
+        containers = overlap(self.tools/'Bridge.sh', profile, 'BridgeDestinationGate',
+                             self.root/'Barrier', start='Restart')
+        self.assertTrue((profile/'Withdrawn').exists())
+        self.assertEqual(list(containers.iterdir()), [])
+        retry = Barrier(self.root/'Retry', '')
+        try:
+            process = retry.launch(self.tools/'Bridge.sh', 'Start', profile)
+            process.communicate(timeout=5)
+            self.assertNotEqual(process.returncode, 0)
+            self.assertEqual(list((retry.directory/'Containers').iterdir()), [])
+        finally:
+            retry.finish()
+
     def test_authority_stop_orders_after_concurrent_start(self):
         profile = self.profile('Authority')
         containers = overlap(self.tools/'Authority.sh', profile, 'Authority', self.root/'Barrier', finish='Stop')
@@ -175,7 +192,7 @@ class LifecycleTests(unittest.TestCase):
 
     def test_initialisation_uses_a_persistent_lock_before_profile_exists(self):
         import fcntl
-        for tool in ['Host.sh', 'Authority.sh']:
+        for tool in ['Host.sh', 'Authority.sh', 'Bridge.sh']:
             profile = self.root / tool.removesuffix('.sh')
             lock_directory = Path(str(profile)+'Lifecycle')
             lock_directory.mkdir(mode=0o700)

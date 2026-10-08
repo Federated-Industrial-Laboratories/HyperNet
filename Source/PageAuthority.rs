@@ -39,10 +39,13 @@ pub fn handles(command: &Command) -> bool {
     )
 }
 
-fn client(state: &State, key: &str, now: u64) -> Result<(), &'static str> {
+pub(crate) fn client(state: &State, key: &str, now: u64) -> Result<(), &'static str> {
     authority::require(state, key, MEMBER, now)?;
     let member = state.members.get(key).ok_or("NotMember")?;
-    if state.consents.contains_key(key) || (member.grants & HOST != 0 && member.grants & ADMIN == 0)
+    if state.consents.contains_key(key)
+        || state.bridge_consents.contains_key(key)
+        || member.grants & FEDERATION != 0
+        || (member.grants & HOST != 0 && member.grants & ADMIN == 0)
     {
         return Err("SeparateClientIdentityRequired");
     }
@@ -96,7 +99,7 @@ fn scope_contains(scope: &host::Consent, namespace: &str) -> bool {
         .is_some_and(|namespaces| namespaces.iter().any(|entry| entry == namespace))
 }
 
-fn published<'a>(
+pub(crate) fn published<'a>(
     state: &'a State,
     page_id: &str,
     now: u64,
@@ -127,7 +130,7 @@ pub fn preflight(
     certificate: Option<&str>,
     now: u64,
 ) -> Result<(), &'static str> {
-    if state.version != 1 && state.version != 2 {
+    if !(1..=3).contains(&state.version) {
         return Err("UnsupportedState");
     }
     if state.high_water_time > now.saturating_add(2) {
@@ -186,7 +189,7 @@ pub fn preflight(
 fn quarantine_key(page_id: &str, revision: u64) -> String {
     format!("Quarantine/{page_id}/{revision}")
 }
-fn publication_key(descriptor: &PageDescriptor) -> String {
+pub(crate) fn publication_key(descriptor: &PageDescriptor) -> String {
     format!(
         "Published/{}/{}",
         descriptor.page_id, descriptor.publication_version
@@ -860,7 +863,7 @@ pub fn apply(
     if policy_changed {
         state.epoch = state.epoch.checked_add(1).ok_or("CapacityExceeded")?;
     }
-    state.version = 2;
+    state.version = state.version.max(2);
     state.high_water_time = state.high_water_time.max(now);
     let reply = Reply::success(state.epoch, result);
     encoded(&reply, 256 * 1024)?;

@@ -29,6 +29,10 @@ initialise() {
     for name in Authority.json AuthorityCertificate.pem AuthorityKey.pem HostingCa.pem VoterCa.pem BrokerCertificate.pem BrokerKey.pem; do
         [[ -f "$source/$name" && ! -L "$source/$name" ]] || fail 'Configuration contains a missing or symbolic file'
     done
+    signing=$(jq -r '.federationSigningKey // empty' "$source/Authority.json")
+    if [[ -n "$signing" ]]; then
+        [[ -f "$source/FederationSigningKey.json" && ! -L "$source/FederationSigningKey.json" ]] || fail 'Federation requires its separate signing identity file'
+    fi
     [[ -f "$state/AuthorityFloor.json" && ! -L "$state/AuthorityFloor.json" && $(stat -c %h "$state/AuthorityFloor.json") == 1 ]] || fail 'A private initialised rollback floor is required'
     for file in "$state"/* "$state"/.[!.]* "$state"/..?*; do
         [[ -e "$file" || -L "$file" ]] || continue
@@ -45,7 +49,10 @@ initialise() {
     for name in AuthorityCertificate.pem AuthorityKey.pem HostingCa.pem VoterCa.pem BrokerCertificate.pem BrokerKey.pem; do
         install -m 0400 "$source/$name" "$directory/Config/$name"
     done
-    jq '.stateDirectory="/State" | .certificate="/Config/AuthorityCertificate.pem" | .privateKey="/Config/AuthorityKey.pem" | .clientCa="/Config/HostingCa.pem" | .etcdCa="/Config/VoterCa.pem" | .etcdCertificate="/Config/BrokerCertificate.pem" | .etcdKey="/Config/BrokerKey.pem"' \
+    if [[ -n "$signing" ]]; then
+        install -m 0400 "$source/FederationSigningKey.json" "$directory/Config/FederationSigningKey.json"
+    fi
+    jq '.stateDirectory="/State" | .certificate="/Config/AuthorityCertificate.pem" | .privateKey="/Config/AuthorityKey.pem" | .clientCa="/Config/HostingCa.pem" | .etcdCa="/Config/VoterCa.pem" | .etcdCertificate="/Config/BrokerCertificate.pem" | .etcdKey="/Config/BrokerKey.pem" | if .federationSigningKey != null then .federationSigningKey="/Config/FederationSigningKey.json" else . end' \
         "$source/Authority.json" > "$directory/Config/Authority.json"
     chmod 0400 "$directory/Config/Authority.json"
     bash "$(dirname "$0")/Seccomp.sh" "$directory/Seccomp.json"

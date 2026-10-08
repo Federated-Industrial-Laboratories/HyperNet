@@ -29,6 +29,7 @@ TLS for peers and clients, and `--tls-min-version=TLS1.3`. Restrict peer ingress
 to the registered voters and client ingress to the authority brokers. Use etcd
 authentication and grant each broker identity read/write permission only on
 `/HyperNet/<network>/Authority` and the prefix `/HyperNet/<network>/Pages/`.
+Federation also requires read/write access to `/HyperNet/<network>/Federation/`.
 Keep the root administrative credential outside
 the broker container. The broker also checks the cluster's registered voting
 membership; three, five or seven voters are accepted. Learners do not count.
@@ -95,6 +96,18 @@ Prepare a configuration directory containing `Authority.json`,
 `BrokerCertificate.pem` and `BrokerKey.pem`. Only those named files are copied.
 Keep CA private keys and etcd root-administrator credentials outside that
 directory and outside the broker.
+
+Federation requires a separate online Ed25519 signing identity. Add
+`"federationSigningKey": "/Config/FederationSigningKey.json"` to `Authority.json`
+and place `FederationSigningKey.json` in the configuration directory. Its private
+JSON format is `{"secretKey":"32-byte lowercase hex","publicKey":"32-byte lowercase hex"}`.
+The installer copies that exact named file and rewrites its container path.
+For direct network initialisation, use the actual host-side path instead.
+The key must never be an administrator, member, hosting or bridge identity.
+Publish its public key through an independently authenticated channel for treaty
+verification. Every broker serving a treaty must use the treaty's pinned local
+signer. Protect this key as authority material; compromise permits false local
+attestations. It is not a CA key and cannot mint transport certificates.
 
 The state directory must already contain its initialised `AuthorityFloor.json`
 and, optionally, `Authority.lock`. `Initialise` assigns this dedicated directory
@@ -179,6 +192,13 @@ a service identity. These checks prevent a host from reading outside its signed
 namespace scope through the ordinary reader API. An unconsented administrator
 can manage Pages with the initial permission mask; it cannot register hosting
 consent until administration is removed.
+
+Federation bridges have a separate permission bit and dual-signed consent.
+Invite each side with grant mask 9, using two distinct service keys. A bridge
+cannot become an ordinary replica or an administrator, and cannot read native
+Pages through client commands. Retained bridge consent preserves that separation
+after withdrawal or grant removal. See [Federation.md](Federation.md) for the
+bilateral treaty, author opt-in and independent destination approval procedures.
 
 Use `Grant` to replace a device's grant mask and expiry. Use `Revoke` to remove
 its membership permanently. Re-enrolment uses a new device key. The final active
@@ -282,12 +302,14 @@ the service immune to denial of service. Deployment ingress and voter storage
 quotas remain necessary. Logs contain readiness and static operational failures,
 not invitation secrets or request bodies. There is no third-party telemetry.
 
-The request wire protocol remains version 1. Brokers accept state schemas 1 and
-2; the first successful Pages command or version-2 consent registration writes
-schema 2. Page metadata and replica tickets default to empty when loading schema
-1. Upgrade every broker and extend its etcd role to the Pages prefix before
-exposing Pages or version-2 hosting consent. Older executables cannot read the
-new state and must not be reintroduced after that migration. Do not delete page
+The request wire protocol remains version 1. Brokers accept state schemas 1, 2
+and 3. Pages and version-2 consent use at least schema 2; a successful Federation
+command writes schema 3. Missing feature maps default to empty for earlier
+schemas. Later Pages and hosting operations preserve schema 3. Upgrade every
+broker and extend its etcd role to the required Pages and Federation prefixes
+before enabling those features. Configure the dedicated Federation signer on
+each broker serving bilateral agreements. Older executables cannot read the new
+state and must not be reintroduced after that migration. Do not delete feature
 fields, reset the version or restore an older snapshot to attempt a downgrade.
 
 Before upgrading, migrate any administrator key previously used for hosting to
