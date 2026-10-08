@@ -23,7 +23,7 @@ import time
 
 
 class Workflow:
-    def __init__(self, args, slot=0, federation=False):
+    def __init__(self, args, slot=0, federation=False, mail=False):
         self.args = args
         self.root = Path(tempfile.mkdtemp(prefix='HyperNetQualification'))
         self.network = secrets.token_hex(32)
@@ -44,6 +44,7 @@ class Workflow:
         self.store_port = 23790 + slot * 10
         self.broker_port = 28443 + slot
         self.federation = federation
+        self.mail = mail
         self.endpoint = f'https://localhost:{self.broker_port}'
         self.broker = self.prefix + 'Broker'
 
@@ -178,12 +179,20 @@ class Workflow:
             signer = configdir/'FederationSigningKey.json'
             self.signer = json.loads(self.run(self.suite,'keygen','--output',signer).stdout)['publicKey']
             config['federationSigningKey'] = str(signer)
+        if self.mail:
+            signer = configdir/'MailSigningKey.json'
+            self.mail_signer = json.loads(self.run(self.suite,'keygen','--output',signer).stdout)['publicKey']
+            config['mailSigningKey'] = str(signer)
+            with (configdir/'HostCa.pem').open('ab') as bundle:
+                bundle.write((self.pki/'NetworkCa.pem').read_bytes())
         self.write(directory/'Bootstrap.json',config)
         self.run(self.node,'initialise','--config',directory/'Bootstrap.json','--admin-key',self.admin)
         config['stateDirectory']='/State'
         config['etcdEndpoints']=[f'https://{self.subnet}.{10+i}:2379' for i in range(1,4)]
         if self.federation:
             config['federationSigningKey']='/Config/FederationSigningKey.json'
+        if self.mail:
+            config['mailSigningKey']='/Config/MailSigningKey.json'
         for field in ['certificate','privateKey','clientCa','etcdCa','etcdCertificate','etcdKey']:
             config[field]='/Config/'+Path(config[field]).name
         self.write(configdir/'Authority.json',config)
@@ -191,6 +200,8 @@ class Workflow:
                                    ('HostCa.pem','HostingCa.pem'),('StoreCa.pem','VoterCa.pem'),
                                    ('BrokerStore.pem','BrokerCertificate.pem'),('BrokerStoreKey.pem','BrokerKey.pem')]:
             shutil.copy2(self.pki/origin,configdir/destination)
+        if self.mail:
+            shutil.copy2(configdir/'HostCa.pem',configdir/'HostingCa.pem')
         self.authority_profile=self.root/'AuthorityProfile'
         self.run('bash',self.authority_tool,'Initialise',self.authority_profile,configdir,statedir,
                  self.args.image,self.prefix,f'127.0.0.1:{self.broker_port}:8443',timeout=60)
@@ -348,6 +359,21 @@ class Workflow:
             if self.call('Member','status',good=False).returncode==0:break
             time.sleep(0.2)
         self.check('authority restart preserves membership and consent',self.call('Member','heartbeat','--profile',self.profile)['ok'])
+        # Endpoint order is configured independently of elected leadership. Losing
+        # the first channel must not leave later requests on a random dead voter.
+        first=self.prefix+'Voter1'
+        self.run('podman','stop','--time','3',first,timeout=15)
+        survivors=','.join(f'https://127.0.0.1:{self.store_port+i}' for i in (2,3))
+        for _ in range(20):
+            if self.authctl('endpoint','health',endpoints=survivors,good=False).returncode==0:break
+            time.sleep(0.2)
+        for _ in range(6):
+            self.check('configured voter loss preserves fresh reads',self.call('Member','status')['ok'])
+            self.check('configured voter loss preserves committed mutations',self.call('Administrator','grant','--device-key',self.member,'--grants','3','--expires',expiry)['ok'])
+        self.run('podman','start',first,timeout=30)
+        for _ in range(20):
+            if self.authctl('endpoint','health',good=False).returncode==0:break
+            time.sleep(0.2)
         statuses=json.loads(self.authctl('endpoint','status','--write-out=json').stdout)
         leader=next(item['Status']['header']['member_id'] for item in statuses if item['Status']['leader']==item['Status']['header']['member_id'])
         number=next(i+1 for i,item in enumerate(statuses) if item['Status']['header']['member_id']==leader)

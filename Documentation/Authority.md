@@ -304,16 +304,35 @@ the service immune to denial of service. Deployment ingress and voter storage
 quotas remain necessary. Logs contain readiness and static operational failures,
 not invitation secrets or request bodies. There is no third-party telemetry.
 
-The request wire protocol remains version 1. Brokers accept state schemas 1, 2
-and 4, including earlier schema 3. Pages and version-2 consent use at least schema
-2; a successful Federation command writes schema 4, which retains monotonic author
-sharing generations and withdrawal tombstones. Missing feature maps default to
-empty for earlier schemas. Later Pages and hosting operations preserve schema 4. Upgrade every
-broker and extend its etcd role to the required Pages and Federation prefixes
-before enabling those features. Configure the dedicated Federation signer on
-each broker serving bilateral agreements. Older executables cannot read the new
-state and must not be reintroduced after that migration. Do not delete feature
-fields, reset the version or restore an older snapshot to attempt a downgrade.
+The request wire protocol remains version 1. Version 0.4.0 brokers accept state
+schemas 1 through 5. Pages and version-2 consent use at least schema 2; successful
+Federation commands use at least schema 4, retaining monotonic author sharing
+generations and withdrawal tombstones. Missing feature maps default to empty
+for earlier schemas. Mail introduces schema 5. Every successful normal mail
+command writes schema 5, including MailHosts and MailAddressGet directory reads.
+MailAuthorise and MailPolicySync are separate read-only paths. Later Pages,
+Federation and hosting operations preserve the newer schema.
+
+Upgrade every authority broker to version 0.4.0 or a subsequently qualified
+compatible release before permitting the first successful mail command. This
+includes brokers serving only existing Pages or Federation traffic: they share
+the authority state and version 0.3.1 cannot read schema 5. Do not use MailHosts
+as an early rollout probe while older brokers are running. First update all
+brokers with their existing private rollback floors, check ordinary membership
+and existing services, then provision the separate mail signer and enable mail.
+Configure the same pinned mail authority signer on each broker serving that
+network, separately from the Federation signer and all member/mail identities.
+[Mail store operation](MailStore.md) describes the private signer file and host
+transport trust provisioning. Mail metadata uses the existing exact authority
+RBAC key; it requires no ciphertext or inbox prefix.
+
+Extend broker etcd roles to the required Pages and Federation prefixes before
+enabling those respective features, and configure the dedicated Federation signer
+on each broker serving bilateral agreements. Once schema 5 has been committed,
+disabling mail or removing its signer does not restore compatibility with older
+executables. Roll forward with a compatible binary. Never delete feature fields,
+reset the schema version or restore an older snapshot to attempt a downgrade;
+these actions discard security history and conflict with durable rollback floors.
 
 Before upgrading, migrate any administrator key previously used for hosting to
 a separate administrator identity without a consent history. Create and verify
@@ -334,3 +353,19 @@ References: [etcd security model](https://etcd.io/docs/v3.6/op-guide/security/),
 [etcd runtime reconfiguration](https://etcd.io/docs/v3.6/op-guide/runtime-configuration/),
 [etcd disaster recovery](https://etcd.io/docs/v3.6/op-guide/recovery/),
 and [etcd-client API](https://docs.rs/etcd-client/0.20.0/etcd_client/).
+
+## Voter transport failover
+
+Each configured voter has an independent authenticated channel. A failed RPC
+moves to the next configured endpoint with the same verified request, bounded
+by two seconds per attempt and seven seconds overall. Surviving endpoint reads
+remain linearizable and every response retains cluster, revision and time-floor
+checks. A lost transaction response is resolved through the existing durable
+request receipt or the command's explicit idempotency rules. Application errors,
+rollback evidence and invalid state do not trigger transport fallback. Startup
+membership and health also try configured alternate endpoints. This supplies
+transport failover, not a substitute for quorum or an automatic broker failover.
+
+Private mail optionally uses an independent `mailSigningKey` and public metadata
+in the authority key. [Mail store operation](MailStore.md) describes provisioning;
+message ciphertext and local delivery receipts never enter authority storage.

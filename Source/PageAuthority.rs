@@ -44,6 +44,7 @@ pub(crate) fn client(state: &State, key: &str, now: u64) -> Result<(), &'static 
     let member = state.members.get(key).ok_or("NotMember")?;
     if state.consents.contains_key(key)
         || state.bridge_consents.contains_key(key)
+        || state.mail.hosts.contains_key(key)
         || member.grants & FEDERATION != 0
         || (member.grants & HOST != 0 && member.grants & ADMIN == 0)
     {
@@ -130,7 +131,7 @@ pub fn preflight(
     certificate: Option<&str>,
     now: u64,
 ) -> Result<(), &'static str> {
-    if !(1..=4).contains(&state.version) {
+    if !(1..=5).contains(&state.version) {
         return Err("UnsupportedState");
     }
     if state.high_water_time > now.saturating_add(2) {

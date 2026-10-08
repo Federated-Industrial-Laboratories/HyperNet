@@ -241,3 +241,7 @@ A pending result contains `state`, `ticketId` and `expires`. A ready result cont
 Only the ticket owner can receive it. No origin fallback occurs when a selected
 replica is unavailable. An expired ticket requires a new request. A historical
 approval, a cached file or a previous inventory never authorizes stale delivery.
+
+Mail authority commands and the separate store endpoint are specified in
+[Mail protocol](MailProtocol.md). Mail-only children are not general members;
+private store admission is read-only and never enters authority receipts.
