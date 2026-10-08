@@ -1,0 +1,152 @@
+[
+  {
+    "name": "Blocks",
+    "body": "HyperNetPage/1\n# Board\n## News\n: Welcome, caf\u00e9 \u4e16\u754c.\n- First item\n> A quotation\n| printf example\n=> https://example.com/ Reference\n\n### Details\n: Text remains text.\n",
+    "valid": true
+  },
+  {
+    "name": "InternalLink",
+    "body": "HyperNetPage/1\n# Board\n=> hypernet://0101010101010101010101010101010101010101010101010101010101010101/0202020202020202020202020202020202020202020202020202020202020202/Board/03030303030303030303030303030303 Follow\n",
+    "valid": true
+  },
+  {
+    "name": "LiteralMarkup",
+    "body": "HyperNetPage/1\n# Board\n| <script>text only</script>\n",
+    "valid": true
+  },
+  {
+    "name": "Combining",
+    "body": "HyperNetPage/1\n# Board\n: cafe\u0301\n",
+    "valid": true
+  },
+  {
+    "name": "MissingHeader",
+    "body": "# Board\n: Body\n",
+    "valid": false
+  },
+  {
+    "name": "WrongProfile",
+    "body": "HyperNetPage/2\n# Board\n## News\n: Welcome, caf\u00e9 \u4e16\u754c.\n- First item\n> A quotation\n| printf example\n=> https://example.com/ Reference\n\n### Details\n: Text remains text.\n",
+    "valid": false
+  },
+  {
+    "name": "MissingTitle",
+    "body": "HyperNetPage/1\n: text\n",
+    "valid": false
+  },
+  {
+    "name": "UnknownConstruct",
+    "body": "HyperNetPage/1\n# Board\n<script>run</script>\n",
+    "valid": false
+  },
+  {
+    "name": "ScriptLink",
+    "body": "HyperNetPage/1\n# Board\n=> javascript:alert(1) Bad\n",
+    "valid": false
+  },
+  {
+    "name": "FileLink",
+    "body": "HyperNetPage/1\n# Board\n=> file:///etc/passwd Bad\n",
+    "valid": false
+  },
+  {
+    "name": "HttpLink",
+    "body": "HyperNetPage/1\n# Board\n=> http://example.com/ Bad\n",
+    "valid": false
+  },
+  {
+    "name": "CredentialLink",
+    "body": "HyperNetPage/1\n# Board\n=> https://user@example.com/ Bad\n",
+    "valid": false
+  },
+  {
+    "name": "NoncanonicalUrl",
+    "body": "HyperNetPage/1\n# Board\n=> https://EXAMPLE.com/ Bad\n",
+    "valid": false
+  },
+  {
+    "name": "BadNamespace",
+    "body": "HyperNetPage/1\n# Board\n=> hypernet://0101010101010101010101010101010101010101010101010101010101010101/0202020202020202020202020202020202020202020202020202020202020202/bad-name/03030303030303030303030303030303 Bad\n",
+    "valid": false
+  },
+  {
+    "name": "UnknownImage",
+    "body": "HyperNetPage/1\n# Board\n! Image\n",
+    "valid": false
+  },
+  {
+    "name": "CarriageReturn",
+    "body": "HyperNetPage/1\r\n# Board\r\n## News\r\n: Welcome, caf\u00e9 \u4e16\u754c.\r\n- First item\r\n> A quotation\r\n| printf example\r\n=> https://example.com/ Reference\r\n\r\n### Details\r\n: Text remains text.\r\n",
+    "valid": false
+  },
+  {
+    "name": "MissingFinalNewline",
+    "body": "HyperNetPage/1\n# Board\n## News\n: Welcome, caf\u00e9 \u4e16\u754c.\n- First item\n> A quotation\n| printf example\n=> https://example.com/ Reference\n\n### Details\n: Text remains text.",
+    "valid": false
+  },
+  {
+    "name": "EmptyParagraph",
+    "body": "HyperNetPage/1\n# Board\n: \n",
+    "valid": false
+  },
+  {
+    "name": "EmptyLinkLabel",
+    "body": "HyperNetPage/1\n# Board\n=> https://example.com/ \n",
+    "valid": false
+  },
+  {
+    "name": "SecondTitle",
+    "body": "HyperNetPage/1\n# Board\n# Another\n",
+    "valid": false
+  },
+  {
+    "name": "Escape",
+    "body": "HyperNetPage/1\n# Board\n: Before\u001bAfter\n",
+    "valid": false
+  },
+  {
+    "name": "Bell",
+    "body": "HyperNetPage/1\n# Board\n: Before\u0007After\n",
+    "valid": false
+  },
+  {
+    "name": "C1",
+    "body": "HyperNetPage/1\n# Board\n: Before\u009bAfter\n",
+    "valid": false
+  },
+  {
+    "name": "Bidi",
+    "body": "HyperNetPage/1\n# Board\n: Before\u202eAfter\n",
+    "valid": false
+  },
+  {
+    "name": "Isolate",
+    "body": "HyperNetPage/1\n# Board\n: Before\u2066After\n",
+    "valid": false
+  },
+  {
+    "name": "Bom",
+    "body": "HyperNetPage/1\n# Board\n: Before\ufeffAfter\n",
+    "valid": false
+  },
+  {
+    "name": "LineSeparator",
+    "body": "HyperNetPage/1\n# Board\n: Before\u2028After\n",
+    "valid": false
+  },
+  {
+    "name": "Noncharacter",
+    "body": "HyperNetPage/1\n# Board\n: Before\uffffAfter\n",
+    "valid": false
+  },
+  {
+    "name": "Tag",
+    "body": "HyperNetPage/1\n# Board\n: Before\udb40\udc67After\n",
+    "valid": false
+  },
+  {
+    "name": "Tab",
+    "body": "HyperNetPage/1\n# Board\n: Before\tAfter\n",
+    "valid": false
+  }
+]

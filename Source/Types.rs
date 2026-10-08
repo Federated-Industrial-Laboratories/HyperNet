@@ -7,12 +7,12 @@ pub const MEMBER: u64 = 1;
 pub const HOST: u64 = 2;
 pub const ADMIN: u64 = 4;
 pub const ALL: u64 = MEMBER | HOST | ADMIN;
-pub const MAX_PAYLOAD: usize = 16 * 1024;
-pub const MAX_ENVELOPE: usize = 24 * 1024;
+pub const MAX_PAYLOAD: usize = 64 * 1024;
+pub const MAX_ENVELOPE: usize = 96 * 1024;
 pub const MAX_STATE: usize = 1024 * 1024;
 pub const DOMAIN: &[u8] = b"HyperNet/Request/1\0";
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Envelope {
     pub network: String,
@@ -21,7 +21,7 @@ pub struct Envelope {
     pub signature: String,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Request {
     pub version: u32,
@@ -30,8 +30,8 @@ pub struct Request {
     pub command: Command,
 }
 
-#[derive(Deserialize, Serialize)]
-#[serde(tag = "type", deny_unknown_fields)]
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(tag = "type", deny_unknown_fields, rename_all_fields = "camelCase")]
 pub enum Command {
     Status {
         #[serde(rename = "deviceKey")]
@@ -62,10 +62,69 @@ pub enum Command {
         grants: u64,
         expires: u64,
         certificate: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        document: Option<String>,
     },
     Withdraw,
     Heartbeat {
         profile: String,
+    },
+    PageSubmit {
+        page_id: String,
+        expected_version: u64,
+        namespace: String,
+        audience: String,
+        profile: String,
+        digest: String,
+        body: String,
+    },
+    PageQueue {
+        namespace: Option<String>,
+        after: Option<String>,
+    },
+    PageInspect {
+        page_id: String,
+    },
+    PageReview {
+        page_id: String,
+        expected_version: u64,
+        revision: u64,
+        digest: String,
+        profile: String,
+        author: String,
+        namespace: String,
+        audience: String,
+        submission_digest: String,
+        decision: String,
+    },
+    PageWithdraw {
+        page_id: String,
+        expected_version: u64,
+    },
+    PageList {
+        namespace: Option<String>,
+        after: Option<String>,
+    },
+    PageRead {
+        page_id: String,
+    },
+    PageSync {
+        profile: String,
+        known_inventory: Option<String>,
+        fetch: Option<String>,
+    },
+    PageReplicaRequest {
+        page_id: String,
+        replica_device_key: String,
+        publication_version: u64,
+    },
+    PageReplicaResult {
+        ticket_id: String,
+    },
+    ReplicaDeliver {
+        profile: String,
+        ticket_id: String,
+        bundle: PageBundle,
     },
 }
 
@@ -124,6 +183,89 @@ pub struct Consent {
     pub expires: u64,
     pub certificate: String,
     pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PageDescriptor {
+    pub page_id: String,
+    pub publication_version: u64,
+    pub revision: u64,
+    pub author: String,
+    pub reviewer: String,
+    pub namespace: String,
+    pub audience: String,
+    pub profile: String,
+    pub digest: String,
+    pub submission_digest: String,
+    pub approval_digest: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PageBundle {
+    pub submission: Envelope,
+    pub approval: Envelope,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PendingPage {
+    pub revision: u64,
+    pub digest: String,
+    pub profile: String,
+    pub audience: String,
+    pub submission_digest: String,
+    pub bytes: u64,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PublishedPage {
+    pub descriptor: PageDescriptor,
+    pub bytes: u64,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PageRecord {
+    pub version: u64,
+    pub author: String,
+    pub namespace: String,
+    pub pending: Option<PendingPage>,
+    pub published: Option<PublishedPage>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ReplicaTicket {
+    pub ticket_id: String,
+    pub descriptor: PageDescriptor,
+    pub expires: u64,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TicketRecord {
+    pub ticket: ReplicaTicket,
+    pub reader: String,
+    pub host: String,
+    pub host_profile: String,
+    pub delivered: bool,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PageSyncResult {
+    pub profile: String,
+    pub authority_revision: u64,
+    pub valid_until: u64,
+    pub inventory_digest: String,
+    pub entries: Option<Vec<PageDescriptor>>,
+    pub bundle: Option<PageBundle>,
+    pub requests: Vec<ReplicaTicket>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -145,6 +287,10 @@ pub struct State {
     pub invitations: BTreeMap<String, Invitation>,
     pub consents: BTreeMap<String, Consent>,
     pub receipts: BTreeMap<String, Receipt>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pages: BTreeMap<String, PageRecord>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub replica_tickets: BTreeMap<String, TicketRecord>,
 }
 
 impl State {
@@ -165,6 +311,8 @@ impl State {
             invitations: BTreeMap::new(),
             consents: BTreeMap::new(),
             receipts: BTreeMap::new(),
+            pages: BTreeMap::new(),
+            replica_tickets: BTreeMap::new(),
         }
     }
 }

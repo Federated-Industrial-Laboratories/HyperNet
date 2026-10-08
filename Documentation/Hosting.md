@@ -5,9 +5,10 @@ device identity, a client transport certificate and a signed local consent
 document. Hosting requires both local consent and a current authority lease.
 Network administration cannot enlarge the signed local permissions or resources.
 
-The current host maintains membership and hosting readiness. It does not yet
-store pages, mail or transferred files. Its writable state is bounded tmpfs and
-is recreated on restart. Authority storage has a separate durable deployment;
+Version 1 host consent enables membership and hosting readiness only. Version 2
+can additionally enable approved Pages replication in selected namespaces.
+Neither profile stores mail or transferred files. Writable state is bounded
+tmpfs and is recreated on restart. Authority storage has a separate durable deployment;
 see [Authority.md](Authority.md).
 
 ## Required Linux profile
@@ -55,7 +56,8 @@ machine isolation.
 
 The document has exactly two fields, `payload` and `signature`. `payload` contains
 unpadded base64url UTF-8 JSON. An Ed25519 signature covers the ASCII bytes
-`HyperNet/Consent/1`, a zero byte, then those exact decoded payload bytes. The
+`HyperNet/Consent/1` for version 1 or `HyperNet/Consent/2` for version 2,
+a zero byte, then those exact decoded payload bytes. The
 profile identifier is SHA-256 of the complete document file, including any
 trailing newline. Do not reformat a document after registering its profile.
 
@@ -63,7 +65,7 @@ The payload fields are:
 
 | Field | Meaning |
 | --- | --- |
-| `version` | Integer 1 |
+| `version` | Integer 1 for readiness only, or integer 2 for Pages |
 | `network`, `deviceKey` | Lowercase hexadecimal network and signing-key identities |
 | `grants` | Integer 2, hosting only |
 | `expires` | Unix seconds, within seven days of signing/activation |
@@ -74,13 +76,28 @@ The payload fields are:
 | `authorityEndpoint` | HTTPS DNS endpoint at the root path, without user information, query or fragment |
 | `authorityAddress` | Literal IP address and port for the fixed relay destination |
 
+Version 2 requires three additional fields. Version 1 rejects these fields,
+including explicit null values; upgrading a program cannot enable Pages for an
+existing version 1 consent document.
+
+| Field | Meaning |
+| --- | --- |
+| `services` | Exactly `["Pages"]` |
+| `namespaces` | One through 16 distinct, case-sensitive namespace labels |
+| `pageCacheBytes` | At least 64 KiB and no more than `stateBytes` minus 256 KiB |
+
+A namespace begins with an ASCII letter, contains only ASCII letters and digits,
+and has at most 32 bytes. Wildcards, prefixes and implicit child namespaces are
+not supported. The 256 KiB reserve leaves room for status, directory entries and
+protocol state. The complete tmpfs remains subject to `stateBytes`.
+
 The endpoint URL port and destination port must agree. IPv6 literal destinations
 use `[address]:port`. The isolated host-to-relay network currently uses IPv4.
 Host resource limits are checked against the signature after their effective
 cgroup values are read. The writable filesystem must be tmpfs with a capacity
 no greater than `stateBytes`.
 
-Consent version 1 also selects a separate fixed relay allowance: 128 MiB memory,
+Both consent versions also select a separate fixed relay allowance: 128 MiB memory,
 32 PIDs, half a CPU, 8 MiB tmpfs, 16 simultaneous connections and an aggregate
 1 MiB/s byte rate in both directions, with an initial 8 KiB scheduling quantum.
 Each direction of a connection is limited to 16 MiB. Idle reads expire after ten
@@ -93,6 +110,85 @@ Use the independent HyperNetSuite `host-consent` command to sign the document,
 then register its exact profile and client leaf-certificate digest using the
 authority `Consent` command. Membership needs the hosting grant before consent
 can be registered. Consent does not create membership or an administrative role.
+Register the base64url encoding of the complete consent document bytes in the
+command's `document` field to enable Pages remotely. Its hash must match
+`profile`; its signature, service, namespace and resource limits are checked.
+Use a separate hosting identity: an administrative identity cannot register
+hosting consent, and a credential with retained hosting consent cannot perform
+ordinary Pages or administration operations.
+
+Add all three service fields to the resource specification to select version 2:
+
+```json
+{
+  "services": ["Pages"],
+  "namespaces": ["Public", "Manual"],
+  "pageCacheBytes": 524288
+}
+```
+
+The fields belong inside the existing specification object. Omitting all three
+retains version 1; providing only some is an error. Sign and register with the
+separate hosting device configuration:
+
+```sh
+HyperNetSuite --config Device/Profile.json host-consent \
+  --spec Specification.json --output Consent.json
+HyperNetSuite --config Device/Profile.json consent --profile PROFILE_HEX \
+  --grants 2 --expires EXPIRY_UNIX --certificate CERTIFICATE_SHA256 \
+  --document Consent.json
+```
+
+`PROFILE_HEX` is the exact document digest printed by `host-consent`;
+`EXPIRY_UNIX` must match the signed expiry. `CERTIFICATE_SHA256` is the digest of
+the DER-encoded hosting client certificate.
+
+## Approved Pages replication
+
+The host uses its existing outbound TLS connection through the fixed relay. It
+opens no inbound listener and receives no authority database credentials.
+Version 1 profiles never request page inventory or content. Version 2 profiles
+receive only current approved publications in their explicit namespaces.
+
+`PageSync` supplies a scoped inventory and, when requested, one approved bundle.
+Inventory is limited to 256 descriptors; responses are limited to 256 KiB.
+A bundle contains the exact signed submission and approval requests. Before
+storage, the host verifies both signatures, the network, author, reviewer,
+namespace, grammar profile, publication revision and exact content digest.
+The deterministic grammar validator also checks the original body. Quarantined
+submissions and rejected content do not enter this path.
+
+The cache holds at most 256 bundles under `/State/Pages`. Each file name derives
+from a SHA-256 digest of its complete stored descriptor and bundle. Admission
+counts the complete file rounded to the host allocation page size against
+`pageCacheBytes`. Old entries are removed before a new file is staged and
+atomically renamed. Capacity pressure evicts the oldest cached entry. Directory
+metadata is covered by the control reserve and the aggregate tmpfs limit.
+Changed or withdrawn publications are removed when a fresh inventory arrives.
+
+An independent client requests a specific replica through `PageReplicaRequest`.
+The broker creates a reader-bound ticket, valid for at most 15 seconds, and sends
+it to that host in `PageSync`. This interval permits rendezvous only; it grants
+no stale access. The host reads the cached file, rechecks its digest and proofs,
+then sends its exact bundle with `ReplicaDeliver`. The broker rechecks current
+publication, reader permission, host consent and the host's mTLS identity before
+accepting delivery. `PageReplicaResult` repeats the authority checks before
+releasing the returned bundle to the ticket owner. A cache miss waits for a
+permitted fetch or expires; the broker does not substitute an origin read and
+report it as a replica read.
+
+Each sync decision is fresh for no more than five seconds. Malformed responses,
+denial, transport failure or quorum loss clear Pages readiness and force a new
+full inventory before later delivery. Retained cache bytes are not an offline
+serving capability. A restart discards the tmpfs and repopulates it only after
+fresh authority checks. Local withdrawal removes both containers and their
+volatile cache without contacting the authority. The existing serialized
+lifecycle prevents a concurrent startup from reversing that withdrawal.
+
+`Status` includes `pages.enabled`, `pages.ready`, `pages.objects` and
+`pages.bytes`. The byte value includes allocation rounding. Readiness requires
+an active, unexpired authority lease; a retained status file is not a capability.
+Plaintext approved pages are visible to the consenting storage operator.
 
 ## Build and package
 
@@ -229,3 +325,10 @@ Add `--lifecycle-only` to exercise concurrent restart and withdrawal against rea
 containers, plus authority restart and stop, without repeating unrelated API
 and recovery scenarios. The test pauses relay creation at a controlled barrier,
 queues local withdrawal, then verifies that no host or relay survives completion.
+
+Use `Tests/PagesWorkflow.py` with the same required arguments to exercise inert
+submission, exact-content review, scoped host replication, missing or corrupted cache files,
+authenticated terminal navigation, restart, withdrawal and revocation through the installed clients. It also checks
+that a requested offline replica cannot silently fall back to origin content.
+The Pages fixture uses the same isolated ports and subnet and removes its state.
+Do not run both workflow fixtures concurrently.

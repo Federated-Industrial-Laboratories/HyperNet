@@ -5,6 +5,10 @@ mod authority;
 mod confinement;
 #[path = "Host.rs"]
 mod host;
+#[path = "Markup.rs"]
+mod markup;
+#[path = "PageAuthority.rs"]
+mod page_authority;
 #[path = "Policy.rs"]
 mod policy;
 #[path = "Protocol.rs"]

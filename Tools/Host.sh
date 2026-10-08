@@ -37,7 +37,19 @@ initialise() {
     payload=$(jq -er '.payload' "$source/Consent.json" | tr '_-' '/+')
     case $((${#payload} % 4)) in 2) payload+='==';; 3) payload+='=';; 1) fail 'Invalid consent encoding';; esac
     consent=$(printf '%s' "$payload" | base64 --decode)
-    jq -e --argjson now "$(date +%s)" 'keys == ["authorityAddress","authorityEndpoint","cpuPeriod","cpuQuota","deviceKey","expires","grants","memoryBytes","network","pids","stateBytes","version"] and .version == 1 and .grants == 2 and ([.expires,.memoryBytes,.pids,.cpuPeriod,.cpuQuota,.stateBytes] | all(type == "number" and . == floor)) and .expires > $now and .expires <= $now+604800 and .memoryBytes >= 67108864 and .memoryBytes <= 8589934592 and .pids >= 16 and .pids <= 512 and .cpuPeriod == 100000 and .cpuQuota >= 1000 and .cpuQuota <= 800000 and .stateBytes >= 1048576 and .stateBytes <= 268435456' <<< "$consent" >/dev/null || fail 'Invalid resource consent'
+    jq -e --argjson now "$(date +%s)" '
+        (["authorityAddress","authorityEndpoint","cpuPeriod","cpuQuota","deviceKey","expires","grants","memoryBytes","network","pids","stateBytes","version"]) as $base |
+        ((.version == 1 and keys == $base) or
+         (.version == 2 and keys == (($base + ["services","namespaces","pageCacheBytes"]) | sort) and
+          .services == ["Pages"] and (.namespaces | type == "array" and length >= 1 and length <= 16 and
+              all(type == "string" and test("\\A[A-Za-z][A-Za-z0-9]{0,31}\\z")) and (unique | length) == length) and
+          (.pageCacheBytes | type == "number" and . == floor) and
+          .pageCacheBytes >= 65536 and .pageCacheBytes <= .stateBytes-262144)) and
+        .grants == 2 and ([.expires,.memoryBytes,.pids,.cpuPeriod,.cpuQuota,.stateBytes] | all(type == "number" and . == floor)) and
+        .expires > $now and .expires <= $now+604800 and .memoryBytes >= 67108864 and .memoryBytes <= 8589934592 and
+        .pids >= 16 and .pids <= 512 and .cpuPeriod == 100000 and .cpuQuota >= 1000 and .cpuQuota <= 800000 and
+        .stateBytes >= 1048576 and .stateBytes <= 268435456
+        ' <<< "$consent" >/dev/null || fail 'Invalid resource or service consent'
     identity=$(printf '%s' "$directory" | sha256sum | cut -c1-16)
     name="HyperNet$identity"
     network="${name}Internal"

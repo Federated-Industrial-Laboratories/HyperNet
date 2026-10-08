@@ -14,6 +14,12 @@ use std::{
 };
 use zeroize::Zeroize;
 
+#[path = "HostPages.rs"]
+mod pages;
+
+pub const CONSENT_MAXIMUM: usize = 16384;
+pub const CONTROL_RESERVE: u64 = 256 * 1024;
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Configuration {
@@ -42,7 +48,7 @@ struct SignedConsent {
     signature: String,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Consent {
     pub version: u32,
@@ -57,6 +63,12 @@ pub struct Consent {
     pub state_bytes: u64,
     pub authority_endpoint: String,
     pub authority_address: SocketAddr,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub services: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespaces: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_cache_bytes: Option<u64>,
 }
 
 pub struct HostConfig {
@@ -79,12 +91,16 @@ impl HostConfig {
 }
 
 fn read_bounded(path: &Path, maximum: usize) -> Result<Vec<u8>> {
+    use std::io::Read;
     let metadata = fs::symlink_metadata(path)?;
     ensure!(
         metadata.is_file() && metadata.len() <= maximum as u64,
         "configuration must be a bounded regular file"
     );
-    let bytes = fs::read(path)?;
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(maximum as u64 + 1)
+        .read_to_end(&mut bytes)?;
     ensure!(bytes.len() <= maximum, "configuration is too large");
     Ok(bytes)
 }
@@ -97,32 +113,32 @@ fn fixed_hex<const N: usize>(value: &str) -> Result<[u8; N]> {
     protocol::fixed_hex::<N>(value).map_err(anyhow::Error::msg)
 }
 
-pub fn load(path: &Path) -> Result<HostConfig> {
-    let raw: Configuration = serde_json::from_slice(&read_bounded(path, 16384)?)?;
-    let network = fixed_hex::<32>(&raw.network)?;
-    let mut identity: Identity = serde_json::from_slice(&read_bounded(&raw.identity, 1024)?)?;
-    let mut secret = fixed_hex::<32>(&identity.secret_key)?;
-    identity.secret_key.zeroize();
-    let signing_key = SigningKey::from_bytes(&secret);
-    secret.zeroize();
-    let public = fixed_hex::<32>(&identity.public_key)?;
+pub fn verify_consent(
+    document: &[u8],
+    network: &str,
+    device: &str,
+    current_time: u64,
+) -> Result<Consent> {
     ensure!(
-        signing_key.verifying_key().to_bytes() == public,
-        "device identity does not match its key"
+        document.len() <= CONSENT_MAXIMUM,
+        "consent document is too large"
     );
-    let document = read_bounded(&raw.consent_file, 16384)?;
-    let signed: SignedConsent = serde_json::from_slice(&document)?;
+    let network = fixed_hex::<32>(network)?;
+    let public = fixed_hex::<32>(device)?;
+    let signed: SignedConsent = serde_json::from_slice(document)?;
     let payload = URL_SAFE_NO_PAD.decode(signed.payload)?;
     ensure!(payload.len() <= 8192, "consent payload is too large");
-    let mut message = b"HyperNet/Consent/1\0".to_vec();
+    let consent: Consent = serde_json::from_slice(&payload)?;
+    let mut message = match consent.version {
+        1 => b"HyperNet/Consent/1\0".to_vec(),
+        2 => b"HyperNet/Consent/2\0".to_vec(),
+        _ => anyhow::bail!("unsupported consent version"),
+    };
     message.extend_from_slice(&payload);
     let signature = ed25519_dalek::Signature::from_bytes(&fixed_hex::<64>(&signed.signature)?);
     VerifyingKey::from_bytes(&public)?.verify_strict(&message, &signature)?;
-    let consent: Consent = serde_json::from_slice(&payload)?;
-    let current_time = now()?;
     ensure!(
-        consent.version == 1
-            && fixed_hex::<32>(&consent.network)? == network
+        fixed_hex::<32>(&consent.network)? == network
             && fixed_hex::<32>(&consent.device_key)? == public,
         "consent identity mismatch"
     );
@@ -139,11 +155,47 @@ pub fn load(path: &Path) -> Result<HostConfig> {
             && (1024 * 1024..=256 * 1024 * 1024).contains(&consent.state_bytes),
         "invalid resource consent"
     );
-    ensure!(
-        raw.endpoint == consent.authority_endpoint,
-        "authority endpoint differs from consent"
-    );
-    let endpoint = reqwest::Url::parse(&raw.endpoint)?;
+    match consent.version {
+        1 => {
+            let fields: serde_json::Value = serde_json::from_slice(&payload)?;
+            ensure!(
+                fields.get("services").is_none()
+                    && fields.get("namespaces").is_none()
+                    && fields.get("pageCacheBytes").is_none(),
+                "consent version one cannot enable services"
+            );
+        }
+        2 => {
+            ensure!(
+                consent.services.as_deref() == Some(&[String::from("Pages")]),
+                "Pages consent must name exactly the Pages service"
+            );
+            let namespaces = consent
+                .namespaces
+                .as_ref()
+                .context("Pages namespaces are required")?;
+            ensure!(
+                !namespaces.is_empty() && namespaces.len() <= 16,
+                "invalid namespace count"
+            );
+            let mut unique = std::collections::BTreeSet::new();
+            for namespace in namespaces {
+                ensure!(
+                    valid_namespace(namespace) && unique.insert(namespace),
+                    "invalid or duplicate namespace"
+                );
+            }
+            let bytes = consent
+                .page_cache_bytes
+                .context("Pages cache quota is required")?;
+            ensure!(
+                bytes >= 65536 && bytes <= consent.state_bytes - CONTROL_RESERVE,
+                "invalid Pages cache quota"
+            );
+        }
+        _ => unreachable!(),
+    }
+    let endpoint = reqwest::Url::parse(&consent.authority_endpoint)?;
     let host = endpoint.host_str().context("authority host is required")?;
     ensure!(
         endpoint.scheme() == "https"
@@ -155,6 +207,32 @@ pub fn load(path: &Path) -> Result<HostConfig> {
             && endpoint.path() == "/"
             && endpoint.port_or_known_default() == Some(consent.authority_address.port()),
         "authority must be an HTTPS DNS endpoint with its consented port"
+    );
+    Ok(consent)
+}
+
+pub fn valid_namespace(value: &str) -> bool {
+    (1..=32).contains(&value.len())
+        && value.as_bytes()[0].is_ascii_alphabetic()
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
+
+pub fn load(path: &Path) -> Result<HostConfig> {
+    let raw: Configuration = serde_json::from_slice(&read_bounded(path, 16384)?)?;
+    let mut identity: Identity = serde_json::from_slice(&read_bounded(&raw.identity, 1024)?)?;
+    let mut secret = fixed_hex::<32>(&identity.secret_key)?;
+    identity.secret_key.zeroize();
+    let signing_key = SigningKey::from_bytes(&secret);
+    secret.zeroize();
+    ensure!(
+        signing_key.verifying_key().to_bytes() == fixed_hex::<32>(&identity.public_key)?,
+        "device identity does not match its key"
+    );
+    let document = read_bounded(&raw.consent_file, CONSENT_MAXIMUM)?;
+    let consent = verify_consent(&document, &raw.network, &identity.public_key, now()?)?;
+    ensure!(
+        raw.endpoint == consent.authority_endpoint,
+        "authority endpoint differs from consent"
     );
     ensure!(
         !raw.relay_address.ip().is_loopback() && !raw.relay_address.ip().is_unspecified(),
@@ -195,6 +273,7 @@ struct Status<'a> {
     epoch: u64,
     profile: &'a str,
     confinement: &'a confinement::Profile,
+    pages: pages::Status,
 }
 
 fn store_status(config: &HostConfig, status: Status<'_>) -> Result<()> {
@@ -207,20 +286,19 @@ fn store_status(config: &HostConfig, status: Status<'_>) -> Result<()> {
     Ok(())
 }
 
-async fn heartbeat(
+async fn request(
     config: &HostConfig,
     client: &reqwest::Client,
+    command: types::Command,
     epoch: u64,
-) -> Result<(u64, Heartbeat)> {
+) -> Result<types::Reply> {
     let mut request_id = [0u8; 16];
     OsRng.fill_bytes(&mut request_id);
     let request = types::Request {
         version: 1,
         request_id: hex::encode(request_id),
         issued_at: now()?,
-        command: types::Command::Heartbeat {
-            profile: config.profile_digest.clone(),
-        },
+        command,
     };
     let payload = serde_json::to_vec(&request)?;
     let public = config.signing_key.verifying_key().to_bytes();
@@ -244,7 +322,7 @@ async fn heartbeat(
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await? {
         ensure!(
-            bytes.len() + chunk.len() <= 65536,
+            bytes.len() + chunk.len() <= 256 * 1024,
             "authority response is too large"
         );
         bytes.extend_from_slice(&chunk);
@@ -254,6 +332,23 @@ async fn heartbeat(
         reply.ok && reply.code == "Ok" && reply.epoch >= epoch,
         "authority denied hosting"
     );
+    Ok(reply)
+}
+
+async fn heartbeat(
+    config: &HostConfig,
+    client: &reqwest::Client,
+    epoch: u64,
+) -> Result<(u64, Heartbeat)> {
+    let reply = request(
+        config,
+        client,
+        types::Command::Heartbeat {
+            profile: config.profile_digest.clone(),
+        },
+        epoch,
+    )
+    .await?;
     let result: Heartbeat = serde_json::from_value(reply.result)?;
     let current_time = now()?;
     ensure!(
@@ -319,6 +414,7 @@ pub async fn run(config: HostConfig, profile: confinement::Profile) -> Result<()
         .build()?;
     let mut epoch = 0;
     let mut previous_time = now()?;
+    let mut replica = pages::Replica::new(&config)?;
     loop {
         let current_time = now()?;
         ensure!(
@@ -331,7 +427,7 @@ pub async fn run(config: HostConfig, profile: confinement::Profile) -> Result<()
         } else {
             None
         };
-        let (active, grants, expires, code) = if let Some((next_epoch, lease)) = response {
+        let (mut active, grants, expires, mut code) = if let Some((next_epoch, lease)) = response {
             epoch = next_epoch;
             let grants = policy::effective(policy::PolicyInput {
                 requested: 2,
@@ -354,18 +450,129 @@ pub async fn run(config: HostConfig, profile: confinement::Profile) -> Result<()
         } else {
             (false, 0, 0, "AuthorityUnavailableOrDenied")
         };
+        if active {
+            if replica
+                .synchronise(&config, &client, &mut epoch)
+                .await
+                .is_err()
+            {
+                replica.invalidate();
+                active = false;
+                code = "PagesUnavailableOrDenied";
+            }
+        } else {
+            replica.invalidate();
+        }
+        if now()? >= expires {
+            replica.invalidate();
+            active = false;
+            code = "AuthorityUnavailableOrDenied";
+        }
         store_status(
             &config,
             Status {
                 active,
                 code,
-                effective_grants: grants,
-                lease_expires: expires,
+                effective_grants: if active { grants } else { 0 },
+                lease_expires: if active { expires } else { 0 },
                 epoch,
                 profile: &config.profile_digest,
                 confinement: &profile,
+                pages: replica.status(),
             },
         )?;
         tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn payload(version: u32) -> Value {
+        let key = SigningKey::from_bytes(&[17; 32]);
+        let mut payload = json!({
+            "version":version,"network":hex::encode([18;32]),
+            "deviceKey":hex::encode(key.verifying_key().as_bytes()),"grants":2,"expires":200,
+            "memoryBytes":67108864,"pids":32,"cpuQuota":10000,"cpuPeriod":100000,
+            "stateBytes":1048576,"authorityEndpoint":"https://authority.example:8443",
+            "authorityAddress":"192.0.2.20:8443"
+        });
+        if version == 2 {
+            payload["services"] = json!(["Pages"]);
+            payload["namespaces"] = json!(["Public", "Manual"]);
+            payload["pageCacheBytes"] = json!(65536);
+        }
+        payload
+    }
+
+    fn sign(payload: &Value, version: u32) -> Vec<u8> {
+        let key = SigningKey::from_bytes(&[17; 32]);
+        let payload = serde_json::to_vec(payload).unwrap();
+        let mut message = format!("HyperNet/Consent/{version}\0").into_bytes();
+        message.extend_from_slice(&payload);
+        serde_json::to_vec(&json!({"payload":URL_SAFE_NO_PAD.encode(payload),
+            "signature":hex::encode(key.sign(&message).to_bytes())}))
+        .unwrap()
+    }
+
+    fn accepts(payload: &Value, version: u32) -> bool {
+        verify_consent(
+            &sign(payload, version),
+            &hex::encode([18; 32]),
+            payload["deviceKey"].as_str().unwrap(),
+            100,
+        )
+        .is_ok()
+    }
+
+    #[test]
+    fn pages_need_a_new_versioned_signature_and_explicit_scope() {
+        let mut old = payload(1);
+        assert!(accepts(&old, 1));
+        for value in [json!(["Pages"]), Value::Null] {
+            old["services"] = value;
+            assert!(!accepts(&old, 1));
+        }
+        let current = payload(2);
+        assert!(accepts(&current, 2));
+        assert!(!accepts(&current, 1));
+        for field in ["services", "namespaces", "pageCacheBytes"] {
+            let mut absent = current.clone();
+            absent.as_object_mut().unwrap().remove(field);
+            assert!(!accepts(&absent, 2));
+        }
+        let mut extra = current;
+        extra["services"] = json!(["Pages", "Shell"]);
+        assert!(!accepts(&extra, 2));
+    }
+
+    #[test]
+    fn pages_consent_cannot_escape_namespaces_or_storage_reserve() {
+        let original = payload(2);
+        for namespaces in [
+            json!([]),
+            json!(["Public", "Public"]),
+            json!(["*"]),
+            json!(["../Private"]),
+            json!(["Public\n"]),
+            json!(["1Public"]),
+            json!(["Network-Public"]),
+            json!(["X".repeat(33)]),
+            json!(["É"]),
+        ] {
+            let mut consent = original.clone();
+            consent["namespaces"] = namespaces;
+            assert!(!accepts(&consent, 2));
+        }
+        for quota in [0, 65535, 1048576 - 262144 + 1, u64::MAX] {
+            let mut consent = original.clone();
+            consent["pageCacheBytes"] = json!(quota);
+            assert!(!accepts(&consent, 2));
+        }
+        let mut consent = original;
+        consent["pageCacheBytes"] = json!(1048576 - 262144);
+        assert!(accepts(&consent, 2));
     }
 }

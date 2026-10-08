@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 const MAX_MEMBERS: usize = 1024;
 const MAX_INVITATIONS: usize = 1024;
-const MAX_RECEIPTS: usize = 2048;
+pub(crate) const MAX_RECEIPTS: usize = 2048;
 const MAX_DURATION: u64 = 7 * 24 * 60 * 60;
 
 fn grants(member: &Member, now: u64, epoch: u64) -> u64 {
@@ -27,10 +27,33 @@ fn grants(member: &Member, now: u64, epoch: u64) -> u64 {
     })
 }
 
-fn require(state: &State, key: &str, mask: u64, now: u64) -> Result<(), &'static str> {
+pub(crate) fn require(state: &State, key: &str, mask: u64, now: u64) -> Result<(), &'static str> {
+    if mask & ADMIN != 0 && state.consents.contains_key(key) {
+        return Err("ServiceIdentity");
+    }
     let member = state.members.get(key).ok_or("NotMember")?;
     if grants(member, now, state.epoch) & mask != mask {
         return Err("PermissionDenied");
+    }
+    Ok(())
+}
+
+pub(crate) fn mutation_capacity(state: &State, key: &str, now: u64) -> Result<(), &'static str> {
+    if state.receipts.len() >= MAX_RECEIPTS {
+        return Err("CapacityExceeded");
+    }
+    if require(state, key, ADMIN, now).is_err() {
+        let prefix = format!("{key}:");
+        if state.receipts.len() >= MAX_RECEIPTS - 64
+            || state
+                .receipts
+                .keys()
+                .filter(|entry| entry.starts_with(&prefix))
+                .count()
+                >= 64
+        {
+            return Err("RateLimited");
+        }
     }
     Ok(())
 }
@@ -59,11 +82,11 @@ fn preserve_admin(
     if mask & ADMIN != 0 && expires > now {
         return Ok(());
     }
-    if state
-        .members
-        .iter()
-        .any(|(key, member)| key != target && grants(member, now, state.epoch) & ADMIN != 0)
-    {
+    if state.members.iter().any(|(key, member)| {
+        key != target
+            && !state.consents.contains_key(key)
+            && grants(member, now, state.epoch) & ADMIN != 0
+    }) {
         return Ok(());
     }
     Err("LastAdministrator")
@@ -110,6 +133,7 @@ fn check_existing_permission(
             }
             Ok(())
         }
+        _ => Err("UnsupportedCommand"),
     }
 }
 
@@ -121,7 +145,7 @@ pub fn apply(
     now: u64,
     revision: i64,
 ) -> Result<Reply, &'static str> {
-    if state.version != 1 {
+    if state.version != 1 && state.version != 2 {
         return Err("UnsupportedState");
     }
     if state.high_water_time > now.saturating_add(2) {
@@ -144,8 +168,8 @@ pub fn apply(
         request.request.command,
         Command::Status { .. } | Command::Heartbeat { .. }
     );
-    if !read_only && state.receipts.len() >= MAX_RECEIPTS {
-        return Err("CapacityExceeded");
+    if !read_only {
+        mutation_capacity(state, &request.key, now)?;
     }
     let mut changed = false;
     let result = match &request.request.command {
@@ -154,11 +178,7 @@ pub fn apply(
             fixed_hex::<32>(key)?;
             let member = state.members.get(key).ok_or("NotMember")?;
             let mut result = json!({"deviceKey":key,"member":member,"consent":state.consents.get(key),"authorityRevision":revision});
-            if state
-                .members
-                .get(&request.key)
-                .is_some_and(|member| grants(member, now, state.epoch) & ADMIN != 0)
-            {
+            if require(state, &request.key, ADMIN, now).is_ok() {
                 result["memberCount"] = json!(state.members.len());
                 result["invitationCount"] = json!(state.invitations.len());
             }
@@ -254,6 +274,9 @@ pub fn apply(
         } => {
             fixed_hex::<32>(device_key)?;
             validate_grants(*mask)?;
+            if *mask & ADMIN != 0 && state.consents.contains_key(device_key) {
+                return Err("ServiceIdentity");
+            }
             valid_expiry(*expires, now)?;
             preserve_admin(state, device_key, *mask, *expires, now)?;
             let member = state.members.get_mut(device_key).ok_or("NotMember")?;
@@ -282,6 +305,7 @@ pub fn apply(
             grants: mask,
             expires,
             certificate,
+            document,
         } => {
             fixed_hex::<32>(profile)?;
             fixed_hex::<32>(certificate)?;
@@ -290,8 +314,27 @@ pub fn apply(
                 return Err("InvalidGrant");
             }
             let member = state.members.get(&request.key).ok_or("NotMember")?;
+            if member.grants & ADMIN != 0 {
+                return Err("SeparateHostIdentityRequired");
+            }
             if *expires > member.expires {
                 return Err("InvalidExpiry");
+            }
+            if let Some(document) = document {
+                use base64::Engine;
+                let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(document)
+                    .map_err(|_| "InvalidConsent")?;
+                if hex::encode(Sha256::digest(&bytes)) != *profile {
+                    return Err("InvalidConsent");
+                }
+                let consent =
+                    crate::host::verify_consent(&bytes, &state.network, &request.key, now)
+                        .map_err(|_| "InvalidConsent")?;
+                if consent.grants != *mask || consent.expires != *expires {
+                    return Err("InvalidConsent");
+                }
+                state.version = 2;
             }
             state.consents.insert(
                 request.key.clone(),
@@ -301,6 +344,7 @@ pub fn apply(
                     expires: *expires,
                     certificate: certificate.clone(),
                     active: true,
+                    document: document.clone(),
                 },
             );
             changed = true;
@@ -337,6 +381,7 @@ pub fn apply(
             }
             json!({"effectiveGrants":mask,"leaseExpires":expiry,"profile":profile,"authorityRevision":revision})
         }
+        _ => return Err("UnsupportedCommand"),
     };
     if changed {
         state.epoch = state.epoch.checked_add(1).ok_or("CapacityExceeded")?;
@@ -369,6 +414,12 @@ mod tests {
                 request_id: hex::encode([id; 16]),
                 issued_at: 100,
                 command,
+            },
+            envelope: Envelope {
+                network: hex::encode([9; 32]),
+                public_key: key.into(),
+                payload: String::new(),
+                signature: String::new(),
             },
         }
     }
@@ -515,6 +566,7 @@ mod tests {
                     grants: HOST,
                     expires: 900,
                     certificate: cert.clone(),
+                    document: None,
                 },
             ),
             None,

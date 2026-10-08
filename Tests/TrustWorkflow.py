@@ -150,6 +150,7 @@ class Workflow:
         self.authctl('user','grant-role','root','root')
         self.authctl('role','add','HyperNetBroker')
         self.authctl('role','grant-permission','HyperNetBroker','readwrite','/HyperNet/'+self.network+'/Authority')
+        self.authctl('role','grant-permission','HyperNetBroker','readwrite','/HyperNet/'+self.network+'/Pages/','--prefix')
         self.authctl('user','add','HyperNetBroker','--no-password')
         self.authctl('user','grant-role','HyperNetBroker','HyperNetBroker')
         self.authctl('auth','enable')
@@ -206,14 +207,16 @@ class Workflow:
         key=Ed25519PrivateKey.from_private_bytes(bytes.fromhex(identity['secretKey']))
         return {'network':network,'publicKey':identity['publicKey'],'payload':base64.urlsafe_b64encode(payload).decode().rstrip('='),'signature':key.sign(message).hex()}
 
-    def request(self, envelope):
+    def request(self, envelope, hosting=False):
         context=ssl.create_default_context(cafile=str(self.pki/'NetworkCa.pem'))
         context.minimum_version=context.maximum_version=ssl.TLSVersion.TLSv1_3
+        if hosting:
+            context.load_cert_chain(str(self.pki/'Host.pem'),str(self.pki/'HostKey.pem'))
         connection=http.client.HTTPSConnection('localhost',28443,context=context,timeout=10)
         try:
             connection.request('POST','/V1/Command',json.dumps(envelope),{'Content-Type':'application/json'})
             response=connection.getresponse()
-            return json.loads(response.read(65536))
+            return json.loads(response.read(262145))
         finally:
             connection.close()
 
