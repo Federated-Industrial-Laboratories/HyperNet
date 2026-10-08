@@ -9,6 +9,7 @@ security certification claims.
 - Network membership, publication, storage and service access have separate grants.
 - Each host administrator explicitly consents to the roles and resources offered.
 - A host can withdraw consent. Remote policy cannot expand local resource grants.
+- Administration is replicated across explicitly trusted authorities.
 - Internet deployment is part of the threat model.
 - Nodes run in confined environments with restricted storage and system access.
 
@@ -27,6 +28,7 @@ security certification claims.
 - Users can manage multiple mailbox addresses.
 - Private correspondence uses end-to-end encryption and explicit storage policies.
 - User privacy restrictions cannot be weakened by administrator defaults.
+- Private mailboxes default to persistent storage only on user-selected systems.
 - Applications receive scoped, revocable access through documented interfaces.
 - File transfers require sender authority, recipient consent and verified content.
 - SSH access requires a separate host grant and maintained OpenSSH protection.
