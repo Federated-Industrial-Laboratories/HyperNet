@@ -1,0 +1,13 @@
+project Policy is
+   for Source_Dirs use (".");
+   for Object_Dir use external ("PolicyOutput", "Output");
+   for Languages use ("Ada");
+   package Naming is
+      for Spec ("Policy") use "Policy.ads";
+      for Body ("Policy") use "Policy.adb";
+   end Naming;
+   package Compiler is
+      for Default_Switches ("Ada") use ("-gnat2022", "-gnata", "-gnatwa");
+      for Local_Configuration_Pragmas use "Configuration.adc";
+   end Compiler;
+end Policy;

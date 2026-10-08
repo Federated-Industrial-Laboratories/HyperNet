@@ -1,0 +1,5 @@
+FROM scratch
+COPY RootFs/ /
+WORKDIR /State
+USER 0:0
+ENTRYPOINT ["/HyperNet"]
