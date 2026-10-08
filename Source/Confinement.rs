@@ -272,9 +272,44 @@ pub fn enter(
     bind_ports: &[u16],
     connect_ports: &[u16],
 ) -> Result<Profile> {
+    enter_state(state, read_paths, bind_ports, connect_ports, false)
+}
+
+#[allow(dead_code)]
+pub fn enter_mail(
+    state: &Path,
+    bind_ports: &[u16],
+    connect_ports: &[u16],
+    maximum: u64,
+) -> Result<Profile> {
+    let limit = libc::rlimit {
+        rlim_cur: maximum,
+        rlim_max: maximum,
+    };
+    ensure!(
+        unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &limit) } == 0,
+        "mail file size limit could not be enforced"
+    );
+    enter_state(state, &[], bind_ports, connect_ports, true)
+}
+
+fn enter_state(
+    state: &Path,
+    read_paths: &[PathBuf],
+    bind_ports: &[u16],
+    connect_ports: &[u16],
+    single_file: bool,
+) -> Result<Profile> {
     let mut profile = preflight()?;
     let state = confined_path(state, Path::new("/State"))?;
-    ensure!(state.is_dir(), "state must be a directory under /State");
+    ensure!(
+        if single_file {
+            state.is_file()
+        } else {
+            state.is_dir()
+        },
+        "state grant has the wrong file type"
+    );
     let attr = Ruleset {
         filesystem: ALL_FILESYSTEM,
         network: 3,
@@ -289,7 +324,15 @@ pub fn enter(
         )
     })?;
     let ruleset = unsafe { OwnedFd::from_raw_fd(fd as i32) };
-    path_rule(&ruleset, &state, STATE_ACCESS)?;
+    path_rule(
+        &ruleset,
+        &state,
+        if single_file {
+            READ_FILE | (1 << 1)
+        } else {
+            STATE_ACCESS
+        },
+    )?;
     for path in read_paths {
         let path = confined_path(path, Path::new("/Config"))?;
         let access = if path.is_dir() {
@@ -345,6 +388,36 @@ pub fn canaries(state: &Path) -> Result<()> {
         "state read/write boundary failed"
     );
     fs::remove_file(path)?;
+    Ok(())
+}
+
+/// Mail grants one fixed file; directory creation and truncation remain denied.
+#[allow(dead_code)]
+pub fn mail_canaries(state: &Path) -> Result<()> {
+    ensure!(
+        fs::read("/Canary").is_err(),
+        "mail filesystem read boundary failed"
+    );
+    ensure!(
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open("/State/Unpermitted")
+            .is_err(),
+        "mail directory creation boundary failed"
+    );
+    ensure!(
+        fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(state)
+            .is_err(),
+        "mail truncation boundary failed"
+    );
+    ensure!(
+        std::net::TcpListener::bind("127.0.0.1:1").is_err(),
+        "mail TCP bind boundary failed"
+    );
     Ok(())
 }
 

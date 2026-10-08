@@ -9,6 +9,16 @@ mod confinement;
 mod federation_authority;
 #[path = "Host.rs"]
 mod host;
+#[path = "MailAuthority.rs"]
+mod mail_authority;
+#[path = "MailDisk.rs"]
+mod mail_disk;
+#[path = "MailStore.rs"]
+mod mail_store;
+#[path = "MailTransport.rs"]
+mod mail_transport;
+#[path = "MailTypes.rs"]
+mod mail_types;
 #[path = "Markup.rs"]
 mod markup;
 #[path = "PageAuthority.rs"]
@@ -60,6 +70,11 @@ enum Command {
     },
     /// Run a consenting bridge between two independently administered networks.
     Bridge {
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Run a selected persistent mail store with exact signed host consent.
+    MailStore {
         #[arg(long)]
         config: PathBuf,
     },
@@ -125,6 +140,9 @@ fn run() -> Result<()> {
             if let Some(path) = &config.federation_signing_key {
                 reads.push(path.clone());
             }
+            if let Some(path) = &config.mail_signing_key {
+                reads.push(path.clone());
+            }
             let mut ports = Vec::new();
             for endpoint in &config.etcd_endpoints {
                 let url = reqwest::Url::parse(endpoint)?;
@@ -172,6 +190,19 @@ fn run() -> Result<()> {
                 &config.connect_ports(),
             )?;
             runtime()?.block_on(bridge::run(config, profile))?;
+        }
+        Command::MailStore { config: path } => {
+            let config = mail_store::Config::load(&path)?;
+            let profile = confinement::enter_mail(
+                &config.state_file,
+                &[config.listen.port()],
+                &[config.relay_address.port()],
+                config.consent.state_bytes,
+            )?;
+            confinement::mail_canaries(&config.state_file)?;
+            config.check_resources(&profile)?;
+            println!("{}", serde_json::to_string(&profile)?);
+            runtime()?.block_on(mail_transport::serve(config))?;
         }
         Command::CheckConfinement { state } => {
             let profile = confinement::enter(&state, &[], &[], &[])?;

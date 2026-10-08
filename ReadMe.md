@@ -33,6 +33,10 @@ Unsupported hosting profiles fail closed.
   separate import review and signed freshness evidence.
 - [Confined bridges](Documentation/Bridge.md): dual-signed endpoint consent and
   bounded outward-only transfer between independent networks.
+- [Private mail](Documentation/Mail.md): scoped mail identities, one-use device
+  key packages and persistent ciphertext only on selected hosts.
+- [Mail store operation](Documentation/MailStore.md): consent, bounded storage
+  and confinement.
 - [Authority protocol](Documentation/Protocol.md): independent client interface.
 - [Requirements](Documentation/Requirements.md): the broader product scope.
 
@@ -44,7 +48,8 @@ publications between explicitly consenting networks, with independent destinatio
 review. It grants no shared membership or administration and cannot re-export
 foreign imports. Local vetoes apply on fresh authority checks; remote vetoes and
 partitions stop new reads after at most five seconds of existing evidence.
-Mail, file transfers and shell services remain future capabilities.
+Private mail uses independent client end-to-end encryption and explicit selected
+storage. File transfers and shell services remain future capabilities.
 
 The implementation is not yet a qualified production Internet release. The
 replication profile assumes trusted administrators and crash faults; it does not

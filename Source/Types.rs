@@ -38,6 +38,56 @@ pub struct Request {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "type", deny_unknown_fields, rename_all_fields = "camelCase")]
 pub enum Command {
+    MailAddressCreate {
+        manifest: crate::mail_types::SignedMailObject,
+    },
+    MailAddressUpdate {
+        address_id: String,
+        expected_generation: u64,
+        manifest: crate::mail_types::SignedMailObject,
+    },
+    MailAddressDelete {
+        address_id: String,
+        expected_generation: u64,
+        manifest: crate::mail_types::SignedMailObject,
+    },
+    MailAddressGet {
+        address_id: String,
+    },
+    MailHostRegister {
+        consent: crate::mail_types::SignedMailObject,
+    },
+    MailHostWithdraw {
+        host_key: String,
+        expected_generation: u64,
+    },
+    MailHosts,
+    MailKeyPackagesPublish {
+        address_id: String,
+        device_id: String,
+        manifest_generation: u64,
+        packages: Vec<crate::mail_types::MailKeyPackage>,
+    },
+    MailKeyPackagesClaim {
+        sender_address: String,
+        sender_device: String,
+        recipient_address: String,
+        recipient_manifest_digest: String,
+        claim_id: String,
+        expires: u64,
+    },
+    MailKeyPackagesClaimStatus {
+        sender_address: String,
+        sender_device: String,
+        claim_id: String,
+    },
+    MailAuthorise {
+        host_key: String,
+        operation: crate::mail_types::SignedMailObject,
+    },
+    MailPolicySync {
+        host_key: String,
+    },
     Status {
         #[serde(rename = "deviceKey")]
         device_key: Option<String>,
@@ -386,6 +436,8 @@ pub struct State {
     pub federation_shares: BTreeMap<String, FederationShareRecord>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub federation_pages: BTreeMap<String, FederationPageRecord>,
+    #[serde(default)]
+    pub mail: crate::mail_types::MailState,
 }
 
 impl State {
@@ -412,6 +464,7 @@ impl State {
             bridge_consents: BTreeMap::new(),
             federation_shares: BTreeMap::new(),
             federation_pages: BTreeMap::new(),
+            mail: Default::default(),
         }
     }
 }
@@ -432,4 +485,6 @@ pub struct AuthorityConfig {
     pub etcd_server_name: String,
     #[serde(default)]
     pub federation_signing_key: Option<std::path::PathBuf>,
+    #[serde(default)]
+    pub mail_signing_key: Option<std::path::PathBuf>,
 }

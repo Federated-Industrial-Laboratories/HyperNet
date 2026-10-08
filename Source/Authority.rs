@@ -29,7 +29,9 @@ fn grants(member: &Member, now: u64, epoch: u64) -> u64 {
 
 pub(crate) fn require(state: &State, key: &str, mask: u64, now: u64) -> Result<(), &'static str> {
     if mask & ADMIN != 0
-        && (state.consents.contains_key(key) || state.bridge_consents.contains_key(key))
+        && (state.consents.contains_key(key)
+            || state.bridge_consents.contains_key(key)
+            || state.mail.hosts.contains_key(key))
     {
         return Err("ServiceIdentity");
     }
@@ -88,6 +90,7 @@ fn preserve_admin(
         key != target
             && !state.consents.contains_key(key)
             && !state.bridge_consents.contains_key(key)
+            && !state.mail.hosts.contains_key(key)
             && grants(member, now, state.epoch) & ADMIN != 0
     }) {
         return Ok(());
@@ -101,8 +104,27 @@ fn check_existing_permission(
     certificate: Option<&str>,
     now: u64,
 ) -> Result<(), &'static str> {
+    if matches!(
+        request.request.command,
+        Command::Consent { .. } | Command::Heartbeat { .. }
+    ) && state.mail.hosts.contains_key(&request.key)
+    {
+        return Err("ServiceIdentity");
+    }
     match &request.request.command {
-        Command::Redeem { .. } => Ok(()),
+        Command::Redeem { .. } => {
+            // A pending invitation cannot change a key's subsequently assigned role.
+            if state.mail.device_history.contains(&request.key)
+                || state
+                    .mail
+                    .addresses
+                    .values()
+                    .any(|record| record.manifest.public_key == request.key)
+            {
+                return Err("SeparateMailIdentityRequired");
+            }
+            Ok(())
+        }
         Command::Withdraw => {
             if state.members.contains_key(&request.key) {
                 Ok(())
@@ -153,7 +175,7 @@ pub fn apply(
     now: u64,
     revision: i64,
 ) -> Result<Reply, &'static str> {
-    if !(1..=4).contains(&state.version) {
+    if !(1..=5).contains(&state.version) {
         return Err("UnsupportedState");
     }
     if state.high_water_time > now.saturating_add(2) {
@@ -200,6 +222,15 @@ pub fn apply(
         } => {
             fixed_hex::<32>(verifier)?;
             fixed_hex::<32>(device_key)?;
+            if state.mail.device_history.contains(device_key)
+                || state
+                    .mail
+                    .addresses
+                    .values()
+                    .any(|a| a.manifest.public_key == *device_key)
+            {
+                return Err("SeparateMailIdentityRequired");
+            }
             validate_grants(*mask)?;
             if let Some(existing) = state.invitations.get(verifier) {
                 if existing.issuer != request.key
@@ -281,6 +312,15 @@ pub fn apply(
             expires,
         } => {
             fixed_hex::<32>(device_key)?;
+            if state.mail.device_history.contains(device_key)
+                || state
+                    .mail
+                    .addresses
+                    .values()
+                    .any(|a| a.manifest.public_key == *device_key)
+            {
+                return Err("SeparateMailIdentityRequired");
+            }
             validate_grants(*mask)?;
             if (*mask & (ADMIN | FEDERATION) != 0 && state.consents.contains_key(device_key))
                 || (*mask & (ADMIN | HOST) != 0 && state.bridge_consents.contains_key(device_key))

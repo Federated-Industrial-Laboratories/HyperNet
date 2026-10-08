@@ -278,6 +278,7 @@ fn bridge_document(
     authority::require(state, key, MEMBER | FEDERATION, now)?;
     if state.members.get(key).ok_or("NotMember")?.grants != MEMBER | FEDERATION
         || state.consents.contains_key(key)
+        || state.mail.hosts.contains_key(key)
     {
         return Err("SeparateBridgeIdentityRequired");
     }
@@ -367,7 +368,7 @@ pub fn preflight(
     certificate: Option<&str>,
     now: u64,
 ) -> Result<(), &'static str> {
-    if !(1..=4).contains(&state.version) {
+    if !(1..=5).contains(&state.version) {
         return Err("UnsupportedState");
     }
     if state.high_water_time > now.saturating_add(2) {
@@ -383,6 +384,7 @@ pub fn preflight(
             authority::require(state, &request.key, MEMBER | FEDERATION, now)?;
             if state.members.get(&request.key).ok_or("NotMember")?.grants != MEMBER | FEDERATION
                 || state.consents.contains_key(&request.key)
+                || state.mail.hosts.contains_key(&request.key)
             {
                 return Err("SeparateBridgeIdentityRequired");
             }
@@ -1356,7 +1358,7 @@ pub fn apply(
     if changed {
         state.epoch = state.epoch.checked_add(1).ok_or("CapacityExceeded")?;
     }
-    state.version = 4;
+    state.version = state.version.max(4);
     state.high_water_time = state.high_water_time.max(now);
     let reply = Reply::success(state.epoch, result);
     encoded(&reply, 256 * 1024)?;

@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT
-use crate::{authority, federation_authority, page_authority, protocol::VerifiedRequest, types::*};
+use crate::{
+    authority, federation_authority, mail_authority, page_authority, protocol::VerifiedRequest,
+    types::*,
+};
 use anyhow::{Context, Result, bail};
 use ed25519_dalek::SigningKey;
 use etcd_client::{
@@ -84,41 +87,52 @@ pub fn atomic_private(path: &Path, bytes: &[u8]) -> Result<()> {
 
 pub struct Store {
     client: Client,
+    clients: Vec<Client>,
+    active_endpoint: usize,
     namespace: String,
     network: String,
     floor: Floor,
     floor_path: PathBuf,
     _lock: File,
     federation_signing_key: Option<SigningKey>,
+    mail_signing_key: Option<SigningKey>,
+}
+
+fn load_signing_key(path: &Option<PathBuf>) -> Result<Option<SigningKey>> {
+    path.as_ref()
+        .map(|path| -> Result<SigningKey> {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields, rename_all = "camelCase")]
+            struct Identity {
+                secret_key: String,
+                public_key: String,
+            }
+            let mut bytes = read_private(path, 4096)?;
+            let parsed = serde_json::from_slice::<Identity>(&bytes);
+            bytes.zeroize();
+            let mut identity = parsed.context("Invalid mail or federation signing identity")?;
+            let parsed = crate::protocol::fixed_hex::<32>(&identity.secret_key);
+            identity.secret_key.zeroize();
+            let mut secret = parsed.map_err(anyhow::Error::msg)?;
+            let key = SigningKey::from_bytes(&secret);
+            secret.zeroize();
+            if hex::encode(key.verifying_key().as_bytes()) != identity.public_key {
+                bail!("Authority signing identity mismatch");
+            }
+            Ok(key)
+        })
+        .transpose()
 }
 
 impl Store {
     pub async fn connect(config: &AuthorityConfig) -> Result<Self> {
-        let federation_signing_key = config
-            .federation_signing_key
-            .as_ref()
-            .map(|path| -> Result<SigningKey> {
-                #[derive(Deserialize)]
-                #[serde(deny_unknown_fields, rename_all = "camelCase")]
-                struct Identity {
-                    secret_key: String,
-                    public_key: String,
-                }
-                let mut bytes = read_private(path, 4096)?;
-                let parsed = serde_json::from_slice::<Identity>(&bytes);
-                bytes.zeroize();
-                let mut identity = parsed.context("Invalid federation signing identity")?;
-                let parsed = crate::protocol::fixed_hex::<32>(&identity.secret_key);
-                identity.secret_key.zeroize();
-                let mut secret = parsed.map_err(anyhow::Error::msg)?;
-                let key = SigningKey::from_bytes(&secret);
-                secret.zeroize();
-                if hex::encode(key.verifying_key().as_bytes()) != identity.public_key {
-                    bail!("Federation signing identity mismatch");
-                }
-                Ok(key)
-            })
-            .transpose()?;
+        let federation_signing_key = load_signing_key(&config.federation_signing_key)?;
+        let mail_signing_key = load_signing_key(&config.mail_signing_key)?;
+        if let (Some(a), Some(b)) = (&federation_signing_key, &mail_signing_key)
+            && a.verifying_key() == b.verifying_key()
+        {
+            bail!("Mail and federation require separate signing identities");
+        }
         crate::protocol::fixed_hex::<32>(&config.network).map_err(anyhow::Error::msg)?;
         if config.etcd_endpoints.len() < 3 || config.etcd_endpoints.len() > 7 {
             bail!("Configure three to seven authority voter endpoints");
@@ -182,13 +196,22 @@ impl Store {
             .with_timeout(Duration::from_secs(3))
             .with_connect_timeout(Duration::from_secs(3))
             .with_require_leader(true);
-        let mut client = Client::connect(&config.etcd_endpoints, Some(options))
-            .await
-            .context("Authority cluster is unavailable")?;
-        let membership = client
-            .member_list()
-            .await
-            .context("Cannot verify authority voter membership")?;
+        // Independent channels make transport failover deterministic. A balanced channel
+        // may repeatedly select a voter which has stopped accepting connections.
+        let mut clients = Vec::new();
+        for endpoint in &config.etcd_endpoints {
+            clients.push(Client::connect([endpoint], Some(options.clone())).await?);
+        }
+        let mut selected = None;
+        for (index, client) in clients.iter_mut().enumerate() {
+            if let Ok(membership) = client.member_list().await {
+                selected = Some((index, membership));
+                break;
+            }
+        }
+        let (active_endpoint, membership) =
+            selected.context("Cannot verify authority voter membership")?;
+        let client = clients[active_endpoint].clone();
         let voters = membership
             .members()
             .iter()
@@ -199,12 +222,15 @@ impl Store {
         }
         Ok(Self {
             client,
+            clients,
+            active_endpoint,
             namespace: format!("/HyperNet/{}/Authority", config.network),
             network: config.network.clone(),
             floor,
             floor_path,
             _lock: lock,
             federation_signing_key,
+            mail_signing_key,
         })
     }
 
@@ -234,10 +260,13 @@ impl Store {
     }
 
     pub async fn initialise(&mut self, admin: &str) -> Result<()> {
-        if self
-            .federation_signing_key
-            .as_ref()
-            .is_some_and(|key| hex::encode(key.verifying_key().as_bytes()) == admin)
+        if [&self.federation_signing_key, &self.mail_signing_key]
+            .iter()
+            .any(|signer| {
+                signer
+                    .as_ref()
+                    .is_some_and(|key| hex::encode(key.verifying_key().as_bytes()) == admin)
+            })
         {
             bail!("Federation signing key must be separate from membership");
         }
@@ -271,7 +300,28 @@ impl Store {
         Ok(())
     }
 
+    fn next_endpoint(&mut self) {
+        self.active_endpoint = (self.active_endpoint + 1) % self.clients.len();
+        self.client = self.clients[self.active_endpoint].clone();
+    }
+
     pub async fn health(&mut self) -> Result<()> {
+        for attempt in 0..self.clients.len() {
+            match self.health_once().await {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if error.downcast_ref::<etcd_client::Error>().is_some()
+                        && attempt + 1 < self.clients.len() =>
+                {
+                    self.next_endpoint()
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!()
+    }
+
+    async fn health_once(&mut self) -> Result<()> {
         if self.floor.cluster == 0 {
             bail!("Authority floor is missing; provision it from the initialised healthy network");
         }
@@ -287,8 +337,21 @@ impl Store {
             bail!("Authority state exceeds its size bound");
         }
         let state: State = serde_json::from_slice(kv.value())?;
-        if !(1..=4).contains(&state.version) || state.network != self.network {
+        if !(1..=5).contains(&state.version) || state.network != self.network {
             bail!("Authority state identity is invalid");
+        }
+        for signer in [&self.federation_signing_key, &self.mail_signing_key]
+            .into_iter()
+            .flatten()
+        {
+            if mail_authority::reserved_identity_conflict(
+                &state,
+                &hex::encode(signer.verifying_key().as_bytes()),
+            ) {
+                bail!(
+                    "Authority signing identities must be separate from membership and mail keys"
+                );
+            }
         }
         let now = now()?;
         if state.high_water_time > now.saturating_add(2) {
@@ -299,10 +362,72 @@ impl Store {
     }
 
     pub async fn execute(&mut self, request: &VerifiedRequest, certificate: Option<&str>) -> Reply {
-        match self.transition(request, certificate).await {
-            Ok(reply) => reply,
-            Err(_) => Reply::error("AuthorityUnavailable"),
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(7);
+        for attempt in 0..self.clients.len() {
+            let operation = async {
+                if mail_authority::read_only(&request.request.command) {
+                    self.mail_read_only(request, certificate).await
+                } else {
+                    self.transition(request, certificate).await
+                }
+            };
+            let attempt_deadline =
+                deadline.min(tokio::time::Instant::now() + Duration::from_secs(2));
+            match tokio::time::timeout_at(attempt_deadline, operation).await {
+                Ok(Ok(reply)) => return reply,
+                Ok(Err(error))
+                    if error.downcast_ref::<etcd_client::Error>().is_some()
+                        && attempt + 1 < self.clients.len() =>
+                {
+                    self.next_endpoint()
+                }
+                Err(_)
+                    if attempt + 1 < self.clients.len()
+                        && tokio::time::Instant::now() < deadline =>
+                {
+                    self.next_endpoint()
+                }
+                _ => return Reply::error("AuthorityUnavailable"),
+            }
         }
+        Reply::error("AuthorityUnavailable")
+    }
+
+    async fn mail_read_only(
+        &mut self,
+        request: &VerifiedRequest,
+        certificate: Option<&str>,
+    ) -> Result<Reply> {
+        let response = self.client.get(self.namespace.as_str(), None).await?;
+        let header = response.header().context("Missing authority header")?;
+        let current = now()?;
+        if request.request.issued_at.saturating_add(60) < current
+            || request.request.issued_at > current.saturating_add(30)
+        {
+            return Ok(Reply::error("StaleRequest"));
+        }
+        self.accept_floor(header.cluster_id(), header.revision(), current)?;
+        let kv = response.kvs().first().context("Missing authority state")?;
+        if kv.value().len() > MAX_STATE {
+            bail!("Authority state exceeds its size bound");
+        }
+        let state: State = serde_json::from_slice(kv.value())?;
+        if state.network != self.network {
+            bail!("Authority network mismatch");
+        }
+        Ok(
+            match mail_authority::authorise(
+                &state,
+                request,
+                certificate,
+                current,
+                header.revision(),
+                self.mail_signing_key.as_ref(),
+            ) {
+                Ok(reply) => reply,
+                Err(code) => Reply::error(code),
+            },
+        )
     }
 
     async fn transition(
@@ -328,13 +453,41 @@ impl Store {
             if state.network != self.network {
                 bail!("Authority network identity mismatch");
             }
-            if let Command::Invite { device_key, .. } = &request.request.command
-                && self
-                    .federation_signing_key
-                    .as_ref()
-                    .is_some_and(|key| hex::encode(key.verifying_key().as_bytes()) == *device_key)
-            {
+            let membership_key = match &request.request.command {
+                Command::Invite { device_key, .. } | Command::Grant { device_key, .. } => {
+                    Some(device_key.as_str())
+                }
+                Command::Redeem { .. } => Some(request.key.as_str()),
+                _ => None,
+            };
+            if membership_key.is_some_and(|candidate| {
+                [&self.federation_signing_key, &self.mail_signing_key]
+                    .into_iter()
+                    .flatten()
+                    .any(|key| hex::encode(key.verifying_key().as_bytes()) == candidate)
+            }) {
                 return Ok(Reply::error("DedicatedAuthorityKeyRequired"));
+            }
+            if let Command::MailAddressCreate { manifest }
+            | Command::MailAddressUpdate { manifest, .. } = &request.request.command
+            {
+                let value = match mail_authority::manifest(manifest, &state.network) {
+                    Ok(value) => value,
+                    Err(code) => return Ok(Reply::error(code)),
+                };
+                for signer in [&self.federation_signing_key, &self.mail_signing_key]
+                    .into_iter()
+                    .flatten()
+                {
+                    let public = hex::encode(signer.verifying_key().as_bytes());
+                    if value.owner_key == public
+                        || value.devices.iter().any(|device| {
+                            device.request_key == public || device.mls_signature_key == public
+                        })
+                    {
+                        return Ok(Reply::error("DedicatedAuthorityKeyRequired"));
+                    }
+                }
             }
             let mut operations = Vec::new();
             let reply = if page_authority::handles(&request.request.command) {
@@ -438,6 +591,18 @@ impl Store {
                     operations.push(TxnOp::put(format!("{prefix}{key}"), value, None));
                 }
                 change.reply
+            } else if mail_authority::handles(&request.request.command) {
+                match mail_authority::apply(
+                    &mut state,
+                    request,
+                    certificate,
+                    now,
+                    header.revision(),
+                    self.mail_signing_key.as_ref(),
+                ) {
+                    Ok(reply) => reply,
+                    Err(code) => return Ok(Reply::error(code)),
+                }
             } else {
                 match authority::apply(&mut state, request, certificate, now, header.revision()) {
                     Ok(reply) => reply,
