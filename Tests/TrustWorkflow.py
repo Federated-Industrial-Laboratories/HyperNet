@@ -23,7 +23,7 @@ import time
 
 
 class Workflow:
-    def __init__(self, args):
+    def __init__(self, args, slot=0, federation=False):
         self.args = args
         self.root = Path(tempfile.mkdtemp(prefix='HyperNetQualification'))
         self.network = secrets.token_hex(32)
@@ -40,7 +40,11 @@ class Workflow:
         self.suite = str(Path(args.suite).resolve())
         self.node = str(Path(args.node).resolve())
         self.etcd = Path(args.etcd_directory).resolve()
-        self.endpoint = 'https://localhost:28443'
+        self.subnet = f'10.89.{72+slot}'
+        self.store_port = 23790 + slot * 10
+        self.broker_port = 28443 + slot
+        self.federation = federation
+        self.endpoint = f'https://localhost:{self.broker_port}'
         self.broker = self.prefix + 'Broker'
 
     def run(self, *command, good=True, timeout=30, input=None):
@@ -96,12 +100,12 @@ class Workflow:
         return response
 
     def authctl(self, *args, good=True, endpoints=None):
-        return self.run(self.etcd / 'etcdctl', '--endpoints=' + (endpoints or 'https://127.0.0.1:23791,https://127.0.0.1:23792,https://127.0.0.1:23793'),
+        return self.run(self.etcd / 'etcdctl', '--endpoints=' + (endpoints or ','.join(f'https://127.0.0.1:{self.store_port+i}' for i in range(1,4))),
                         '--cacert=' + str(self.pki / 'StoreCa.pem'), '--cert=' + str(self.pki / 'Root.pem'),
                         '--key=' + str(self.pki / 'RootKey.pem'), '--command-timeout=5s', *args, good=good, timeout=12)
 
     def provision(self):
-        self.run('podman', 'network', 'create', '--subnet', '10.89.72.0/24', self.prefix)
+        self.run('podman', 'network', 'create', '--subnet', self.subnet+'.0/24', self.prefix)
         self.network_created = True
         for name in ['StoreCa', 'PeerCa', 'NetworkCa', 'HostCa']:
             self.ca(name)
@@ -109,10 +113,10 @@ class Workflow:
         self.certificate('BrokerStore', 'StoreCa', 'HyperNetBroker', '', 'clientAuth')
         self.certificate('Broker', 'NetworkCa', 'HyperNetAuthority', 'DNS:localhost,DNS:authority.example,IP:127.0.0.1', 'serverAuth')
         self.certificate('Host', 'HostCa', 'HyperNetHost', '', 'clientAuth')
-        cluster = ','.join(f'Voter{i}=https://10.89.72.{10+i}:2380' for i in range(1,4))
+        cluster = ','.join(f'Voter{i}=https://{self.subnet}.{10+i}:2380' for i in range(1,4))
         for i in range(1,4):
             name = f'Voter{i}'
-            address = f'10.89.72.{10+i}'
+            address = f'{self.subnet}.{10+i}'
             self.certificate(name, 'StoreCa', name, 'DNS:HyperNetVoter,IP:127.0.0.1,IP:' + address, 'serverAuth')
             self.certificate(name + 'Peer', 'PeerCa', 'HyperNetVoter', 'IP:' + address, 'serverAuth,clientAuth')
             directory = self.root / name
@@ -127,7 +131,7 @@ class Workflow:
             self.run('podman','run','-d','--name',container,'--network',self.prefix,'--ip',address,
                      '--userns=nomap','--user=0:0','--cap-drop=ALL','--security-opt=no-new-privileges',
                      '--read-only','--memory=512m','--memory-swap=512m','--pids-limit=128','--cpus=1',
-                     '--log-driver=none','--publish',f'127.0.0.1:{23790+i}:2379',
+                     '--log-driver=none','--publish',f'127.0.0.1:{self.store_port+i}:2379',
                      '-v',f'{self.etcd}/etcd:/Etcd:ro','-v',f'{config}:/Config:ro', '-v',f'{state}:/State:rw',
                      '--entrypoint=/Etcd',self.args.image,'--name='+name,'--data-dir=/State',
                      '--listen-client-urls=https://0.0.0.0:2379','--advertise-client-urls=https://'+address+':2379',
@@ -151,6 +155,8 @@ class Workflow:
         self.authctl('role','add','HyperNetBroker')
         self.authctl('role','grant-permission','HyperNetBroker','readwrite','/HyperNet/'+self.network+'/Authority')
         self.authctl('role','grant-permission','HyperNetBroker','readwrite','/HyperNet/'+self.network+'/Pages/','--prefix')
+        if self.federation:
+            self.authctl('role','grant-permission','HyperNetBroker','readwrite','/HyperNet/'+self.network+'/Federation/','--prefix')
         self.authctl('user','add','HyperNetBroker','--no-password')
         self.authctl('user','grant-role','HyperNetBroker','HyperNetBroker')
         self.authctl('auth','enable')
@@ -165,13 +171,19 @@ class Workflow:
             shutil.copy2(self.pki/file,configdir/file)
         config = {'network':self.network,'listen':'0.0.0.0:8443','stateDirectory':str(statedir),
                   'certificate':str(configdir/'Broker.pem'),'privateKey':str(configdir/'BrokerKey.pem'),
-                  'clientCa':str(configdir/'HostCa.pem'),'etcdEndpoints':[f'https://127.0.0.1:{23790+i}' for i in range(1,4)],
+                  'clientCa':str(configdir/'HostCa.pem'),'etcdEndpoints':[f'https://127.0.0.1:{self.store_port+i}' for i in range(1,4)],
                   'etcdCa':str(configdir/'StoreCa.pem'),'etcdCertificate':str(configdir/'BrokerStore.pem'),
                   'etcdKey':str(configdir/'BrokerStoreKey.pem'),'etcdServerName':'HyperNetVoter'}
+        if self.federation:
+            signer = configdir/'FederationSigningKey.json'
+            self.signer = json.loads(self.run(self.suite,'keygen','--output',signer).stdout)['publicKey']
+            config['federationSigningKey'] = str(signer)
         self.write(directory/'Bootstrap.json',config)
         self.run(self.node,'initialise','--config',directory/'Bootstrap.json','--admin-key',self.admin)
         config['stateDirectory']='/State'
-        config['etcdEndpoints']=[f'https://10.89.72.{10+i}:2379' for i in range(1,4)]
+        config['etcdEndpoints']=[f'https://{self.subnet}.{10+i}:2379' for i in range(1,4)]
+        if self.federation:
+            config['federationSigningKey']='/Config/FederationSigningKey.json'
         for field in ['certificate','privateKey','clientCa','etcdCa','etcdCertificate','etcdKey']:
             config[field]='/Config/'+Path(config[field]).name
         self.write(configdir/'Authority.json',config)
@@ -181,7 +193,7 @@ class Workflow:
             shutil.copy2(self.pki/origin,configdir/destination)
         self.authority_profile=self.root/'AuthorityProfile'
         self.run('bash',self.authority_tool,'Initialise',self.authority_profile,configdir,statedir,
-                 self.args.image,self.prefix,'127.0.0.1:28443:8443',timeout=60)
+                 self.args.image,self.prefix,f'127.0.0.1:{self.broker_port}:8443',timeout=60)
         self.broker=json.loads((self.authority_profile/'Control.json').read_text())['name']
         self.containers.append(self.broker)
         self.run('bash',self.authority_tool,'Start',self.authority_profile,timeout=60)
@@ -212,7 +224,7 @@ class Workflow:
         context.minimum_version=context.maximum_version=ssl.TLSVersion.TLSv1_3
         if hosting:
             context.load_cert_chain(str(self.pki/'Host.pem'),str(self.pki/'HostKey.pem'))
-        connection=http.client.HTTPSConnection('localhost',28443,context=context,timeout=10)
+        connection=http.client.HTTPSConnection('localhost',self.broker_port,context=context,timeout=10)
         try:
             connection.request('POST','/V1/Command',json.dumps(envelope),{'Content-Type':'application/json'})
             response=connection.getresponse()
@@ -378,13 +390,13 @@ class Workflow:
         self.run('podman','stop','--time','3',self.broker,timeout=15)
         for i in range(1,4):
             self.run('podman','stop','--time','3',self.prefix+f'Voter{i}',timeout=15)
-        cluster=','.join(f'Voter{i}=https://10.89.72.{10+i}:2380' for i in range(1,4))
+        cluster=','.join(f'Voter{i}=https://{self.subnet}.{10+i}:2380' for i in range(1,4))
         for i in range(1,4):
             state=self.root/f'Voter{i}'/'State'
             self.run('podman','unshare','rm','-rf',state)
             self.run('podman','unshare',self.etcd/'etcdutl','snapshot','restore',self.snapshot,'--data-dir='+str(state),
                      '--name='+f'Voter{i}','--initial-cluster='+cluster,
-                     '--initial-advertise-peer-urls='+f'https://10.89.72.{10+i}:2380',
+                     '--initial-advertise-peer-urls='+f'https://{self.subnet}.{10+i}:2380',
                      '--initial-cluster-token='+self.prefix+'Restored')
             self.run('podman','unshare','chmod','0700',state)
             self.run('podman','unshare','chown','-R','1:1',state)

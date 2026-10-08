@@ -8,12 +8,13 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::{Mutex, Semaphore},
+    task::JoinSet,
     time::{Instant, sleep_until, timeout},
 };
 
@@ -26,6 +27,32 @@ struct Configuration {
     bytes_per_second: u64,
     maximum_connections: usize,
     maximum_connection_bytes: u64,
+    #[serde(default)]
+    expires: Option<u64>,
+}
+
+async fn expiry(expires: u64) -> Result<()> {
+    let mut previous = 0;
+    loop {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        ensure!(now >= previous, "ClockRollback");
+        ensure!(now < expires, "ConsentExpired");
+        previous = now;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn serve(config: Configuration) -> Result<()> {
+    if let Some(expires) = config.expires {
+        // Cancellation drops the listener and its owned connection tasks.
+        tokio::select! {
+            biased;
+            result = expiry(expires) => result,
+            result = run(config) => result,
+        }
+    } else {
+        run(config).await
+    }
 }
 
 async fn copy(
@@ -62,7 +89,9 @@ async fn run(config: Configuration) -> Result<()> {
     let listener = TcpListener::bind(config.listen).await?;
     let slots = Arc::new(Semaphore::new(config.maximum_connections));
     let schedule = Arc::new(Mutex::new(Instant::now()));
+    let mut connections = JoinSet::new();
     loop {
+        while connections.try_join_next().is_some() {}
         let (incoming, source) = listener.accept().await?;
         if source.ip() != config.allowed_source {
             continue;
@@ -74,7 +103,7 @@ async fn run(config: Configuration) -> Result<()> {
         let rate = config.bytes_per_second;
         let maximum = config.maximum_connection_bytes;
         let schedule = schedule.clone();
-        tokio::spawn(async move {
+        connections.spawn(async move {
             let _slot = slot;
             let result: Result<()> = async {
                 let outgoing =
@@ -136,5 +165,69 @@ fn main() -> Result<()> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
-        .block_on(run(config))
+        .block_on(serve(config))
+}
+
+#[cfg(test)]
+mod expiry_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn absolute_expiry_closes_listener_and_established_streams() {
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = reserved.local_addr().unwrap();
+        drop(reserved);
+        let config = Configuration {
+            listen: address,
+            destination: upstream.local_addr().unwrap(),
+            allowed_source: address.ip(),
+            bytes_per_second: 1048576,
+            maximum_connections: 1,
+            maximum_connection_bytes: 16384,
+            expires: Some(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    + 2,
+            ),
+        };
+        let relay = tokio::spawn(serve(config));
+        let mut client = timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(client) = TcpStream::connect(address).await {
+                    break client;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let (mut remote, _) = upstream.accept().await.unwrap();
+        client.write_all(b"x").await.unwrap();
+        let mut byte = [0];
+        remote.read_exact(&mut byte).await.unwrap();
+        assert_eq!(&byte, b"x");
+        let result = timeout(Duration::from_secs(3), relay)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.unwrap_err().to_string().contains("ConsentExpired"));
+        assert_eq!(
+            timeout(Duration::from_secs(1), client.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(1), remote.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        assert!(TcpStream::connect(address).await.is_err());
+    }
 }

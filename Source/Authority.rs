@@ -28,7 +28,9 @@ fn grants(member: &Member, now: u64, epoch: u64) -> u64 {
 }
 
 pub(crate) fn require(state: &State, key: &str, mask: u64, now: u64) -> Result<(), &'static str> {
-    if mask & ADMIN != 0 && state.consents.contains_key(key) {
+    if mask & ADMIN != 0
+        && (state.consents.contains_key(key) || state.bridge_consents.contains_key(key))
+    {
         return Err("ServiceIdentity");
     }
     let member = state.members.get(key).ok_or("NotMember")?;
@@ -59,7 +61,7 @@ pub(crate) fn mutation_capacity(state: &State, key: &str, now: u64) -> Result<()
 }
 
 fn validate_grants(mask: u64) -> Result<(), &'static str> {
-    if mask & !ALL != 0 || mask & MEMBER == 0 {
+    if !matches!(mask, 1 | 3 | 5 | 7 | 9) {
         return Err("InvalidGrant");
     }
     Ok(())
@@ -85,6 +87,7 @@ fn preserve_admin(
     if state.members.iter().any(|(key, member)| {
         key != target
             && !state.consents.contains_key(key)
+            && !state.bridge_consents.contains_key(key)
             && grants(member, now, state.epoch) & ADMIN != 0
     }) {
         return Ok(());
@@ -110,7 +113,12 @@ fn check_existing_permission(
         Command::Invite { .. } | Command::Grant { .. } | Command::Revoke { .. } => {
             require(state, &request.key, ADMIN | MEMBER, now)
         }
-        Command::Consent { .. } => require(state, &request.key, HOST | MEMBER, now),
+        Command::Consent { .. } => {
+            if state.bridge_consents.contains_key(&request.key) {
+                return Err("SeparateHostIdentityRequired");
+            }
+            require(state, &request.key, HOST | MEMBER, now)
+        }
         Command::Heartbeat { profile } => {
             require(state, &request.key, HOST | MEMBER, now)?;
             let consent = state.consents.get(&request.key).ok_or("ConsentRequired")?;
@@ -145,7 +153,7 @@ pub fn apply(
     now: u64,
     revision: i64,
 ) -> Result<Reply, &'static str> {
-    if state.version != 1 && state.version != 2 {
+    if !(1..=3).contains(&state.version) {
         return Err("UnsupportedState");
     }
     if state.high_water_time > now.saturating_add(2) {
@@ -274,7 +282,9 @@ pub fn apply(
         } => {
             fixed_hex::<32>(device_key)?;
             validate_grants(*mask)?;
-            if *mask & ADMIN != 0 && state.consents.contains_key(device_key) {
+            if (*mask & (ADMIN | FEDERATION) != 0 && state.consents.contains_key(device_key))
+                || (*mask & (ADMIN | HOST) != 0 && state.bridge_consents.contains_key(device_key))
+            {
                 return Err("ServiceIdentity");
             }
             valid_expiry(*expires, now)?;
@@ -295,6 +305,9 @@ pub fn apply(
             member.revoked = true;
             member.grants = 0;
             if let Some(consent) = state.consents.get_mut(device_key) {
+                consent.active = false;
+            }
+            if let Some(consent) = state.bridge_consents.get_mut(device_key) {
                 consent.active = false;
             }
             changed = true;
@@ -334,7 +347,7 @@ pub fn apply(
                 if consent.grants != *mask || consent.expires != *expires {
                     return Err("InvalidConsent");
                 }
-                state.version = 2;
+                state.version = state.version.max(2);
             }
             state.consents.insert(
                 request.key.clone(),

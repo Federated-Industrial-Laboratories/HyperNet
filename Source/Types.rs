@@ -3,10 +3,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+#[path = "FederationTypes.rs"]
+mod federation;
+pub use federation::*;
+
 pub const MEMBER: u64 = 1;
 pub const HOST: u64 = 2;
 pub const ADMIN: u64 = 4;
-pub const ALL: u64 = MEMBER | HOST | ADMIN;
+pub const FEDERATION: u64 = 8;
+pub const ALL: u64 = MEMBER | HOST | ADMIN | FEDERATION;
 pub const MAX_PAYLOAD: usize = 64 * 1024;
 pub const MAX_ENVELOPE: usize = 96 * 1024;
 pub const MAX_STATE: usize = 1024 * 1024;
@@ -125,6 +130,77 @@ pub enum Command {
         profile: String,
         ticket_id: String,
         bundle: PageBundle,
+    },
+    FederationAccept {
+        treaty: FederationTreaty,
+    },
+    FederationWithdraw {
+        agreement_id: String,
+        expected_version: u64,
+    },
+    FederationAgreements,
+    BridgeConsent {
+        agreement_id: String,
+        profile: String,
+        expires: u64,
+        certificate: String,
+        document: String,
+    },
+    BridgeWithdraw,
+    FederationShare {
+        agreement_id: String,
+        agreement_digest: String,
+        page_id: String,
+        publication_version: u64,
+        descriptor_digest: String,
+        allow: bool,
+    },
+    FederationPermit {
+        agreement_id: String,
+        profile: String,
+    },
+    FederationExport {
+        agreement_id: String,
+        profile: String,
+        admission: SignedEvidence,
+        page_id: Option<String>,
+        include_bundle: bool,
+    },
+    FederationImport {
+        agreement_id: String,
+        profile: String,
+        admission: SignedEvidence,
+        export: SignedEvidence,
+        bundle: Option<PageBundle>,
+        author_share: Option<Envelope>,
+    },
+    FederationQueue {
+        agreement_id: String,
+        after: Option<String>,
+    },
+    FederationInspect {
+        agreement_id: String,
+        page_id: String,
+    },
+    FederationReview {
+        agreement_id: String,
+        page_id: String,
+        expected_version: u64,
+        descriptor_digest: String,
+        decision: String,
+    },
+    FederationPageWithdraw {
+        agreement_id: String,
+        page_id: String,
+        expected_version: u64,
+    },
+    FederationList {
+        agreement_id: String,
+        after: Option<String>,
+    },
+    FederationRead {
+        agreement_id: String,
+        page_id: String,
     },
 }
 
@@ -291,6 +367,14 @@ pub struct State {
     pub pages: BTreeMap<String, PageRecord>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub replica_tickets: BTreeMap<String, TicketRecord>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub federation_agreements: BTreeMap<String, FederationAgreement>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bridge_consents: BTreeMap<String, Consent>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub federation_shares: BTreeMap<String, FederationShareRecord>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub federation_pages: BTreeMap<String, FederationPageRecord>,
 }
 
 impl State {
@@ -303,7 +387,7 @@ impl State {
             members: BTreeMap::from([(
                 admin,
                 Member {
-                    grants: ALL,
+                    grants: MEMBER | HOST | ADMIN,
                     expires: u64::MAX,
                     revoked: false,
                 },
@@ -313,6 +397,10 @@ impl State {
             receipts: BTreeMap::new(),
             pages: BTreeMap::new(),
             replica_tickets: BTreeMap::new(),
+            federation_agreements: BTreeMap::new(),
+            bridge_consents: BTreeMap::new(),
+            federation_shares: BTreeMap::new(),
+            federation_pages: BTreeMap::new(),
         }
     }
 }
@@ -331,4 +419,6 @@ pub struct AuthorityConfig {
     pub etcd_certificate: std::path::PathBuf,
     pub etcd_key: std::path::PathBuf,
     pub etcd_server_name: String,
+    #[serde(default)]
+    pub federation_signing_key: Option<std::path::PathBuf>,
 }

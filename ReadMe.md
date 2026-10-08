@@ -29,14 +29,22 @@ Unsupported hosting profiles fail closed.
 - [Confined hosting](Documentation/Hosting.md): signed consent, isolation,
   resource limits, installation and local withdrawal.
 - [Pages](Documentation/Pages.md): inert text and exact-content approval.
+- [Federation](Documentation/Federation.md): bilateral treaties, author opt-in,
+  separate import review and signed freshness evidence.
+- [Confined bridges](Documentation/Bridge.md): dual-signed endpoint consent and
+  bounded outward-only transfer between independent networks.
 - [Authority protocol](Documentation/Protocol.md): independent client interface.
 - [Requirements](Documentation/Requirements.md): the broader product scope.
 
 [HyperNetSuite](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite)
 is an independently built and packaged client. The daemon does not depend on it.
 This version maintains trusted membership, hosting readiness and manually approved
-Pages with scoped replication. Mail, transfers, federation and shell services
-remain future capabilities.
+Pages with scoped replication. Federation transfers exact author-approved native
+publications between explicitly consenting networks, with independent destination
+review. It grants no shared membership or administration and cannot re-export
+foreign imports. Local vetoes apply on fresh authority checks; remote vetoes and
+partitions stop new reads after at most five seconds of existing evidence.
+Mail, file transfers and shell services remain future capabilities.
 
 The implementation is not yet a qualified production Internet release. The
 replication profile assumes trusted administrators and crash faults; it does not

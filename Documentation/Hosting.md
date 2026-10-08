@@ -10,6 +10,8 @@ can additionally enable approved Pages replication in selected namespaces.
 Neither profile stores mail or transferred files. Writable state is bounded
 tmpfs and is recreated on restart. Authority storage has a separate durable deployment;
 see [Authority.md](Authority.md).
+Federation uses a separate dual-identity bridge and consent profile; see
+[Bridge.md](Bridge.md). Ordinary host consent cannot enable federation.
 
 ## Required Linux profile
 
@@ -332,3 +334,10 @@ authenticated terminal navigation, restart, withdrawal and revocation through th
 that a requested offline replica cannot silently fall back to origin content.
 The Pages fixture uses the same isolated ports and subnet and removes its state.
 Do not run both workflow fixtures concurrently.
+
+Container supervisors enforce the remaining signed consent lifetime for each
+process, including every relay. Relays also close their listeners and existing
+streams at the absolute expiry, or on backwards clock movement. A stopped,
+failed or unresponsive service cannot extend a sibling relay beyond its runtime
+limit. Existing profiles should be reinitialised to add the relay deadline;
+starting them with the updated launcher still applies the container timeout.
