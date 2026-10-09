@@ -40,7 +40,7 @@ class Packages(unittest.TestCase):
         self.counter = 0
         self.image = 'sha256:' + '1' * 64
         self.payload = {name: b'Package fixture\n' for name in (
-            'Licence.txt', 'ReadMe.md', 'Tools/Bundle.py', 'Tools/Qualify.py', 'Tools/Upgrade.py',
+            'Bin/HyperNet', 'Licence.txt', 'ReadMe.md', 'Tools/Bundle.py', 'Tools/Qualify.py', 'Tools/Upgrade.py',
             'Tools/Authority.sh', 'Tools/Lifecycle.sh', 'Tools/Seccomp.sh',
             'Documentation/ThirdPartyNotices.txt', 'Documentation/SystemLibraries.tsv',
             'Documentation/SystemLibraryNotices.txt', 'Images/HyperNetOci.tar')}
@@ -49,9 +49,10 @@ class Packages(unittest.TestCase):
                          'architecture': Bundle.architecture(), 'metadata': {
                              'imageId': self.image, 'imageArchive': 'Images/HyperNetOci.tar',
                              'authoritySchema': 9,
-                             'binaries': {'HyperNet': '2' * 64, 'HyperNetGate': '3' * 64},
+                             'hostRuntime': {'elfInterpreter': {'x86_64': '/lib64/ld-linux-x86-64.so.2', 'aarch64': '/lib/ld-linux-aarch64.so.1'}[Bundle.architecture()], 'neededLibraries': ['libc.so.6'], 'glibcMinimum': '2.34'},
+                             'binaries': {'HyperNet': hashlib.sha256(self.payload['Bin/HyperNet']).hexdigest(), 'HyperNetGate': '3' * 64},
                              'prerequisites': ['Synthetic package contract fixture']},
-                         'files': [{'path': name, 'mode': 0o700 if name.startswith('Tools/') else 0o600,
+                         'files': [{'path': name, 'mode': Bundle.file_mode(name),
                                     'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
                                    for name, data in sorted(self.payload.items())]}
 
@@ -141,10 +142,26 @@ class Packages(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.verify(self.archive(manifest))
 
+    def test_native_runtime_metadata_and_image_identity_are_bound(self):
+        mutations = [lambda m: m['metadata']['binaries'].update(HyperNet='0' * 64),
+                     lambda m: m['metadata']['hostRuntime'].update(elfInterpreter='/Untrusted/Loader'),
+                     lambda m: m['metadata']['hostRuntime'].update(neededLibraries=['../Library.so']),
+                     lambda m: m['files'].remove(next(v for v in m['files'] if v['path'] == 'Bin/HyperNet'))]
+        for mutate in mutations:
+            manifest = copy.deepcopy(self.manifest)
+            mutate(manifest)
+            with self.assertRaises(ValueError):
+                Bundle.validate_manifest(manifest)
+        manifest = copy.deepcopy(self.manifest)
+        manifest['metadata']['hostRuntime']['glibcMinimum'] = '2.999'
+        with self.assertRaises(ValueError):
+            Bundle.runtime_matches(manifest)
+
     def test_install_is_no_clobber_and_remove_refuses_modified_or_extra_files(self):
         args = self.archive()
         self.installed(args)
         self.assertEqual(Bundle.installed_manifest(args)[0]['version'], '0.7.5')
+        self.assertEqual((args.prefix / 'Bin/HyperNet').stat().st_mode & 0o777, 0o700)
         with self.assertRaises(ValueError):
             self.installed(args)
         managed = args.prefix / 'ReadMe.md'

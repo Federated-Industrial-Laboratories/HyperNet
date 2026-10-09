@@ -1,0 +1,223 @@
+// SPDX-License-Identifier: MIT
+// Publish only a complete durable workload tree; retain all existing voter data.
+use super::super::{files::*, model::Profile};
+use anyhow::{Result, ensure};
+use std::{fs, os::unix::fs::MetadataExt, path::Path};
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct Preparation {
+    configuration: String,
+    device: Option<u64>,
+    inode: Option<u64>,
+}
+fn ensure_directory(path: &Path) -> Result<()> {
+    if fs::symlink_metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+        directory(path)?;
+    }
+    private_dir(path)
+}
+fn prepared_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => ensure!(
+            read(path, MAXIMUM)? == bytes,
+            "Partial preparation content differs"
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => create(path, bytes)?,
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+fn sync_preparation(
+    path: &Path,
+    files: &std::collections::BTreeSet<std::path::PathBuf>,
+) -> Result<()> {
+    private_dir(path)?;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.is_dir() {
+            sync_preparation(&entry.path(), files)?;
+        } else {
+            ensure!(
+                metadata.is_file() && files.contains(&entry.path()),
+                "Unexpected preparation content; no data removed"
+            );
+        }
+    }
+    fs::File::open(path)?.sync_all()?;
+    Ok(())
+}
+fn publish_preparation(root: &Path, preparation: &Preparation) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let launch = root.join("Launch");
+    let pending = root.join("LaunchPending");
+    let location = if launch.exists() { &launch } else { &pending };
+    let metadata = fs::symlink_metadata(location)?;
+    ensure!(
+        metadata.is_dir()
+            && Some(metadata.dev()) == preparation.device
+            && Some(metadata.ino()) == preparation.inode,
+        "Prepared directory identity differs; no data removed"
+    );
+    if location == &pending {
+        let from = std::ffi::CString::new(pending.as_os_str().as_bytes())?;
+        let to = std::ffi::CString::new(launch.as_os_str().as_bytes())?;
+        ensure!(
+            unsafe {
+                libc::renameat2(
+                    libc::AT_FDCWD,
+                    from.as_ptr(),
+                    libc::AT_FDCWD,
+                    to.as_ptr(),
+                    libc::RENAME_NOREPLACE,
+                )
+            } == 0,
+            "Cannot publish the exact prepared directory: {}",
+            std::io::Error::last_os_error()
+        );
+        fs::File::open(root)?.sync_all()?;
+    }
+    Ok(())
+}
+pub fn prepare(root: &Path, p: &Profile) -> Result<()> {
+    let journal = root.join("Preparation.json");
+    let pending = root.join("LaunchPending");
+    let digest = p.configuration_digest()?;
+    let mut preparation: Preparation = if journal.exists() {
+        super::super::files::json(&journal)?
+    } else {
+        ensure!(
+            !pending.exists() && !root.join("Launch").exists(),
+            "Unrecorded preparation directory; no data removed"
+        );
+        let preparation = Preparation {
+            configuration: digest.clone(),
+            device: None,
+            inode: None,
+        };
+        super::super::files::save(&journal, &preparation)?;
+        preparation
+    };
+    ensure!(
+        preparation.configuration == digest
+            && preparation.device.is_some() == preparation.inode.is_some(),
+        "Preparation intent differs from profile"
+    );
+    if preparation.inode.is_some() {
+        return publish_preparation(root, &preparation);
+    }
+    ensure!(
+        !root.join("Launch").exists(),
+        "Incomplete preparation cannot own a published directory"
+    );
+    if pending.exists() {
+        ensure!(
+            fs::symlink_metadata(&pending)?.is_dir(),
+            "Preparation must be a directory"
+        );
+        // This tree has never been mounted by a workload. Resume a partial ownership change.
+        podman(&strings(&[
+            "unshare",
+            "/usr/bin/chown",
+            "-R",
+            "-h",
+            "0:0",
+            pending.to_str().unwrap(),
+        ]))?;
+    }
+    ensure_directory(&pending)?;
+    let mut files = std::collections::BTreeSet::new();
+    for (relative, digest) in &p.artifacts {
+        if let Some(part) = relative.strip_prefix("Work/") {
+            ensure!(
+                Path::new(part)
+                    .components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_))),
+                "Invalid preparation destination"
+            );
+            let destination = pending.join(part);
+            let mut ancestors = destination
+                .parent()
+                .unwrap()
+                .ancestors()
+                .take_while(|d| *d != pending)
+                .collect::<Vec<_>>();
+            ancestors.reverse();
+            for directory in ancestors {
+                ensure_directory(directory)?;
+            }
+            let bytes = read(&root.join(relative), MAXIMUM)?;
+            ensure!(
+                hex_digest(&bytes) == *digest,
+                "Generated configuration changed"
+            );
+            prepared_file(&destination, &bytes)?;
+            files.insert(destination);
+        }
+    }
+    for i in 1..=3 {
+        let state = pending.join(format!("Voter{i}/State"));
+        ensure_directory(&state)?;
+        ensure!(
+            fs::read_dir(&state)?.next().is_none(),
+            "Unpublished voter data requires explicit recovery; no data removed"
+        );
+    }
+    let consent = pending.join("Host/Consent.json");
+    prepared_file(&consent, &read(&root.join("HostConsent.json"), 16384)?)?;
+    files.insert(consent);
+    sync_preparation(&pending, &files)?;
+    podman(&strings(&[
+        "unshare",
+        "/usr/bin/chown",
+        "-R",
+        "-h",
+        "1:1",
+        pending.to_str().unwrap(),
+    ]))?;
+    podman(&strings(&[
+        "unshare",
+        "/usr/bin/sync",
+        "--file-system",
+        pending.to_str().unwrap(),
+    ]))?;
+    let metadata = fs::symlink_metadata(&pending)?;
+    preparation.device = Some(metadata.dev());
+    preparation.inode = Some(metadata.ino());
+    super::super::files::save(&journal, &preparation)?;
+    publish_preparation(root, &preparation)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn preparation_publish_resumes_exact_inode_without_replacing_data() {
+        let root = std::env::temp_dir().join(format!("HyperNetPreparation{}", random_id()));
+        directory(&root).unwrap();
+        let pending = root.join("LaunchPending");
+        directory(&pending).unwrap();
+        create(&pending.join("Retained"), b"retained authority data").unwrap();
+        let metadata = fs::symlink_metadata(&pending).unwrap();
+        let preparation = Preparation {
+            configuration: "digest".into(),
+            device: Some(metadata.dev()),
+            inode: Some(metadata.ino()),
+        };
+        publish_preparation(&root, &preparation).unwrap();
+        publish_preparation(&root, &preparation).unwrap();
+        assert_eq!(
+            read(&root.join("Launch/Retained"), 64).unwrap(),
+            b"retained authority data"
+        );
+        fs::rename(root.join("Launch"), root.join("Saved")).unwrap();
+        directory(&root.join("Launch")).unwrap();
+        assert!(publish_preparation(&root, &preparation).is_err());
+        assert_eq!(
+            read(&root.join("Saved/Retained"), 64).unwrap(),
+            b"retained authority data"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}

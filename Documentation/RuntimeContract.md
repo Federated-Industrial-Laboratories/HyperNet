@@ -1,7 +1,9 @@
 # Runtime and connection contract
 
-This is the HyperNet 0.8.0 replacement contract. The installed 0.7.5 programs do
-not yet provide this interface. Policy, wire and authority requirements remain
+This is the HyperNet 0.8.0 replacement contract. Native runtime management and
+offline client preparation implement a bounded subset; their operation manuals
+state the current capabilities. The remaining authority and routing requirements
+are not an installed Byzantine-network claim. Policy, wire and authority requirements remain
 mandatory when these workflows are implemented. Runtime preparation can precede
 network availability; it cannot relax privacy or authority requirements.
 
@@ -36,8 +38,13 @@ There is no remote shell, arbitrary command, arbitrary path or plugin evaluation
 Profile, consent and lifecycle record fields are in
 [PolicyContract.md](PolicyContract.md). A generation is never reused. An unchanged
 retry returns the same recorded outcome; a changed request with the same operation
-ID is refused. A durable withdrawal wins a concurrent start through the same
-profile-generation transaction. Shutdown and failure recovery do not erase this
+ID is refused. Ordinary mutations require the exact current local generation.
+For an unchanged immutable profile, Withdraw is a strictly restrictive veto: it
+accepts an observed generation from one through the current generation, while
+rejecting future generations and a different profile digest. It advances the
+current generation under the same lock. A queued veto therefore still stops a
+concurrent activation that committed after the operator observed its generation.
+A durable withdrawal wins a concurrent start through this profile transaction. Shutdown and failure recovery do not erase this
 tombstone. Reactivation requires a new consent and generation.
 
 The manager supervises only resources carrying its deployment identifier and
@@ -82,8 +89,10 @@ invitation or grant membership. Online joining requires the approved relay path.
 Until that connector is implemented and available, online joining is unavailable;
 there is no transitional direct-reader mode.
 
-An authenticated bootstrap bundle binds the network descriptor, permitted relay
-and final admission-service identities, and a narrow expiring relay voucher.
+Offline bootstrap binds the descriptor, initial governance, recovery-policy
+acceptance and planned relay/admission identities under one independently pinned
+bundle digest. It does not include a usable relay voucher or register a service.
+An online bootstrap additionally requires a narrow expiring relay voucher.
 The voucher has a distinct relay key/purpose and byte, stream, duration and replay
 bounds. It conveys no membership, content, hosting or voting right. The invitation
 secret is sent only inside the authenticated inner final-service channel.

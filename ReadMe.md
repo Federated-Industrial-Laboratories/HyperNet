@@ -24,6 +24,8 @@ Set `GNAT_GCC`, `GNATPROVE` and `PROTOC` when the corresponding tools are outsid
 requires rootless Podman, delegated cgroup v2 limits and Landlock ABI 6 or later.
 Unsupported hosting profiles fail closed.
 
+- [Native runtime](Documentation/Runtime.md): inert setup, exact local consent,
+  generation-checked lifecycle and redacted local status.
 - [Offline packages](Documentation/Packages.md): independently verified installation,
   current-contract image updates and state-preserving removal.
 - [Native qualification](Documentation/Qualification.md): measured Linux confinement.
@@ -78,7 +80,9 @@ provide Byzantine consensus. Containers share the host kernel. See the operation
 manuals for the precise deployment and recovery limits.
 
 [Replacement network contracts](Documentation/Contracts.md) specify the 0.8.0
-authority, policy and runtime boundaries. They do not change the current
-executable capabilities or qualification claims.
+authority, policy and runtime boundaries. Native runtime management prepares
+and operates the current trusted components. Full Byzantine authority and
+relay-only reader connections remain unimplemented; the native manager does not
+change that qualification boundary.
 
 Licensed under the [MIT License](Licence.txt).
