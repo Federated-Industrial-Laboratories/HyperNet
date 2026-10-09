@@ -11,6 +11,13 @@ and Landlock ABI 6 or later. There is no unconfined fallback. Initial launchers
 use GNU userland tools and IPv4 /24 private Podman networks. Images carry their
 own dynamic runtime libraries; the native kernel still defines confinement.
 
+Rootless systemd resource delegation also requires an active user D-Bus socket.
+On Debian, install `dbus-user-session` before starting the operator's login
+session. If it was installed during that session, run
+`systemctl --user daemon-reload` and `systemctl --user start dbus.socket`, then
+repeat the failed qualification. Do not accept a cgroup fallback with missing
+resource bounds.
+
 Run `Tools/Qualify.py --image sha256:Digest --output Report.json` as the dedicated
 rootless operator. It writes a new private structured report naming the image,
 native architecture, kernel, Podman/runtime, controller availability and measured
@@ -43,11 +50,31 @@ Evidence for an earlier executable does not qualify a rewritten contract. Record
 signed installation, authenticated Pages operation, current-schema restart and
 recovery, confinement and withdrawal for each advertised platform.
 
-The current target families are Ubuntu, Debian and Fedora on native x86_64 with
-the required kernel and rootless runtime capabilities. Native AArch64 remains
+The 0.7.5 private qualification uses authority schema 9 and `HyperNetPage/2`.
+The following measured profiles passed signed Core/Suite installation, Core
+confinement and authenticated Pages operation. All use native x86_64 execution
+and the crun OCI runtime.
+
+| Distribution | Execution environment | Native kernel | Podman | Landlock ABI |
+| --- | --- | --- | --- | --- |
+| Ubuntu 24.04.4 LTS | Physical host | 7.0.0-34-generic | 4.9.3 | 8 |
+| Debian 13.7 | KVM guest with its own kernel | 6.12.111+deb13-amd64 | 5.4.2 | 6 |
+| Fedora 44 Cloud Edition | KVM guest with its own kernel, SELinux enforcing | 6.19.10-300.fc44.x86_64 | 5.8.1 | 7 |
+
+The Debian and Fedora guests share one physical x86_64 host. They establish
+native guest-kernel behaviour, not independent physical hardware coverage.
+Each profile passed quarantine, manual approval, consented replica reads,
+revocation and stop/restart checks. Ubuntu additionally passed current-schema
+crash recovery, monotonic rollback-floor checks and refusal of a stale
+full-quorum snapshot. A verified current-build replacement preserved approved
+content and revoked membership; crash recovery also retained quarantined drafts.
+Older schemas remain unsupported; these checks do not establish an upgrade path
+from a prior schema.
+
+Distribution names alone do not qualify another host. Native AArch64 remains
 pending. Core qualification does not establish Suite graphics support or native
-Windows/macOS support. A public release additionally requires its own complete
-platform and security assessment.
+Windows/macOS support. A public release requires its own complete platform and
+security assessment.
 
 
 ## Installed client workflows
