@@ -278,5 +278,130 @@
     "name": "NavigationButton",
     "body": "HyperNetPage/2\n# Components\n@Button {\"label\":\"Reference\",\"action\":{\"kind\":\"Navigate\",\"target\":\"https://example.com/\"}}\n",
     "valid": true
+  },
+  {
+    "name": "FormText",
+    "body": "HyperNetPage/2\n# Form\n@Form {\"id\":\"Feedback\",\"label\":\"Feedback\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Submit {\"label\":\"Review message\"}\n@End\n",
+    "valid": true
+  },
+  {
+    "name": "FormAllFields",
+    "body": "HyperNetPage/2\n# Form\n@Form {\"id\":\"Feedback\",\"label\":\"Feedback\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Text\",\"label\":\"Text\",\"kind\":\"Text\",\"maxBytes\":20}\n@Field {\"id\":\"Lines\",\"label\":\"Lines\",\"kind\":\"Multiline\",\"maxBytes\":2048,\"required\":true}\n@Field {\"id\":\"Count\",\"label\":\"Count\",\"kind\":\"Integer\",\"minimum\":-5,\"maximum\":5}\n@Field {\"id\":\"Agree\",\"label\":\"Agree\",\"kind\":\"Boolean\",\"required\":true}\n@Field {\"id\":\"Colour\",\"label\":\"Colour\",\"kind\":\"Choice\",\"options\":[\"Blue\",\"Red\"]}\n@Submit {\"label\":\"Review message\"}\n@End\n",
+    "valid": true
+  },
+  {
+    "name": "FormWrongProfile",
+    "body": "HyperNetPage/2\n# Form\n@Form {\"id\":\"Feedback\",\"label\":\"Feedback\",\"profile\":\"HttpPost/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Submit {\"label\":\"Review message\"}\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "FormUnknownTarget",
+    "body": "HyperNetPage/2\n# Form\n@Form {\"id\":\"Feedback\",\"label\":\"Feedback\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"target\":\"https://example.com/\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Submit {\"label\":\"Review message\"}\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "FormUppercaseOwner",
+    "body": "HyperNetPage/2\n# Form\n@Form {\"id\":\"Feedback\",\"label\":\"Feedback\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Submit {\"label\":\"Review message\"}\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "FormNoFields",
+    "body": "HyperNetPage/2\n# Form\n@Form {\"id\":\"Feedback\",\"label\":\"Feedback\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Submit {\"label\":\"Review message\"}\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "FormNoSubmit",
+    "body": "HyperNetPage/2\n# Form\n@Form {\"id\":\"Feedback\",\"label\":\"Feedback\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "FormTwoSubmits",
+    "body": "HyperNetPage/2\n# Form\n@Form {\"id\":\"Feedback\",\"label\":\"Feedback\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Submit {\"label\":\"Review message\"}\n@Submit {\"label\":\"Review message\"}\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "FormDuplicateFields",
+    "body": "HyperNetPage/2\n# Form\n@Form {\"id\":\"Feedback\",\"label\":\"Feedback\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Submit {\"label\":\"Review message\"}\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "FormHiddenField",
+    "body": "HyperNetPage/2\n# Form\n@Form {\"id\":\"Feedback\",\"label\":\"Feedback\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Hidden\",\"maxBytes\":2048,\"required\":true}\n@Submit {\"label\":\"Review message\"}\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "FormFieldHandler",
+    "body": "HyperNetPage/2\n# Form\n@Form {\"id\":\"Feedback\",\"label\":\"Feedback\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":2048,\"onChange\":\"run\",\"required\":true}\n@Submit {\"label\":\"Review message\"}\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "FormNullRequired",
+    "body": "HyperNetPage/2\n# Form\n@Form {\"id\":\"Feedback\",\"label\":\"Feedback\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":null}\n@Submit {\"label\":\"Review message\"}\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "FormDuplicateKind",
+    "body": "HyperNetPage/2\n# Form\n@Form {\"id\":\"Feedback\",\"label\":\"Feedback\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Submit {\"label\":\"Review message\"}\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "FormTextTooLarge",
+    "body": "HyperNetPage/2\n# Form\n@Form {\"id\":\"Feedback\",\"label\":\"Feedback\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":2049,\"required\":true}\n@Submit {\"label\":\"Review message\"}\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "FormZeroTextBound",
+    "body": "HyperNetPage/2\n# Form\n@Form {\"id\":\"Feedback\",\"label\":\"Feedback\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":0,\"required\":true}\n@Submit {\"label\":\"Review message\"}\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "FormWrongFieldLimit",
+    "body": "HyperNetPage/2\n# Form\n@Form {\"id\":\"Feedback\",\"label\":\"Feedback\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maximum\":2048,\"required\":true}\n@Submit {\"label\":\"Review message\"}\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "FormIntegerReversed",
+    "body": "HyperNetPage/2\n# Form\n@Form {\"id\":\"Feedback\",\"label\":\"Feedback\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Count\",\"label\":\"Count\",\"kind\":\"Integer\",\"minimum\":2,\"maximum\":1}\n@Submit {\"label\":\"Review message\"}\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "FormChoiceDuplicate",
+    "body": "HyperNetPage/2\n# Form\n@Form {\"id\":\"Feedback\",\"label\":\"Feedback\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Pick\",\"label\":\"Pick\",\"kind\":\"Choice\",\"options\":[\"One\",\"One\"]}\n@Submit {\"label\":\"Review message\"}\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "FormChoiceEscape",
+    "body": "HyperNetPage/2\n# Form\n@Form {\"id\":\"Feedback\",\"label\":\"Feedback\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Pick\",\"label\":\"Pick\",\"kind\":\"Choice\",\"options\":[\"\\u001b\"]}\n@Submit {\"label\":\"Review message\"}\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "FormTooManyFields",
+    "body": "HyperNetPage/2\n# Form\n@Form {\"id\":\"Feedback\",\"label\":\"Feedback\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Field0\",\"label\":\"Field0\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Field {\"id\":\"Field1\",\"label\":\"Field1\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Field {\"id\":\"Field2\",\"label\":\"Field2\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Field {\"id\":\"Field3\",\"label\":\"Field3\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Field {\"id\":\"Field4\",\"label\":\"Field4\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Field {\"id\":\"Field5\",\"label\":\"Field5\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Field {\"id\":\"Field6\",\"label\":\"Field6\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Field {\"id\":\"Field7\",\"label\":\"Field7\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Field {\"id\":\"Field8\",\"label\":\"Field8\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Field {\"id\":\"Field9\",\"label\":\"Field9\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Field {\"id\":\"Field10\",\"label\":\"Field10\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Field {\"id\":\"Field11\",\"label\":\"Field11\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Field {\"id\":\"Field12\",\"label\":\"Field12\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Field {\"id\":\"Field13\",\"label\":\"Field13\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Field {\"id\":\"Field14\",\"label\":\"Field14\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Field {\"id\":\"Field15\",\"label\":\"Field15\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Field {\"id\":\"Field16\",\"label\":\"Field16\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Submit {\"label\":\"Review message\"}\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "FormNested",
+    "body": "HyperNetPage/2\n# Form\n@Form {\"id\":\"Feedback\",\"label\":\"Feedback\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Form {\"id\":\"Feedback\",\"label\":\"Feedback\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Submit {\"label\":\"Review message\"}\n@End\n@Submit {\"label\":\"Review message\"}\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "FormLayoutChild",
+    "body": "HyperNetPage/2\n# Form\n@Form {\"id\":\"Feedback\",\"label\":\"Feedback\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Column {}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@End\n@Submit {\"label\":\"Review message\"}\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "FormFieldOutside",
+    "body": "HyperNetPage/2\n# Form\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n",
+    "valid": false
+  },
+  {
+    "name": "FormSubmitOutside",
+    "body": "HyperNetPage/2\n# Form\n@Submit {\"label\":\"Review message\"}\n",
+    "valid": false
+  },
+  {
+    "name": "FormTooMany",
+    "body": "HyperNetPage/2\n# Form\n@Form {\"id\":\"Form0\",\"label\":\"Form0\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Submit {\"label\":\"Review message\"}\n@End\n@Form {\"id\":\"Form1\",\"label\":\"Form1\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Submit {\"label\":\"Review message\"}\n@End\n@Form {\"id\":\"Form2\",\"label\":\"Form2\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Submit {\"label\":\"Review message\"}\n@End\n@Form {\"id\":\"Form3\",\"label\":\"Form3\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Submit {\"label\":\"Review message\"}\n@End\n@Form {\"id\":\"Form4\",\"label\":\"Form4\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Submit {\"label\":\"Review message\"}\n@End\n",
+    "valid": false
   }
 ]

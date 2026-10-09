@@ -178,11 +178,14 @@ class FederationWorkflow:
 
     def stop_bridge(self, remove=False):
         if self.profile and (self.profile/'Control.json').exists():
-            self.source.run('bash',self.bridge_tool,'Stop',self.profile,good=False,timeout=30)
             if remove:
                 control=json.loads((self.profile/'Control.json').read_text())
+                for name in [control['name'],control['name']+'SourceGate',control['name']+'DestinationGate']:
+                    self.source.run('podman','rm','-f',name,good=False,timeout=30)
                 self.source.run('podman','network','rm',control['network'],good=False)
                 self.profile=None
+            else:
+                self.source.run('bash',self.bridge_tool,'Stop',self.profile,good=False,timeout=30)
 
     def navigate(self):
         d=self.destination
@@ -380,14 +383,20 @@ class FederationWorkflow:
             error=f"{type(caught).__name__}: {caught}"
             raise
         finally:
-            self.stop_bridge(remove=True)
-            self.destination.cleanup(); self.source.cleanup()
+            cleanup_errors=[]
+            for cleanup in [lambda: self.stop_bridge(remove=True),self.destination.cleanup,self.source.cleanup]:
+                try:
+                    cleanup()
+                except Exception as caught:
+                    cleanup_errors.append(f'{type(caught).__name__}: {caught}')
             repository=Path(__file__).resolve().parents[1]
-            Path(self.args.output).write_text(json.dumps(dict(passed=self.results,error=error,imageId=self.args.image,
+            Path(self.args.output).write_text(json.dumps(dict(passed=self.results,error=error,cleanupErrors=cleanup_errors,imageId=self.args.image,
                 nodeSha256=hashlib.sha256(Path(self.source.node).read_bytes()).hexdigest(),
                 suiteSha256=hashlib.sha256(Path(self.source.suite).read_bytes()).hexdigest(),
                 sourceSha256={str(p.relative_to(repository)):hashlib.sha256(p.read_bytes()).hexdigest()
                     for group in ['Source/*.rs','Tools/*.rs','Tools/*.sh','Tests/*Workflow.py'] for p in repository.glob(group)}),indent=2)+'\n')
+            if cleanup_errors and error is None:
+                raise RuntimeError('Disposable federation cleanup failed: '+'; '.join(cleanup_errors))
 
 
 def main():
