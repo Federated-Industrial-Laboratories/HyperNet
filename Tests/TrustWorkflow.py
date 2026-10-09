@@ -23,7 +23,7 @@ import time
 
 
 class Workflow:
-    def __init__(self, args, slot=0, federation=False, mail=False):
+    def __init__(self, args, slot=0, federation=False, mail=False, services=False):
         self.args = args
         self.root = Path(tempfile.mkdtemp(prefix='HyperNetQualification'))
         self.network = secrets.token_hex(32)
@@ -45,6 +45,7 @@ class Workflow:
         self.broker_port = 28443 + slot
         self.federation = federation
         self.mail = mail
+        self.services = services
         self.endpoint = f'https://localhost:{self.broker_port}'
         self.broker = self.prefix + 'Broker'
 
@@ -183,6 +184,11 @@ class Workflow:
             signer = configdir/'MailSigningKey.json'
             self.mail_signer = json.loads(self.run(self.suite,'keygen','--output',signer).stdout)['publicKey']
             config['mailSigningKey'] = str(signer)
+        if self.services:
+            signer = configdir/'ServiceSigningKey.json'
+            self.service_signer = json.loads(self.run(self.suite,'keygen','--output',signer).stdout)['publicKey']
+            config['serviceSigningKey'] = str(signer)
+        if self.mail or self.services:
             with (configdir/'HostCa.pem').open('ab') as bundle:
                 bundle.write((self.pki/'NetworkCa.pem').read_bytes())
         self.write(directory/'Bootstrap.json',config)
@@ -193,6 +199,8 @@ class Workflow:
             config['federationSigningKey']='/Config/FederationSigningKey.json'
         if self.mail:
             config['mailSigningKey']='/Config/MailSigningKey.json'
+        if self.services:
+            config['serviceSigningKey']='/Config/ServiceSigningKey.json'
         for field in ['certificate','privateKey','clientCa','etcdCa','etcdCertificate','etcdKey']:
             config[field]='/Config/'+Path(config[field]).name
         self.write(configdir/'Authority.json',config)
@@ -200,7 +208,7 @@ class Workflow:
                                    ('HostCa.pem','HostingCa.pem'),('StoreCa.pem','VoterCa.pem'),
                                    ('BrokerStore.pem','BrokerCertificate.pem'),('BrokerStoreKey.pem','BrokerKey.pem')]:
             shutil.copy2(self.pki/origin,configdir/destination)
-        if self.mail:
+        if self.mail or self.services:
             shutil.copy2(configdir/'HostCa.pem',configdir/'HostingCa.pem')
         self.authority_profile=self.root/'AuthorityProfile'
         self.run('bash',self.authority_tool,'Initialise',self.authority_profile,configdir,statedir,

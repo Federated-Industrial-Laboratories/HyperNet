@@ -421,6 +421,102 @@ pub fn mail_canaries(state: &Path) -> Result<()> {
     Ok(())
 }
 
+// SSH wrappers progressively reduce inherited access before executing the service.
+#[allow(dead_code)]
+fn ssh_rules(
+    state: Option<&Path>,
+    stage: u8,
+    bind_ports: &[u16],
+    connect_ports: &[u16],
+) -> Result<Profile> {
+    let mut profile = preflight()?;
+    let attr = Ruleset {
+        filesystem: ALL_FILESYSTEM,
+        network: 3,
+        scoped: 3,
+    };
+    let fd = syscall_result(unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            &attr,
+            std::mem::size_of::<Ruleset>(),
+            0u32,
+        )
+    })?;
+    let ruleset = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+    let execute = 1;
+    if let Some(state) = state {
+        let state = confined_path(state, Path::new("/State"))?;
+        ensure!(state.is_dir(), "SSH state must be a directory");
+        let fixed = confined_path(&state.join("SshState.bin"), Path::new("/State"))?;
+        ensure!(fixed.is_file(), "SSH floor must be a fixed file");
+        path_rule(&ruleset, &fixed, READ_FILE | (1 << 1))?;
+    }
+    for directory in ["/lib", "/lib64", "/usr/lib"] {
+        let path = Path::new(directory);
+        if path.exists() {
+            path_rule(&ruleset, path, READ_FILE | READ_DIR | execute)?;
+        }
+    }
+    path_rule(&ruleset, Path::new("/Service/Command"), READ_FILE | execute)?;
+    path_rule(&ruleset, Path::new("/Work"), STATE_ACCESS)?;
+    path_rule(&ruleset, Path::new("/dev/null"), READ_FILE | (1 << 1))?;
+    path_rule(&ruleset, Path::new("/dev/urandom"), READ_FILE)?;
+    if stage < 2 {
+        for directory in ["/OpenSSH", "/proc", "/sys/fs/cgroup"] {
+            path_rule(
+                &ruleset,
+                Path::new(directory),
+                READ_FILE | READ_DIR | if directory == "/OpenSSH" { execute } else { 0 },
+            )?;
+        }
+        for path in ["/HyperNet", "/bin/sh"] {
+            path_rule(&ruleset, Path::new(path), READ_FILE | execute)?;
+        }
+        for path in [
+            "/Canary",
+            "/run/.containerenv",
+            "/etc/passwd",
+            "/etc/group",
+            "/etc/nsswitch.conf",
+            "/Config/SshHostKey",
+        ] {
+            path_rule(&ruleset, Path::new(path), READ_FILE)?;
+        }
+        for path in ["/Config/SshdConfig", "/Config/AuthorizedKeys"] {
+            path_rule(&ruleset, Path::new(path), READ_FILE)?;
+        }
+    }
+    for port in bind_ports {
+        port_rule(&ruleset, *port, 1)?;
+    }
+    for port in connect_ports {
+        port_rule(&ruleset, *port, 2)?;
+    }
+    syscall_result(unsafe {
+        libc::syscall(libc::SYS_landlock_restrict_self, ruleset.as_raw_fd(), 0u32)
+    })?;
+    profile.filesystem_confined = true;
+    profile.tcp_ports_confined = true;
+    Ok(profile)
+}
+#[allow(dead_code)]
+pub fn enter_ssh_parent(
+    state: &Path,
+    bind_ports: &[u16],
+    connect_ports: &[u16],
+) -> Result<Profile> {
+    ssh_rules(Some(state), 0, bind_ports, connect_ports)
+}
+#[allow(dead_code)]
+pub fn enter_ssh_child(bind_port: u16) -> Result<Profile> {
+    ssh_rules(None, 1, &[bind_port], &[])
+}
+#[allow(dead_code)]
+pub fn enter_ssh_command() -> Result<Profile> {
+    ssh_rules(None, 2, &[], &[])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

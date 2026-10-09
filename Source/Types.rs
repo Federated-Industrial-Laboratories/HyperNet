@@ -17,7 +17,7 @@ pub const MAX_ENVELOPE: usize = 96 * 1024;
 pub const MAX_STATE: usize = 1024 * 1024;
 pub const DOMAIN: &[u8] = b"HyperNet/Request/1\0";
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Envelope {
     pub network: String,
@@ -38,6 +38,71 @@ pub struct Request {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "type", deny_unknown_fields, rename_all_fields = "camelCase")]
 pub enum Command {
+    TransferHostRegister {
+        consent: Envelope,
+    },
+    TransferHostWithdraw {
+        host_key: String,
+        expected_generation: u64,
+    },
+    TransferHosts,
+    TransferOfferCreate {
+        offer: Envelope,
+    },
+    TransferOfferGet {
+        transfer_id: String,
+    },
+    TransferOfferList {
+        after: Option<String>,
+    },
+    TransferOfferAccept {
+        acceptance: Envelope,
+    },
+    TransferOfferCancel {
+        transfer_id: String,
+        offer_digest: String,
+    },
+    TransferAuthorise {
+        host_key: String,
+        operation: Envelope,
+    },
+    TransferPolicySync {
+        host_key: String,
+    },
+    SshServiceRegister {
+        consent: Envelope,
+    },
+    SshServiceWithdraw {
+        service_key: String,
+        expected_generation: u64,
+    },
+    SshServices,
+    SshServiceGet {
+        service_key: String,
+    },
+    SshGrantCreate {
+        grant_id: String,
+        service_key: String,
+        service_generation: u64,
+        ssh_public_key: String,
+        ssh_key_proof: String,
+        account: String,
+        purpose: String,
+        expires: u64,
+    },
+    SshGrantAccept {
+        grant_id: String,
+    },
+    SshGrantRevoke {
+        grant_id: String,
+    },
+    SshGrantGet {
+        grant_id: String,
+    },
+    SshAuthorise {
+        service_key: String,
+        grant_id: String,
+    },
     MailAddressCreate {
         manifest: crate::mail_types::SignedMailObject,
     },
@@ -438,6 +503,13 @@ pub struct State {
     pub federation_pages: BTreeMap<String, FederationPageRecord>,
     #[serde(default)]
     pub mail: crate::mail_types::MailState,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::transfer_types::TransferState::is_empty"
+    )]
+    pub transfers: crate::transfer_types::TransferState,
+    #[serde(default, skip_serializing_if = "crate::ssh_types::SshState::is_empty")]
+    pub ssh: crate::ssh_types::SshState,
 }
 
 impl State {
@@ -465,6 +537,8 @@ impl State {
             federation_shares: BTreeMap::new(),
             federation_pages: BTreeMap::new(),
             mail: Default::default(),
+            transfers: Default::default(),
+            ssh: Default::default(),
         }
     }
 }
@@ -487,4 +561,6 @@ pub struct AuthorityConfig {
     pub federation_signing_key: Option<std::path::PathBuf>,
     #[serde(default)]
     pub mail_signing_key: Option<std::path::PathBuf>,
+    #[serde(default)]
+    pub service_signing_key: Option<std::path::PathBuf>,
 }

@@ -31,7 +31,9 @@ pub(crate) fn require(state: &State, key: &str, mask: u64, now: u64) -> Result<(
     if mask & ADMIN != 0
         && (state.consents.contains_key(key)
             || state.bridge_consents.contains_key(key)
-            || state.mail.hosts.contains_key(key))
+            || (state.mail.hosts.contains_key(key)
+                || state.transfers.hosts.contains_key(key)
+                || state.ssh.services.contains_key(key)))
     {
         return Err("ServiceIdentity");
     }
@@ -87,10 +89,12 @@ fn preserve_admin(
         return Ok(());
     }
     if state.members.iter().any(|(key, member)| {
-        key != target
-            && !state.consents.contains_key(key)
-            && !state.bridge_consents.contains_key(key)
-            && !state.mail.hosts.contains_key(key)
+        !(key == target
+            || state.consents.contains_key(key)
+            || state.bridge_consents.contains_key(key)
+            || state.mail.hosts.contains_key(key)
+            || state.transfers.hosts.contains_key(key)
+            || state.ssh.services.contains_key(key))
             && grants(member, now, state.epoch) & ADMIN != 0
     }) {
         return Ok(());
@@ -107,14 +111,17 @@ fn check_existing_permission(
     if matches!(
         request.request.command,
         Command::Consent { .. } | Command::Heartbeat { .. }
-    ) && state.mail.hosts.contains_key(&request.key)
+    ) && (state.mail.hosts.contains_key(&request.key)
+        || state.transfers.hosts.contains_key(&request.key)
+        || state.ssh.services.contains_key(&request.key))
     {
         return Err("ServiceIdentity");
     }
     match &request.request.command {
         Command::Redeem { .. } => {
             // A pending invitation cannot change a key's subsequently assigned role.
-            if state.mail.device_history.contains(&request.key)
+            if (state.mail.device_history.contains(&request.key)
+                || state.ssh.key_history.contains(&request.key))
                 || state
                     .mail
                     .addresses
@@ -175,7 +182,7 @@ pub fn apply(
     now: u64,
     revision: i64,
 ) -> Result<Reply, &'static str> {
-    if !(1..=5).contains(&state.version) {
+    if !(1..=6).contains(&state.version) {
         return Err("UnsupportedState");
     }
     if state.high_water_time > now.saturating_add(2) {
@@ -222,7 +229,8 @@ pub fn apply(
         } => {
             fixed_hex::<32>(verifier)?;
             fixed_hex::<32>(device_key)?;
-            if state.mail.device_history.contains(device_key)
+            if (state.mail.device_history.contains(device_key)
+                || state.ssh.key_history.contains(device_key))
                 || state
                     .mail
                     .addresses
@@ -312,7 +320,8 @@ pub fn apply(
             expires,
         } => {
             fixed_hex::<32>(device_key)?;
-            if state.mail.device_history.contains(device_key)
+            if (state.mail.device_history.contains(device_key)
+                || state.ssh.key_history.contains(device_key))
                 || state
                     .mail
                     .addresses

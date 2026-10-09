@@ -96,6 +96,7 @@ pub struct Store {
     _lock: File,
     federation_signing_key: Option<SigningKey>,
     mail_signing_key: Option<SigningKey>,
+    service_signing_key: Option<SigningKey>,
 }
 
 fn load_signing_key(path: &Option<PathBuf>) -> Result<Option<SigningKey>> {
@@ -128,6 +129,17 @@ impl Store {
     pub async fn connect(config: &AuthorityConfig) -> Result<Self> {
         let federation_signing_key = load_signing_key(&config.federation_signing_key)?;
         let mail_signing_key = load_signing_key(&config.mail_signing_key)?;
+        let service_signing_key = load_signing_key(&config.service_signing_key)?;
+        if let Some(service) = &service_signing_key {
+            for key in [&mail_signing_key, &federation_signing_key]
+                .into_iter()
+                .flatten()
+            {
+                if service.verifying_key() == key.verifying_key() {
+                    bail!("Service signing key must be dedicated");
+                }
+            }
+        }
         if let (Some(a), Some(b)) = (&federation_signing_key, &mail_signing_key)
             && a.verifying_key() == b.verifying_key()
         {
@@ -231,6 +243,7 @@ impl Store {
             _lock: lock,
             federation_signing_key,
             mail_signing_key,
+            service_signing_key,
         })
     }
 
@@ -260,14 +273,17 @@ impl Store {
     }
 
     pub async fn initialise(&mut self, admin: &str) -> Result<()> {
-        if [&self.federation_signing_key, &self.mail_signing_key]
-            .iter()
-            .any(|signer| {
-                signer
-                    .as_ref()
-                    .is_some_and(|key| hex::encode(key.verifying_key().as_bytes()) == admin)
-            })
-        {
+        if [
+            &self.federation_signing_key,
+            &self.mail_signing_key,
+            &self.service_signing_key,
+        ]
+        .iter()
+        .any(|signer| {
+            signer
+                .as_ref()
+                .is_some_and(|key| hex::encode(key.verifying_key().as_bytes()) == admin)
+        }) {
             bail!("Federation signing key must be separate from membership");
         }
         let key = crate::protocol::fixed_hex::<32>(admin).map_err(anyhow::Error::msg)?;
@@ -337,12 +353,16 @@ impl Store {
             bail!("Authority state exceeds its size bound");
         }
         let state: State = serde_json::from_slice(kv.value())?;
-        if !(1..=5).contains(&state.version) || state.network != self.network {
+        if !(1..=6).contains(&state.version) || state.network != self.network {
             bail!("Authority state identity is invalid");
         }
-        for signer in [&self.federation_signing_key, &self.mail_signing_key]
-            .into_iter()
-            .flatten()
+        for signer in [
+            &self.federation_signing_key,
+            &self.mail_signing_key,
+            &self.service_signing_key,
+        ]
+        .into_iter()
+        .flatten()
         {
             if mail_authority::reserved_identity_conflict(
                 &state,
@@ -365,7 +385,10 @@ impl Store {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(7);
         for attempt in 0..self.clients.len() {
             let operation = async {
-                if mail_authority::read_only(&request.request.command) {
+                if mail_authority::read_only(&request.request.command)
+                    || crate::transfer_authority::read_only(&request.request.command)
+                    || crate::ssh_authority::read_only(&request.request.command)
+                {
                     self.mail_read_only(request, certificate).await
                 } else {
                     self.transition(request, certificate).await
@@ -415,6 +438,28 @@ impl Store {
         if state.network != self.network {
             bail!("Authority network mismatch");
         }
+        if crate::transfer_authority::read_only(&request.request.command) {
+            return Ok(crate::transfer_authority::authorise(
+                &state,
+                request,
+                certificate,
+                current,
+                header.revision(),
+                self.service_signing_key.as_ref(),
+            )
+            .unwrap_or_else(Reply::error));
+        }
+        if crate::ssh_authority::read_only(&request.request.command) {
+            return Ok(crate::ssh_authority::authorise(
+                &state,
+                request,
+                certificate,
+                current,
+                header.revision(),
+                self.service_signing_key.as_ref(),
+            )
+            .unwrap_or_else(Reply::error));
+        }
         Ok(
             match mail_authority::authorise(
                 &state,
@@ -461,10 +506,14 @@ impl Store {
                 _ => None,
             };
             if membership_key.is_some_and(|candidate| {
-                [&self.federation_signing_key, &self.mail_signing_key]
-                    .into_iter()
-                    .flatten()
-                    .any(|key| hex::encode(key.verifying_key().as_bytes()) == candidate)
+                [
+                    &self.federation_signing_key,
+                    &self.mail_signing_key,
+                    &self.service_signing_key,
+                ]
+                .into_iter()
+                .flatten()
+                .any(|key| hex::encode(key.verifying_key().as_bytes()) == candidate)
             }) {
                 return Ok(Reply::error("DedicatedAuthorityKeyRequired"));
             }
@@ -475,9 +524,13 @@ impl Store {
                     Ok(value) => value,
                     Err(code) => return Ok(Reply::error(code)),
                 };
-                for signer in [&self.federation_signing_key, &self.mail_signing_key]
-                    .into_iter()
-                    .flatten()
+                for signer in [
+                    &self.federation_signing_key,
+                    &self.mail_signing_key,
+                    &self.service_signing_key,
+                ]
+                .into_iter()
+                .flatten()
                 {
                     let public = hex::encode(signer.verifying_key().as_bytes());
                     if value.owner_key == public
@@ -488,6 +541,34 @@ impl Store {
                         return Ok(Reply::error("DedicatedAuthorityKeyRequired"));
                     }
                 }
+            }
+            let native_key = match &request.request.command {
+                Command::SshServiceRegister { consent } => {
+                    crate::ssh_authority::consent(consent, &state.network)
+                        .and_then(|c| crate::ssh_authority::public_key(&c.ssh_host_key))
+                        .ok()
+                }
+                Command::SshGrantCreate { ssh_public_key, .. } => {
+                    crate::ssh_authority::public_key(ssh_public_key).ok()
+                }
+                Command::SshGrantAccept { grant_id } => {
+                    state.ssh.grants.get(grant_id).and_then(|grant| {
+                        crate::ssh_authority::public_key(&grant.ssh_public_key).ok()
+                    })
+                }
+                _ => None,
+            };
+            if native_key.is_some_and(|candidate| {
+                [
+                    &self.federation_signing_key,
+                    &self.mail_signing_key,
+                    &self.service_signing_key,
+                ]
+                .into_iter()
+                .flatten()
+                .any(|k| hex::encode(k.verifying_key().as_bytes()) == candidate)
+            }) {
+                return Ok(Reply::error("DedicatedAuthorityKeyRequired"));
             }
             let mut operations = Vec::new();
             let reply = if page_authority::handles(&request.request.command) {
@@ -591,6 +672,28 @@ impl Store {
                     operations.push(TxnOp::put(format!("{prefix}{key}"), value, None));
                 }
                 change.reply
+            } else if crate::transfer_authority::handles(&request.request.command) {
+                match crate::transfer_authority::apply(
+                    &mut state,
+                    request,
+                    certificate,
+                    now,
+                    self.service_signing_key.as_ref(),
+                ) {
+                    Ok(reply) => reply,
+                    Err(code) => return Ok(Reply::error(code)),
+                }
+            } else if crate::ssh_authority::handles(&request.request.command) {
+                match crate::ssh_authority::apply(
+                    &mut state,
+                    request,
+                    certificate,
+                    now,
+                    self.service_signing_key.as_ref(),
+                ) {
+                    Ok(reply) => reply,
+                    Err(code) => return Ok(Reply::error(code)),
+                }
             } else if mail_authority::handles(&request.request.command) {
                 match mail_authority::apply(
                     &mut state,
