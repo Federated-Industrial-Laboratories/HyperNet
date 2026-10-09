@@ -1,0 +1,1784 @@
+{
+  "format": "HyperNetPolicyVectors/1",
+  "status": "NormativeNotExecuted",
+  "contract": "PolicyContract.md",
+  "representation": "Semantic named-field contexts; enum names and decimal strings are schema presentation. These are not canonical wire byte fixtures. Each case states all relevant deviations; omitted valid cryptographic, authority and consent premises are assumed only for its named operation. Refusal cases isolate the named failure.",
+  "modelEligibleOperations": [
+    "PublicationTrace",
+    "RecoveryTrace",
+    "LifecycleTrace"
+  ],
+  "cases": [
+    {
+      "id": "PublicReadingDoesNotGrantHosting",
+      "operation": "Evaluate",
+      "given": {
+        "enrolment": "InvitationOnly",
+        "publicReading": true,
+        "memberActions": [
+          "ReadPage"
+        ],
+        "requestAction": "HostPages",
+        "rank": "0"
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "MissingAuthority",
+        "effects": [
+          "NoListener",
+          "NoHostStorage"
+        ]
+      }
+    },
+    {
+      "id": "OpenReadingKeepsPrivateAudience",
+      "operation": "Evaluate",
+      "given": {
+        "publicReading": true,
+        "objectPublicAudience": false,
+        "requester": "Guest",
+        "requestAction": "ReadPage"
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "AudienceMismatch",
+        "effects": [
+          "NoPageBytes",
+          "NoMetadata"
+        ]
+      }
+    },
+    {
+      "id": "ExplicitPublicPageMayBeRead",
+      "operation": "Evaluate",
+      "given": {
+        "publicReading": true,
+        "objectPublicAudience": true,
+        "authorPublicApproval": true,
+        "reviewedExactRevision": true,
+        "guestReadGrant": true,
+        "route": "Independent"
+      },
+      "expect": {
+        "decision": "Permit",
+        "code": "None",
+        "effects": [
+          "ExactApprovedPageOnly"
+        ]
+      }
+    },
+    {
+      "id": "ApprovedApplicationIsReaderOnly",
+      "operation": "Admit",
+      "given": {
+        "enrolment": "ApprovedApplications",
+        "approvedApplication": true,
+        "initialActions": [
+          "ReadPage",
+          "SearchCatalogue"
+        ]
+      },
+      "expect": {
+        "decision": "Permit",
+        "code": "None",
+        "effects": [
+          "NoHosting",
+          "NoReview",
+          "NoVoting",
+          "NoConfidentialRecipient"
+        ]
+      }
+    },
+    {
+      "id": "PuzzleDoesNotGrantVote",
+      "operation": "Evaluate",
+      "given": {
+        "validAdmissionPuzzle": true,
+        "memberActions": [
+          "ReadPage"
+        ],
+        "requestAction": "VoteAuthority"
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "MissingAuthority",
+        "effects": [
+          "NoVote"
+        ]
+      }
+    },
+    {
+      "id": "NoDirectReaderMode",
+      "operation": "DecodePolicy",
+      "given": {
+        "minimumRoute": "Direct"
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "MalformedRecord",
+        "effects": [
+          "NoConnection"
+        ]
+      }
+    },
+    {
+      "id": "IndependentClientRejectsOrganisation",
+      "operation": "EvaluateRoute",
+      "given": {
+        "networkMinimum": "Organisational",
+        "clientMinimum": "Independent",
+        "selected": "Organisational",
+        "relayDomain": "OrganisationA",
+        "destinationDomain": "OrganisationA"
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "RouteAssurance",
+        "effects": [
+          "ZeroDestinationPackets"
+        ]
+      }
+    },
+    {
+      "id": "OrganisationalClientAcceptsIndependent",
+      "operation": "EvaluateRoute",
+      "given": {
+        "networkMinimum": "Organisational",
+        "clientMinimum": "Organisational",
+        "selected": "Independent",
+        "relayDomain": "OrganisationB",
+        "destinationDomain": "OrganisationA",
+        "independenceAccepted": true
+      },
+      "expect": {
+        "decision": "Permit",
+        "code": "None",
+        "effects": [
+          "ShowDeclaredIndependence"
+        ]
+      }
+    },
+    {
+      "id": "OrganisationProfileShowsNarrowClaim",
+      "operation": "EvaluateRoute",
+      "given": {
+        "networkMinimum": "Organisational",
+        "clientMinimum": "Organisational",
+        "selected": "Organisational",
+        "operatorTrustAccepted": true
+      },
+      "expect": {
+        "decision": "Permit",
+        "code": "None",
+        "effects": [
+          "ShowOrganisationCanCorrelate"
+        ]
+      }
+    },
+    {
+      "id": "RelayOutageCannotDowngrade",
+      "operation": "Reconnect",
+      "given": {
+        "activeAssurance": "Independent",
+        "approvedRelaysAvailable": false,
+        "destinationDirectReachable": true
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "RouteAssurance",
+        "effects": [
+          "ZeroDirectRetries",
+          "NoCredentialDisclosure"
+        ]
+      }
+    },
+    {
+      "id": "ConflictingPlacementSets",
+      "operation": "Evaluate",
+      "given": {
+        "objectHosts": [
+          "HostA"
+        ],
+        "userHosts": [
+          "HostB"
+        ],
+        "networkHosts": [
+          "HostA",
+          "HostB"
+        ],
+        "copies": "1"
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "PlacementDenied",
+        "effects": [
+          "NoNewCopy"
+        ]
+      }
+    },
+    {
+      "id": "SinglePrivateCopyOverridesDefaultTwo",
+      "operation": "Place",
+      "given": {
+        "networkDesiredCopies": "2",
+        "userHosts": [
+          "HostA"
+        ],
+        "userCopies": "1",
+        "consentingHosts": [
+          "HostA"
+        ]
+      },
+      "expect": {
+        "decision": "Permit",
+        "code": "None",
+        "effects": [
+          "ExactlyOneCopy",
+          "ReportSingleCopyAvailability"
+        ]
+      }
+    },
+    {
+      "id": "RootTierCannotReplaceHostConsent",
+      "operation": "Evaluate",
+      "given": {
+        "tierRank": "0",
+        "actions": [
+          "HostPages",
+          "AdministerPlacement"
+        ],
+        "hostConsent": null
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "MissingConsent",
+        "effects": [
+          "NoHostStart"
+        ]
+      }
+    },
+    {
+      "id": "RootTierCannotOverridePrivatePlacement",
+      "operation": "Place",
+      "given": {
+        "tierRank": "0",
+        "allowedUserHosts": [
+          "HostA"
+        ],
+        "requestedHosts": [
+          "HostA",
+          "HostB"
+        ]
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "PlacementDenied",
+        "effects": [
+          "NoHostBCopy"
+        ]
+      }
+    },
+    {
+      "id": "AbsentRestrictionIsNotWildcard",
+      "operation": "Evaluate",
+      "given": {
+        "applicableObjectPolicy": null,
+        "memberReadGrant": true
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "MissingAuthority",
+        "effects": [
+          "NoObjectBytes"
+        ]
+      }
+    },
+    {
+      "id": "AllowedModeIntersectionEmpty",
+      "operation": "Evaluate",
+      "given": {
+        "networkModes": [
+          "HostReadable"
+        ],
+        "objectModes": [
+          "Sealed"
+        ],
+        "clientModes": [
+          "Sealed"
+        ]
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "PolicyIntersection",
+        "effects": [
+          "NoUpload"
+        ]
+      }
+    },
+    {
+      "id": "UnknownPolicyField",
+      "operation": "DecodePolicy",
+      "given": {
+        "unknownField": "disableSignatures",
+        "unknownValue": true
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "MalformedRecord",
+        "effects": [
+          "NoPolicyChange"
+        ]
+      }
+    },
+    {
+      "id": "ConfiguredZeroLimitMeansNone",
+      "operation": "Reserve",
+      "given": {
+        "maxBytes": "0",
+        "requestedBytes": "1"
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "LimitExceeded",
+        "effects": [
+          "NoReservation"
+        ]
+      }
+    },
+    {
+      "id": "TierRankDoesNotImplyAuthority",
+      "operation": "Evaluate",
+      "given": {
+        "tierRank": "0",
+        "actions": [],
+        "requestAction": "ReadMail"
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "MissingAuthority",
+        "effects": [
+          "NoMailBytes"
+        ]
+      }
+    },
+    {
+      "id": "DelegationAttenuatesAllDimensions",
+      "operation": "Delegate",
+      "given": {
+        "parentActions": [
+          "ReadPage",
+          "DelegateGrant"
+        ],
+        "childActions": [
+          "ReadPage"
+        ],
+        "parentScope": "NetworkA",
+        "childScope": "NamespaceA",
+        "namespaceNetwork": "NetworkA",
+        "parentExpiry": "2000",
+        "childExpiry": "1500",
+        "parentDepth": "2",
+        "childDepth": "1",
+        "parentBytes": "100",
+        "childBytes": "50"
+      },
+      "expect": {
+        "decision": "Permit",
+        "code": "None",
+        "effects": [
+          "ChildGrantOnly"
+        ]
+      }
+    },
+    {
+      "id": "DelegationActionEscalation",
+      "operation": "Delegate",
+      "given": {
+        "parentActions": [
+          "ReadPage",
+          "DelegateGrant"
+        ],
+        "childActions": [
+          "ReadPage",
+          "ReviewPage"
+        ]
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "GrantEscalation",
+        "effects": [
+          "NoChildGrant"
+        ]
+      }
+    },
+    {
+      "id": "DelegationSiblingNamespace",
+      "operation": "Delegate",
+      "given": {
+        "parentScopes": [
+          "NamespaceA"
+        ],
+        "childScopes": [
+          "NamespaceB"
+        ]
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "GrantEscalation",
+        "effects": [
+          "NoChildGrant"
+        ]
+      }
+    },
+    {
+      "id": "DelegationLifetimeEscalation",
+      "operation": "Delegate",
+      "given": {
+        "parentExpiry": "2000",
+        "childExpiry": "2001"
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "GrantEscalation",
+        "effects": [
+          "NoChildGrant"
+        ]
+      }
+    },
+    {
+      "id": "DelegationDepthMustDecrease",
+      "operation": "Delegate",
+      "given": {
+        "parentDepth": "2",
+        "childDepth": "2"
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "GrantEscalation",
+        "effects": [
+          "NoChildGrant"
+        ]
+      }
+    },
+    {
+      "id": "DelegationDepthNine",
+      "operation": "EvaluateChain",
+      "given": {
+        "edgeCount": "9",
+        "hardMaximum": "8"
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "LimitExceeded",
+        "effects": [
+          "NoEffect"
+        ]
+      }
+    },
+    {
+      "id": "DelegationCycle",
+      "operation": "EvaluateChain",
+      "given": {
+        "chain": [
+          "GrantA",
+          "GrantB",
+          "GrantA"
+        ]
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "GrantCycle",
+        "effects": [
+          "NoEffect"
+        ]
+      }
+    },
+    {
+      "id": "ParentRevocationInvalidatesDescendant",
+      "operation": "EvaluateChain",
+      "given": {
+        "chain": [
+          "Root",
+          "Parent",
+          "Child"
+        ],
+        "revoked": [
+          "Parent"
+        ],
+        "childSignatureValid": true
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "GrantRevoked",
+        "effects": [
+          "NoEffect"
+        ]
+      }
+    },
+    {
+      "id": "ParentMissingFailsClosed",
+      "operation": "EvaluateChain",
+      "given": {
+        "childParent": "MissingGrant",
+        "availableGrants": [
+          "Child"
+        ]
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "MissingAuthority",
+        "effects": [
+          "NoEffect"
+        ]
+      }
+    },
+    {
+      "id": "TwoPartialChainsCannotMakeOneGrant",
+      "operation": "Delegate",
+      "given": {
+        "chainOneActions": [
+          "ReadPage"
+        ],
+        "chainTwoActions": [
+          "DelegateGrant"
+        ],
+        "requestedActions": [
+          "ReadPage"
+        ],
+        "combineChains": true
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "GrantEscalation",
+        "effects": [
+          "NoChildGrant"
+        ]
+      }
+    },
+    {
+      "id": "RankChangeKeepsConsentVeto",
+      "operation": "ApplyPolicy",
+      "given": {
+        "oldRank": "2",
+        "newRank": "0",
+        "privatePlacementUnchanged": true,
+        "requestedHost": "DisallowedHost"
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "PlacementDenied",
+        "effects": [
+          "NoPlacementChange"
+        ]
+      }
+    },
+    {
+      "id": "PreviewIsNotAuthority",
+      "operation": "ApplyPolicy",
+      "given": {
+        "previewValid": true,
+        "currentGrantRevoked": true
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "GrantRevoked",
+        "effects": [
+          "NoPolicyChange"
+        ]
+      }
+    },
+    {
+      "id": "PreviewDependencyChanged",
+      "operation": "ApplyPolicy",
+      "given": {
+        "previewGeneration": "8",
+        "currentGeneration": "9"
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "StaleSnapshot",
+        "effects": [
+          "RequireFreshPreview",
+          "NoPolicyChange"
+        ]
+      }
+    },
+    {
+      "id": "PreviewMissingImpactPage",
+      "operation": "ApplyPolicy",
+      "given": {
+        "impactCount": "129",
+        "receivedPages": [
+          "0"
+        ],
+        "receivedImpactCount": "128"
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "StaleSnapshot",
+        "effects": [
+          "NoClaimOfCompleteReview",
+          "NoPolicyChange"
+        ]
+      }
+    },
+    {
+      "id": "AtomicPolicyAuditFailure",
+      "operation": "ApplyPolicy",
+      "given": {
+        "validAuthority": true,
+        "mandatoryAuditDurable": false
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "AuditUnavailable",
+        "effects": [
+          "NoPolicyChange",
+          "NoSuccessReply"
+        ]
+      }
+    },
+    {
+      "id": "FirstContactDirectoryNameInsufficient",
+      "operation": "AcceptRecipient",
+      "given": {
+        "nameMatches": true,
+        "directoryQuorumValid": true,
+        "authenticatedRootBinding": false
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "RecipientContinuity",
+        "effects": [
+          "NoEncryptionToCandidate"
+        ]
+      }
+    },
+    {
+      "id": "AdministratorKeySubstitution",
+      "operation": "AcceptDevice",
+      "given": {
+        "networkAdmissionValid": true,
+        "rootSignatureValid": false,
+        "administratorRank": "0",
+        "nameMatches": true
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "RecipientContinuity",
+        "effects": [
+          "NoRecipientGrant"
+        ]
+      }
+    },
+    {
+      "id": "PossessionDoesNotReplaceRootSignature",
+      "operation": "AcceptDevice",
+      "given": {
+        "signingPossession": true,
+        "encryptionPossession": true,
+        "rootSignatureValid": false
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "RecipientContinuity",
+        "effects": [
+          "NoRecipientGrant"
+        ]
+      }
+    },
+    {
+      "id": "RootSignatureDoesNotReplacePossession",
+      "operation": "AcceptDevice",
+      "given": {
+        "rootSignatureValid": true,
+        "signingPossession": true,
+        "encryptionPossession": false
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "KeyPossession",
+        "effects": [
+          "NoRecipientGrant"
+        ]
+      }
+    },
+    {
+      "id": "PossessionChallengeReplay",
+      "operation": "AcceptDevice",
+      "given": {
+        "rootSignatureValid": true,
+        "challengeAlreadyConsumed": true,
+        "signatureValid": true
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "KeyPossession",
+        "effects": [
+          "NoRecipientGrant"
+        ]
+      }
+    },
+    {
+      "id": "RootCannotOverrideNetworkRefusal",
+      "operation": "AcceptDevice",
+      "given": {
+        "rootSignatureValid": true,
+        "possessionValid": true,
+        "networkAdmissionValid": false
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "MissingAuthority",
+        "effects": [
+          "NoNetworkDevice"
+        ]
+      }
+    },
+    {
+      "id": "RevokedBindingCannotReactivate",
+      "operation": "AcceptDevice",
+      "given": {
+        "bindingGeneration": "5",
+        "bindingState": "Revoked",
+        "requestedState": "Active",
+        "sameKeys": true
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "DeviceRevoked",
+        "effects": [
+          "RevocationPreserved"
+        ]
+      }
+    },
+    {
+      "id": "ReplacementUsesNewKeys",
+      "operation": "AcceptDevice",
+      "given": {
+        "oldBindingState": "Revoked",
+        "oldGeneration": "5",
+        "newGeneration": "6",
+        "newPredecessorMatches": true,
+        "sameKeys": true
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "KeyReuse",
+        "effects": [
+          "NoReplacement"
+        ]
+      }
+    },
+    {
+      "id": "RecipientLimitRootDevices",
+      "operation": "FreezeRoster",
+      "given": {
+        "roots": "1",
+        "devicesPerRoot": "17",
+        "totalDevices": "17"
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "LimitExceeded",
+        "effects": [
+          "NoSeal"
+        ]
+      }
+    },
+    {
+      "id": "RecipientLimitTotalDevices",
+      "operation": "FreezeRoster",
+      "given": {
+        "roots": "256",
+        "devicesPerRootMaximum": "16",
+        "totalDevices": "1025"
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "LimitExceeded",
+        "effects": [
+          "NoSeal"
+        ]
+      }
+    },
+    {
+      "id": "RecipientMaximumAcceptedStructurally",
+      "operation": "FreezeRoster",
+      "given": {
+        "roots": "256",
+        "devicesPerRootMaximum": "4",
+        "totalDevices": "1024",
+        "encodedBytes": "150000",
+        "allContinuityChecksValid": true
+      },
+      "expect": {
+        "decision": "Permit",
+        "code": "None",
+        "effects": [
+          "BoundedRoster",
+          "NoPerformanceClaim"
+        ]
+      }
+    },
+    {
+      "id": "PublisherCiphertextCannotReplaceReviewedBytes",
+      "operation": "FinalisePublication",
+      "given": {
+        "reviewedPlaintextDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+        "publisherCiphertextDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "reviewerFinalisedCiphertext": false
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "ReviewMismatch",
+        "effects": [
+          "NoServingManifest"
+        ]
+      }
+    },
+    {
+      "id": "InnerOuterContextMustMatch",
+      "operation": "ReadSealed",
+      "given": {
+        "outerPublication": "1111111111111111111111111111111111111111111111111111111111111111",
+        "innerPublication": "2222222222222222222222222222222222222222222222222222222222222222",
+        "ciphertextHashValid": true,
+        "innerSignatureValid": true
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "ReviewMismatch",
+        "effects": [
+          "NoRender"
+        ]
+      }
+    },
+    {
+      "id": "AssetRevisionCannotFloat",
+      "operation": "ReadAsset",
+      "given": {
+        "permitRevision": "5",
+        "assetRevision": "6",
+        "sameObject": true
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "WrongContext",
+        "effects": [
+          "NoAssetBytes"
+        ]
+      }
+    },
+    {
+      "id": "OpaqueHostMustConsent",
+      "operation": "PublishSealed",
+      "given": {
+        "hostAuthorityValid": true,
+        "allowOpaque": false,
+        "reviewerAccepted": true
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "MissingConsent",
+        "effects": [
+          "NoOpaqueUpload"
+        ]
+      }
+    },
+    {
+      "id": "SealedOnlyRejectsPlaintextBeforeStaging",
+      "operation": "Upload",
+      "given": {
+        "allowedModes": [
+          "Sealed"
+        ],
+        "uploadMode": "HostReadable"
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "SealedPlaintext",
+        "effects": [
+          "NoHostPayload",
+          "NoStaging",
+          "NoLogPayload",
+          "NoIndexEntry"
+        ]
+      }
+    },
+    {
+      "id": "PublicSealedNotRepresentable",
+      "operation": "Publish",
+      "given": {
+        "mode": "Sealed",
+        "publicAudience": true,
+        "authenticatedBoundedRoster": false
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "PublicSealedUnsupported",
+        "effects": [
+          "NoPublication"
+        ]
+      }
+    },
+    {
+      "id": "SealedToReadableRequiresAuthorDisclosure",
+      "operation": "ChangePublicationMode",
+      "given": {
+        "before": "Sealed",
+        "after": "HostReadable",
+        "authorDisclosure": null,
+        "adminApprovalValid": true
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "InvalidDisclosure",
+        "effects": [
+          "NoPlaintextUpload"
+        ]
+      }
+    },
+    {
+      "id": "ReadableToSealedIsProspective",
+      "operation": "ChangePublicationMode",
+      "given": {
+        "before": "HostReadable",
+        "after": "Sealed",
+        "freshKey": true,
+        "freshReview": true,
+        "opaqueConsent": true
+      },
+      "expect": {
+        "decision": "Permit",
+        "code": "None",
+        "effects": [
+          "ProtectNewRevision",
+          "ReportPriorPlaintextMayRemain"
+        ]
+      }
+    },
+    {
+      "id": "RemovalBeforePublication",
+      "operation": "PublicationTrace",
+      "given": {
+        "initialRoster": [
+          "DeviceA",
+          "DeviceB"
+        ],
+        "initialRevision": "0",
+        "initialEncryptionGeneration": "0",
+        "initialHeight": "100",
+        "events": [
+          {
+            "type": "Freeze",
+            "revision": "1",
+            "encryptionGeneration": "1"
+          },
+          {
+            "type": "Remove",
+            "device": "DeviceB"
+          },
+          {
+            "type": "Publish"
+          }
+        ]
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "StaleSnapshot",
+        "effects": [
+          "NoServingPublication"
+        ]
+      }
+    },
+    {
+      "id": "PublicationBeforeRemoval",
+      "operation": "PublicationTrace",
+      "given": {
+        "initialRoster": [
+          "DeviceA",
+          "DeviceB"
+        ],
+        "initialRevision": "0",
+        "initialEncryptionGeneration": "0",
+        "initialHeight": "100",
+        "events": [
+          {
+            "type": "Freeze",
+            "revision": "1",
+            "encryptionGeneration": "1"
+          },
+          {
+            "type": "Publish"
+          },
+          {
+            "type": "Remove",
+            "device": "DeviceB"
+          },
+          {
+            "type": "Read",
+            "device": "DeviceB",
+            "revision": "1",
+            "decisionHeight": "102"
+          }
+        ]
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "DeviceRevoked",
+        "effects": [
+          "EarlierPublicationRetained",
+          "NoNewReadAuthority"
+        ]
+      }
+    },
+    {
+      "id": "FreshRevisionAfterRemoval",
+      "operation": "PublicationTrace",
+      "given": {
+        "initialRoster": [
+          "DeviceA",
+          "DeviceB"
+        ],
+        "initialRevision": "0",
+        "initialEncryptionGeneration": "0",
+        "initialHeight": "100",
+        "events": [
+          {
+            "type": "Remove",
+            "device": "DeviceB"
+          },
+          {
+            "type": "Freeze",
+            "revision": "1",
+            "encryptionGeneration": "1"
+          },
+          {
+            "type": "Publish"
+          },
+          {
+            "type": "Read",
+            "device": "DeviceA",
+            "revision": "1",
+            "decisionHeight": "102"
+          }
+        ]
+      },
+      "expect": {
+        "decision": "Permit",
+        "code": "None",
+        "effects": [
+          "RosterExcludesRemovedDevice",
+          "FreshEncryptionGeneration"
+        ]
+      }
+    },
+    {
+      "id": "OldDecisionCannotReadNewContent",
+      "operation": "PublicationTrace",
+      "given": {
+        "initialRoster": [
+          "DeviceA",
+          "DeviceB"
+        ],
+        "initialRevision": "0",
+        "initialEncryptionGeneration": "0",
+        "initialHeight": "100",
+        "events": [
+          {
+            "type": "Remove",
+            "device": "DeviceB"
+          },
+          {
+            "type": "Freeze",
+            "revision": "1",
+            "encryptionGeneration": "1"
+          },
+          {
+            "type": "Publish"
+          },
+          {
+            "type": "Read",
+            "device": "DeviceA",
+            "revision": "1",
+            "decisionHeight": "100"
+          }
+        ]
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "BelowPolicyFloor",
+        "effects": [
+          "NoReadAuthority"
+        ]
+      }
+    },
+    {
+      "id": "FreshRosterCannotReuseEncryptionGeneration",
+      "operation": "PublicationTrace",
+      "given": {
+        "initialRoster": [
+          "DeviceA",
+          "DeviceB"
+        ],
+        "initialRevision": "0",
+        "initialEncryptionGeneration": "0",
+        "initialHeight": "100",
+        "events": [
+          {
+            "type": "Freeze",
+            "revision": "1",
+            "encryptionGeneration": "1"
+          },
+          {
+            "type": "Publish"
+          },
+          {
+            "type": "Remove",
+            "device": "DeviceB"
+          },
+          {
+            "type": "Freeze",
+            "revision": "2",
+            "encryptionGeneration": "1"
+          },
+          {
+            "type": "Publish"
+          }
+        ]
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "KeyReuse",
+        "effects": [
+          "NoSecondPublication"
+        ]
+      }
+    },
+    {
+      "id": "UnrelatedCommitDoesNotChangeRoster",
+      "operation": "PublicationTrace",
+      "given": {
+        "initialRoster": [
+          "DeviceA",
+          "DeviceB"
+        ],
+        "initialRevision": "0",
+        "initialEncryptionGeneration": "0",
+        "initialHeight": "100",
+        "events": [
+          {
+            "type": "Freeze",
+            "revision": "1",
+            "encryptionGeneration": "1"
+          },
+          {
+            "type": "UnrelatedCommit"
+          },
+          {
+            "type": "Publish"
+          }
+        ]
+      },
+      "expect": {
+        "decision": "Permit",
+        "code": "None",
+        "effects": [
+          "ExactFrozenRosterPublished"
+        ]
+      }
+    },
+    {
+      "id": "DuplicateRecoveryKeysCountOnce",
+      "operation": "Recover",
+      "given": {
+        "custody": "OwnerThreshold",
+        "threshold": "2",
+        "acceptedKeys": [
+          "A",
+          "B",
+          "C"
+        ],
+        "signatures": [
+          "A",
+          "A"
+        ]
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "RecoveryThreshold",
+        "effects": [
+          "NoSuccessorConnection"
+        ]
+      }
+    },
+    {
+      "id": "SharedRecoveryAliasesAreOnePrincipal",
+      "operation": "Recover",
+      "given": {
+        "custody": "SharedThreshold",
+        "threshold": "2",
+        "keyPrincipals": {
+          "KeyA": "PersonA",
+          "KeyB": "PersonA",
+          "KeyC": "PersonC"
+        },
+        "signatures": [
+          "KeyA",
+          "KeyB"
+        ]
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "RecoveryThreshold",
+        "effects": [
+          "NoSuccessorConnection"
+        ]
+      }
+    },
+    {
+      "id": "SharedRecoveryHasNoOwnerOverride",
+      "operation": "Recover",
+      "given": {
+        "custody": "SharedThreshold",
+        "threshold": "2",
+        "signatures": [
+          "OwnerOverride"
+        ],
+        "timeoutElapsed": true
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "RecoveryThreshold",
+        "effects": [
+          "NoSuccessorConnection"
+        ]
+      }
+    },
+    {
+      "id": "ThresholdValidRecoveryStillNeedsAcceptance",
+      "operation": "RecoveryTrace",
+      "given": {
+        "custodians": [
+          "A",
+          "B",
+          "C"
+        ],
+        "threshold": "2",
+        "declarations": [
+          {
+            "successor": "X",
+            "signatures": [
+              "A",
+              "B"
+            ]
+          }
+        ],
+        "independentlyAccepted": false
+      },
+      "expect": {
+        "decision": "Pending",
+        "code": "IndependentAcceptance",
+        "effects": [
+          "NoSuccessorConnection"
+        ]
+      }
+    },
+    {
+      "id": "EquivocatingSignerCreatesTwoThresholds",
+      "operation": "RecoveryTrace",
+      "given": {
+        "custodians": [
+          "A",
+          "B",
+          "C"
+        ],
+        "threshold": "2",
+        "declarations": [
+          {
+            "successor": "X",
+            "signatures": [
+              "A",
+              "B"
+            ]
+          },
+          {
+            "successor": "Y",
+            "signatures": [
+              "A",
+              "C"
+            ]
+          }
+        ],
+        "independentlyAccepted": true
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "RecoveryConflict",
+        "effects": [
+          "BothSignaturesCanBeValid",
+          "NoAutomaticWinner"
+        ]
+      }
+    },
+    {
+      "id": "ExplicitRecoveryAcceptanceOfOneDeclaration",
+      "operation": "RecoveryTrace",
+      "given": {
+        "custodians": [
+          "A",
+          "B",
+          "C"
+        ],
+        "threshold": "2",
+        "declarations": [
+          {
+            "successor": "X",
+            "signatures": [
+              "A",
+              "B"
+            ]
+          }
+        ],
+        "independentlyAccepted": true
+      },
+      "expect": {
+        "decision": "Permit",
+        "code": "None",
+        "effects": [
+          "NewNetworkIdentity",
+          "NoClaimOfUnseenConflictAbsence"
+        ]
+      }
+    },
+    {
+      "id": "TotalLossCannotResumeOldIdentity",
+      "operation": "Recover",
+      "given": {
+        "totalAuthorityLoss": true,
+        "oldNetwork": "1111111111111111111111111111111111111111111111111111111111111111",
+        "successorNetwork": "1111111111111111111111111111111111111111111111111111111111111111",
+        "thresholdValid": true
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "NewNetworkRequired",
+        "effects": [
+          "OldStateNotCurrent"
+        ]
+      }
+    },
+    {
+      "id": "SharedToOwnerNeedsRenewedTrust",
+      "operation": "ApplyRecoveryPolicy",
+      "given": {
+        "oldCustody": "SharedThreshold",
+        "newCustody": "OwnerSingle",
+        "currentThresholdValid": true,
+        "newCustodyAccepted": true,
+        "clientTrustAccepted": false
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "TrustChanged",
+        "effects": [
+          "ClientDoesNotUseChangedAuthority"
+        ]
+      }
+    },
+    {
+      "id": "ImmutableSharedRequiresNewNetwork",
+      "operation": "ApplyRecoveryPolicy",
+      "given": {
+        "oldCustody": "SharedThreshold",
+        "immutableShared": true,
+        "newCustody": "OwnerThreshold",
+        "currentThresholdValid": true
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "NewNetworkRequired",
+        "effects": [
+          "NoSameNetworkWeakening"
+        ]
+      }
+    },
+    {
+      "id": "RecoveryDoesNotResurrectGrants",
+      "operation": "ImportRecoveredState",
+      "given": {
+        "oldGrantValidHistorically": true,
+        "oldHostConsentValidHistorically": true,
+        "successorNetworkNew": true,
+        "freshGrant": false,
+        "freshConsent": false
+      },
+      "expect": {
+        "decision": "Pending",
+        "code": "HistoricalOnly",
+        "effects": [
+          "QuarantineImport",
+          "NoServing",
+          "NoReusedConsent"
+        ]
+      }
+    },
+    {
+      "id": "NetworkRecoveryDoesNotReplaceRecipientRoot",
+      "operation": "AcceptRecipient",
+      "given": {
+        "networkRecovered": true,
+        "memberNameMatches": true,
+        "newRootContinuity": false
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "RecipientContinuity",
+        "effects": [
+          "NoOldConfidentialAccess"
+        ]
+      }
+    },
+    {
+      "id": "ClientOnlyJoinCreatesNoHostResources",
+      "operation": "ActivateProfile",
+      "given": {
+        "roles": [],
+        "volumes": [],
+        "exposure": [],
+        "consent": null
+      },
+      "expect": {
+        "decision": "Permit",
+        "code": "None",
+        "effects": [
+          "NoHostTooling",
+          "NoInboundListener",
+          "NoStorageContribution"
+        ]
+      }
+    },
+    {
+      "id": "ConsentCannotBeReusedForWiderProfile",
+      "operation": "ActivateProfile",
+      "given": {
+        "consentProfileDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+        "requestedProfileDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "newPort": "443"
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "MissingConsent",
+        "effects": [
+          "NoNewPort"
+        ]
+      }
+    },
+    {
+      "id": "StartRacingWithdrawal",
+      "operation": "LifecycleTrace",
+      "given": {
+        "generation": "4",
+        "withdrawalGeneration": "0",
+        "state": "Stopped",
+        "events": [
+          {
+            "type": "PrepareStart"
+          },
+          {
+            "type": "Withdraw"
+          },
+          {
+            "type": "ActivatePrepared"
+          }
+        ]
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "GenerationConflict",
+        "effects": [
+          "WithdrawnPersisted",
+          "NoActiveService"
+        ]
+      }
+    },
+    {
+      "id": "OldConsentCannotRestartWithdrawn",
+      "operation": "LifecycleTrace",
+      "given": {
+        "generation": "4",
+        "withdrawalGeneration": "0",
+        "state": "Stopped",
+        "events": [
+          {
+            "type": "Withdraw"
+          },
+          {
+            "type": "AcceptConsent",
+            "withdrawalGeneration": "0"
+          },
+          {
+            "type": "PrepareStart"
+          }
+        ]
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "Withdrawn",
+        "effects": [
+          "NoActiveService"
+        ]
+      }
+    },
+    {
+      "id": "FreshConsentAfterWithdrawal",
+      "operation": "LifecycleTrace",
+      "given": {
+        "generation": "4",
+        "withdrawalGeneration": "0",
+        "state": "Stopped",
+        "events": [
+          {
+            "type": "Withdraw"
+          },
+          {
+            "type": "AcceptConsent",
+            "withdrawalGeneration": "1"
+          },
+          {
+            "type": "PrepareStart"
+          },
+          {
+            "type": "ActivatePrepared"
+          }
+        ]
+      },
+      "expect": {
+        "decision": "Permit",
+        "code": "None",
+        "effects": [
+          "NewGenerationActive"
+        ]
+      }
+    },
+    {
+      "id": "CrashReconciliationLeavesUnknownResources",
+      "operation": "Reconcile",
+      "given": {
+        "ownedLabels": [
+          "DeploymentA.Generation4"
+        ],
+        "observedLabels": [
+          "DeploymentA.Generation4",
+          "DeploymentB.Generation8"
+        ]
+      },
+      "expect": {
+        "decision": "Permit",
+        "code": "None",
+        "effects": [
+          "OnlyDeploymentAResourcesTouched",
+          "DeploymentBPreserved"
+        ]
+      }
+    },
+    {
+      "id": "StaleBackupNeverStartsServing",
+      "operation": "Restore",
+      "given": {
+        "restoredHeight": "90",
+        "retainedFloor": "100",
+        "withdrawalHistoryKnown": false
+      },
+      "expect": {
+        "decision": "Pending",
+        "code": "HistoricalOnly",
+        "effects": [
+          "NonServingRestore",
+          "NoResetOfFloor"
+        ]
+      }
+    },
+    {
+      "id": "LocalEmptySearchNeverForwards",
+      "operation": "Search",
+      "given": {
+        "scope": "Local",
+        "localMatches": [],
+        "networkAvailable": true,
+        "suggestionsEnabled": true
+      },
+      "expect": {
+        "decision": "Permit",
+        "code": "None",
+        "effects": [
+          "ZeroNetworkAttempts",
+          "NoRemoteSuggestions"
+        ]
+      }
+    },
+    {
+      "id": "LocalSearchNoAuthorityRefresh",
+      "operation": "Search",
+      "given": {
+        "scope": "Local",
+        "retainedView": "Current",
+        "authorityExpired": true,
+        "networkAvailable": true
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "Expired",
+        "effects": [
+          "ZeroNetworkAttempts",
+          "ShowStaleOrLocked"
+        ]
+      }
+    },
+    {
+      "id": "HistoricalSearchExplicitlyLocal",
+      "operation": "Search",
+      "given": {
+        "scope": "Local",
+        "retainedView": "Historical",
+        "authorityExpired": true,
+        "retainedPlaintextAuthorisedPreviously": true
+      },
+      "expect": {
+        "decision": "Permit",
+        "code": "None",
+        "effects": [
+          "ZeroNetworkAttempts",
+          "ShowHistoricalCoverage"
+        ]
+      }
+    },
+    {
+      "id": "HistoricalNetworkSearchRejected",
+      "operation": "Search",
+      "given": {
+        "scope": "Network",
+        "retainedView": "Historical"
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "SearchScope",
+        "effects": [
+          "NoQuerySent"
+        ]
+      }
+    },
+    {
+      "id": "ExplicitNetworkSearchNamesDestination",
+      "operation": "Search",
+      "given": {
+        "scope": "Network",
+        "retainedView": "Current",
+        "selectedNetwork": "NetworkA",
+        "route": "Independent",
+        "clientAllowsNetworkSearch": true
+      },
+      "expect": {
+        "decision": "Permit",
+        "code": "None",
+        "effects": [
+          "OneNamedNetworkThroughRelay",
+          "NoRemoteFanout"
+        ]
+      }
+    },
+    {
+      "id": "SealedBodyExcludedFromServerIndex",
+      "operation": "Index",
+      "given": {
+        "mode": "Sealed",
+        "bodyAvailableToClient": true,
+        "serverPublicMetadataApproval": false
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "SealedPlaintext",
+        "effects": [
+          "NoServerBody",
+          "NoPrivateTitle",
+          "NoSnippet"
+        ]
+      }
+    },
+    {
+      "id": "ScopeChangedCursorRejected",
+      "operation": "Search",
+      "given": {
+        "cursorAudienceGeneration": "8",
+        "currentAudienceGeneration": "9",
+        "cursorIndexGeneration": "4",
+        "currentIndexGeneration": "4"
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "CursorScope",
+        "effects": [
+          "NoCachedResult"
+        ]
+      }
+    },
+    {
+      "id": "WithdrawalHidesAllResultMetadata",
+      "operation": "Search",
+      "given": {
+        "indexHasOldDocument": true,
+        "publicationWithdrawn": true,
+        "requesterCanReadOtherDocuments": true
+      },
+      "expect": {
+        "decision": "Permit",
+        "code": "None",
+        "effects": [
+          "NoWithdrawnTitle",
+          "NoWithdrawnSnippet",
+          "NoWithdrawnCount",
+          "NoRankingInfluence"
+        ]
+      }
+    },
+    {
+      "id": "LocalIndexPlacementCannotWiden",
+      "operation": "StoreIndex",
+      "given": {
+        "containsSealedPlaintextDerivedTerms": true,
+        "encryptedAtRest": true,
+        "userLocations": [
+          "LocalVolume"
+        ],
+        "requestedLocation": "RemoteBackup"
+      },
+      "expect": {
+        "decision": "Refuse",
+        "code": "PlacementDenied",
+        "effects": [
+          "NoRemoteIndexCopy"
+        ]
+      }
+    },
+    {
+      "id": "DefaultDiagnosticsOmitQueryTerms",
+      "operation": "Diagnose",
+      "given": {
+        "searchTerms": [
+          "private phrase"
+        ],
+        "debugCaptureExplicitlyEnabled": false
+      },
+      "expect": {
+        "decision": "Permit",
+        "code": "None",
+        "effects": [
+          "NoQueryText",
+          "NoHashedQueryTerms",
+          "NoPayload"
+        ]
+      }
+    }
+  ]
+}

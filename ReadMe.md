@@ -77,4 +77,8 @@ replication profile assumes trusted administrators and crash faults; it does not
 provide Byzantine consensus. Containers share the host kernel. See the operation
 manuals for the precise deployment and recovery limits.
 
+[Replacement network contracts](Documentation/Contracts.md) specify the 0.8.0
+authority, policy and runtime boundaries. They do not change the current
+executable capabilities or qualification claims.
+
 Licensed under the [MIT License](Licence.txt).
