@@ -305,7 +305,7 @@ the service immune to denial of service. Deployment ingress and voter storage
 quotas remain necessary. Logs contain readiness and static operational failures,
 not invitation secrets or request bodies. There is no third-party telemetry.
 
-The request wire protocol remains version 1. Version 0.6.0 brokers accept state
+The request wire protocol remains version 1. Version 0.7.0 brokers accept state
 schemas 1 through 7. Pages and version-2 consent use at least schema 2; successful
 Federation commands use at least schema 4, retaining monotonic author sharing
 generations and withdrawal tombstones. Missing feature maps default to empty
@@ -368,6 +368,9 @@ update, and retain the prior executable for rollback only while its state format
 remains compatible. An update must not broaden mounts, endpoints, role or resource
 limits without renewed local consent. No automatic updater or certificate issuer
 runs inside either daemon.
+[Offline packages](Packages.md) describes stopped-profile image switching and
+compatible rollback. Version 0.7.0 retains authority schema 7; no state migration
+is required solely for that update.
 
 References: [etcd security model](https://etcd.io/docs/v3.6/op-guide/security/),
 [etcd runtime reconfiguration](https://etcd.io/docs/v3.6/op-guide/runtime-configuration/),

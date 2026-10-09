@@ -24,6 +24,10 @@ Set `GNAT_GCC`, `GNATPROVE` and `PROTOC` when the corresponding tools are outsid
 requires rootless Podman, delegated cgroup v2 limits and Landlock ABI 6 or later.
 Unsupported hosting profiles fail closed.
 
+- [Offline packages](Documentation/Packages.md): independently verified installation,
+  compatible image updates and state-preserving removal.
+- [Native qualification](Documentation/Qualification.md): measured Linux confinement.
+- [Security reporting](Documentation/Security.md): private reporting and trust limits.
 - [Authority operation](Documentation/Authority.md): trust roots, voters,
   membership, durable state and recovery.
 - [Confined hosting](Documentation/Hosting.md): signed consent, isolation,

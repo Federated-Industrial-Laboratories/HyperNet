@@ -73,7 +73,8 @@ class Workflow:
     def ca(self, name):
         self.openssl('req', '-x509', '-newkey', 'ed25519', '-nodes', '-days', '2',
                      '-keyout', self.pki / (name + 'Key.pem'), '-out', self.pki / (name + '.pem'),
-                     '-subj', '/CN=' + name, '-addext', 'basicConstraints=critical,CA:TRUE')
+                     '-subj', '/CN=' + name, '-addext', 'basicConstraints=critical,CA:TRUE',
+                     '-addext', 'keyUsage=critical,keyCertSign,cRLSign')
 
     def certificate(self, name, ca, cn, san, usage):
         self.openssl('req', '-new', '-newkey', 'ed25519', '-nodes', '-keyout', self.pki / (name + 'Key.pem'),

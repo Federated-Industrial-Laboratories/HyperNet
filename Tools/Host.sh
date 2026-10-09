@@ -114,7 +114,7 @@ start() {
         --pids-limit=32 --cpu-period=100000 --cpu-quota=50000 \
         --tmpfs=/State:rw,noexec,nosuid,nodev,size=8388608,mode=0700 \
         --network="$network:ip=$gate_address" --network="$egress" \
-        --volume="$directory/Gate:/Config:ro,nosuid,nodev,noexec" \
+        --volume="$directory/Gate:/Config:ro,nosuid,nodev,noexec,Z" \
         --entrypoint=/HyperNetGate "$image" /Config/Gate.json >/dev/null; then
         stop; fail 'Relay start failed'
     fi
@@ -122,7 +122,7 @@ start() {
     if ! podman run -d --name "$name" "${common[@]}" --timeout="$lifetime" --memory="$memory" --memory-swap="$memory" \
         --pids-limit="$pids" --cpu-period=100000 --cpu-quota="$quota" \
         --tmpfs="/State:rw,noexec,nosuid,nodev,size=$storage,mode=0700" \
-        --network="$network:ip=$host_address" --volume="$directory/Config:/Config:ro,nosuid,nodev,noexec" \
+        --network="$network:ip=$host_address" --volume="$directory/Config:/Config:ro,nosuid,nodev,noexec,Z" \
         "$image" host --config /Config/Host.json >/dev/null; then
         stop
         fail 'Host start failed'
