@@ -550,4 +550,3 @@ Installed authority tests must execute recipient and recovery ordering. Storage
 checks cover sealed and placement transitions; lifecycle checks cover races;
 route checks observe all network paths; search checks observe disclosure and
 cursor behaviour. Each uses these record identities and refusal semantics.
-

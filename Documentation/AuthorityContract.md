@@ -297,4 +297,3 @@ unique global succession. Conflicting declarations stop automatic recovery.
 Historical snapshots are reviewed imports; they cannot revive old grants,
 mailbox membership, placement consent or reader keys. The detailed owner/shared
 custody rules remain in [PolicyContract.md](PolicyContract.md).
-
