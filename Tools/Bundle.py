@@ -19,7 +19,7 @@ import tempfile
 import uuid
 
 PRODUCT = 'HyperNet'
-VERSION = '0.7.0'
+VERSION = '0.7.5'
 NAMESPACE = 'HyperNetBundle1'
 PRINCIPAL = 'HyperNetPublisher'
 MAX_ARCHIVE = 512 * 1024 * 1024
@@ -117,11 +117,11 @@ def validate_manifest(value):
     require(isinstance(value['version'], str) and re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', value['version']), 'Invalid package version')
     require(value['architecture'] in ('x86_64', 'aarch64'), 'Unsupported package architecture')
     metadata = value['metadata']
-    require(isinstance(metadata, dict) and set(metadata) == {'imageId', 'imageArchive', 'binaries', 'authoritySchemaMinimum', 'authoritySchemaMaximum', 'prerequisites'}, 'Invalid package metadata')
+    require(isinstance(metadata, dict) and set(metadata) == {'imageId', 'imageArchive', 'binaries', 'authoritySchema', 'prerequisites'}, 'Invalid package metadata')
     require(isinstance(metadata['imageId'], str) and re.fullmatch(r'sha256:[a-f0-9]{64}', metadata['imageId']), 'Invalid immutable image identity')
     require(metadata['imageArchive'] == 'Images/HyperNetOci.tar', 'Unexpected image path')
     require(isinstance(metadata['binaries'], dict) and set(metadata['binaries']) == {'HyperNet', 'HyperNetGate'} and all(isinstance(v, str) and HEX.fullmatch(v) for v in metadata['binaries'].values()), 'Invalid binary inventory')
-    require(type(metadata['authoritySchemaMinimum']) is int and type(metadata['authoritySchemaMaximum']) is int and metadata['authoritySchemaMinimum'] == 1 and metadata['authoritySchemaMaximum'] == 7, 'Invalid state compatibility bounds')
+    require(type(metadata['authoritySchema']) is int and metadata['authoritySchema'] == 8, 'Invalid authority schema')
     require(isinstance(metadata['prerequisites'], list) and len(metadata['prerequisites']) <= 32 and all(isinstance(v, str) and len(v) <= 256 for v in metadata['prerequisites']), 'Invalid prerequisites')
     files = value['files']
     require(isinstance(files, list) and 1 <= len(files) <= MAX_FILES, 'Invalid file count')
@@ -409,7 +409,7 @@ def create(args):
     require(not output.exists() and not Path(str(output) + '.sig').exists(), 'Output already exists')
     image_id = (package / 'ImageId.txt').read_text().strip()
     runtime_version = run([str(package / 'RootFs/HyperNet'), '--version']).decode('ascii').strip()
-    require(runtime_version in ('HyperNet 0.6.0', 'HyperNet 0.7.0'), 'Runtime version has no qualified state compatibility profile')
+    require(runtime_version == 'HyperNet 0.7.5', 'Runtime does not match the current package contract')
     runtime_version = runtime_version.split()[1]
     require(re.fullmatch(r'sha256:[a-f0-9]{64}', image_id), 'Invalid package image identity')
     machine = architecture()
@@ -429,7 +429,7 @@ def create(args):
                 files['Documentation/' + path.name] = path
         manifest = {'format': 1, 'product': PRODUCT, 'version': runtime_version, 'architecture': machine,
                     'metadata': {'imageId': image_id, 'imageArchive': 'Images/HyperNetOci.tar',
-                    'authoritySchemaMinimum': 1, 'authoritySchemaMaximum': 7,
+                    'authoritySchema': 8,
                     'binaries': {name: digest_file(package / 'RootFs' / name) for name in ('HyperNet', 'HyperNetGate')},
                     'prerequisites': ['Linux; package architecture must match the native processor', 'Python 3.11+, OpenSSH ssh-keygen Ed25519 SSHSIG, Bash, GNU coreutils, jq and flock', 'Rootless Podman with a maintained OCI runtime, nomap and subordinate UID/GID mappings', 'Delegated cgroup v2 CPU, memory and PID controllers; seccomp; Landlock ABI 6+', 'GNU/Linux dynamic libraries and their loader are carried inside the OCI image', 'The build packager uses Debian-format library inventory; runtime hosts do not require dpkg']},
                     'files': [{'path': name, 'size': path.stat().st_size, 'mode': 0o700 if name.startswith('Tools/') else 0o600, 'sha256': digest_file(path)} for name, path in sorted(files.items())]}

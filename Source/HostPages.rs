@@ -185,11 +185,14 @@ pub struct Replica {
 
 impl Replica {
     pub fn new(config: &HostConfig) -> Result<Self> {
-        let storage = config
-            .consent
-            .page_cache_bytes
-            .map(|quota| Storage::new(config.state_directory.join("Pages"), quota))
-            .transpose()?;
+        let storage = if config.consent.pages_enabled() {
+            Some(Storage::new(
+                config.state_directory.join("Pages"),
+                config.consent.page_cache_bytes,
+            )?)
+        } else {
+            None
+        };
         Ok(Self {
             storage,
             inventory: BTreeMap::new(),
@@ -230,11 +233,8 @@ impl Replica {
             entries.len() <= MAXIMUM_OBJECTS,
             "replica inventory exceeds object limit"
         );
-        let namespaces = config
-            .consent
-            .namespaces
-            .as_ref()
-            .context("Pages consent is required")?;
+        ensure!(config.consent.pages_enabled(), "Pages consent is required");
+        let namespaces = &config.consent.namespaces;
         let mut inventory = BTreeMap::new();
         for descriptor in entries {
             fixed_hex::<16>(&descriptor.page_id)?;
@@ -246,7 +246,7 @@ impl Replica {
             ensure!(
                 namespaces.contains(&descriptor.namespace)
                     && descriptor.audience == "Members"
-                    && descriptor.profile == "HyperNetPage/1"
+                    && descriptor.profile == crate::markup::PROFILE
                     && descriptor.publication_version > 0,
                 "inventory exceeds Pages consent"
             );
@@ -436,7 +436,7 @@ mod tests {
                 reviewer: hex::encode([2; 32]),
                 namespace: "Public".into(),
                 audience: "Members".into(),
-                profile: "HyperNetPage/1".into(),
+                profile: crate::markup::PROFILE.into(),
                 digest: hex::encode([3; 32]),
                 submission_digest: hex::encode([4; 32]),
                 approval_digest: hex::encode([5; 32]),

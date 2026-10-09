@@ -353,7 +353,7 @@ impl Store {
             bail!("Authority state exceeds its size bound");
         }
         let state: State = serde_json::from_slice(kv.value())?;
-        if !(1..=7).contains(&state.version) || state.network != self.network {
+        if state.version != crate::types::STATE_VERSION || state.network != self.network {
             bail!("Authority state identity is invalid");
         }
         for signer in [

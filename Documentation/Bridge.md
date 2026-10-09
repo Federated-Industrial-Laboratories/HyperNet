@@ -7,8 +7,8 @@ must share each exact publication, and the destination administrator must review
 it before local members can read it. See [Federation.md](Federation.md) for the
 wire protocol, limits and authority configuration.
 
-The bridge is separate from ordinary hosting. Existing version 1 and version 2
-host consent cannot enable federation. Bridge identities cannot publish Pages,
+The bridge is separate from ordinary hosting. Ordinary host consent cannot enable
+federation. Bridge identities cannot publish Pages,
 review submissions or administer either network. Neither bridge identity is an
 authority voter or an authority attestation signer.
 
@@ -82,7 +82,7 @@ values; `agreementId` is 16 bytes. All four device and authority keys must diffe
 The networks must differ. Namespace labels begin with an ASCII letter, contain
 only ASCII letters and digits, and have at most 32 bytes. There are no wildcards.
 The exact treaty fixes both namespaces, both networks, all four keys, Pages as
-the service, `HyperNetPage/1` as the grammar, and the maximum expiry.
+the service, `HyperNetPage/2` as the grammar, and the maximum expiry.
 
 Consent expires within seven days and no later than the treaty or either service
 membership. The resource ranges are 64 MiB through 8 GiB of bridge memory, 16

@@ -38,7 +38,7 @@ commands always evaluate current state and do not retain replay receipts.
 | `Redeem` | `secret` | Device named in the invitation |
 | `Grant` | `deviceKey`, `grants`, `expires` | Administrator |
 | `Revoke` | `deviceKey` | Administrator |
-| `Consent` | `profile`, `grants`, `expires`, `certificate`, optional `document` | Separate hosting member, own device |
+| `Consent` | `profile`, `grants`, `expires`, `certificate`, `document` | Separate hosting member, own device |
 | `Withdraw` | None | Own member; permitted after network revocation |
 | `Heartbeat` | `profile` | Active hosting consent and matching mTLS certificate |
 
@@ -87,14 +87,16 @@ Neither hosting nor bridge consent can be used to change between service roles.
 Federation commands and evidence use this request envelope, with the additional
 purpose-separated signatures and bilateral checks in [Federation.md](Federation.md).
 
-For Pages, `document` contains the unpadded base64url encoding of the exact signed
-version-2 consent file, including its JSON whitespace and final newline. Its
-SHA-256 must equal `profile`. The device signature and the network, device, expiry,
-resources, Pages service, namespace set and cache quota must all validate. A
-version-1 consent, or a registration without the document, permits no Pages
-replication. Namespace names are case-sensitive ASCII labels matching
-`[A-Za-z][A-Za-z0-9]{0,31}`. Labels are shared within a network; page authorship is
-bound separately to the signing device.
+For every host, `document` contains the unpadded base64url encoding of the exact
+signed version-3 consent file, including its JSON whitespace and final newline.
+Its SHA-256 must equal `profile`. The device signature and network, device, expiry,
+resources, service list, namespace set and cache quotas must all validate. Empty
+`services`, empty `namespaces` and zero `pageCacheBytes` permit heartbeat only.
+Exactly `["Pages"]` enables Pages under the named namespaces and bounded cache.
+`pageMediaCacheBytes` is mandatory and must be zero. Missing fields, retired
+consent versions and a missing document are rejected. Namespace names are
+case-sensitive ASCII labels matching `[A-Za-z][A-Za-z0-9]{0,31}`. Labels are
+shared within a network; page authorship is bound separately to the signing device.
 
 Replies are JSON objects with `ok`, `code`, `epoch` and `result`. Successful
 commands use code `Ok`. Errors contain static codes, without submitted values
@@ -114,8 +116,8 @@ protection against an authorised administrator or a compromised endpoint.
 
 ## Page objects and review
 
-`HyperNetPage/1` is the only page profile. The exact UTF-8 source starts with that
-header and is limited to 16 KiB, 512 lines and 1,024 UTF-8 bytes per line. The
+`HyperNetPage/2` is the only page profile. The exact UTF-8 source starts with that
+header; the signed profile must match it exactly. It is limited to 16 KiB, 512 lines and 1,024 UTF-8 bytes per line. The
 published grammar defines the narrower text and link rules. Source bytes are
 validated before quarantine; no executable payload, asset import, HTML renderer,
 script or external fetch is available. `audience` is exactly `Members` in this
@@ -207,9 +209,9 @@ failure grants no publication. Tombstones are not silently reused.
 ## Consenting replicas
 
 Replicas connect outward through their fixed relay and have no incoming page
-listener. They hold no etcd credentials. Version-2 consent explicitly enables
+listener. They hold no etcd credentials. Version-3 consent must explicitly enable
 `services: ["Pages"]`, 1 to 16 namespace labels and a bounded volatile cache.
-Version-1 hosts never poll these APIs. Each replica call additionally requires a
+Hosts with empty services never poll these APIs. Each replica call additionally requires a
 matching verified mTLS certificate and current hosting consent.
 
 | Command | Fields | Result |

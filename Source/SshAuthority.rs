@@ -389,7 +389,7 @@ pub fn apply(
         }
         _ => return Err("UnsupportedCommand"),
     };
-    state.version = state.version.max(6);
+
     state.high_water_time = state.high_water_time.max(now);
     if !read {
         state.epoch = state.epoch.checked_add(1).ok_or("CapacityExceeded")?;

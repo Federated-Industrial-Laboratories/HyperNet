@@ -82,7 +82,7 @@ create another grant or delegate their access. There is no update command.
 Create and revoke use ordinary exact-request transaction receipts. Retrying the
 same signed request returns its receipt only to the authorised caller; a reused
 request ID with different bytes returns `RequestConflict`. Read operations create
-no mutation receipt. Every successful application command preserves schema 7.
+no mutation receipt. Every successful application command preserves schema 8.
 
 ## Page integration
 

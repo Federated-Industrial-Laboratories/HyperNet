@@ -25,9 +25,9 @@ and model tools, and give it the smallest useful namespace and expiry.
 
 ## Provisioning and use
 
-1. Upgrade every broker to 0.6.0 or a qualified compatible release. Preserve all
-   existing authority floors, voter credentials and state. Successful application
-   commands write schema 7, including get and list. Earlier binaries cannot read it.
+1. Provision every broker under the current authority state-8 contract. Preserve
+   authority floors, voter credentials and retained security history. Application
+   commands preserve that exact schema; no earlier state format is accepted.
 2. Provision a distinct application Ed25519 identity and the network's normal TLS
    trust. Keep the identity file private. Do not reuse a membership, authority,
    mail device, mail address owner or native SSH key.
@@ -82,8 +82,7 @@ retain an otherwise expired record for the normal request retry period. Capacity
 failure does not partly create a grant. Avoid unnecessary identity churn and plan
 long-lived authored pages around these documented record bounds.
 
-Schema 7 preserves earlier service schemas, role histories, transaction receipts
-and clock floors. Application reclamation refuses any backward authority time;
+State 8 retains service role histories, transaction receipts and clock floors. Application reclamation refuses any backward authority time;
 page application checks use at least the saved clock floor. Restore state only
 through the normal authority recovery procedure. Do not remove referenced grants,
 reset the schema or discard floors to downgrade a network.

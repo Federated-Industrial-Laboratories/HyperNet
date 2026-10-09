@@ -115,9 +115,3 @@ pub struct TransferState {
     pub hosts: BTreeMap<String, crate::mail_types::HostRecord>,
     pub offers: BTreeMap<String, TransferRecord>,
 }
-
-impl TransferState {
-    pub fn is_empty(&self) -> bool {
-        self.hosts.is_empty() && self.offers.is_empty()
-    }
-}

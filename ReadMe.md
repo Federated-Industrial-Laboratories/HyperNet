@@ -25,14 +25,15 @@ requires rootless Podman, delegated cgroup v2 limits and Landlock ABI 6 or later
 Unsupported hosting profiles fail closed.
 
 - [Offline packages](Documentation/Packages.md): independently verified installation,
-  compatible image updates and state-preserving removal.
+  current-contract image updates and state-preserving removal.
 - [Native qualification](Documentation/Qualification.md): measured Linux confinement.
 - [Security reporting](Documentation/Security.md): private reporting and trust limits.
 - [Authority operation](Documentation/Authority.md): trust roots, voters,
   membership, durable state and recovery.
 - [Confined hosting](Documentation/Hosting.md): signed consent, isolation,
   resource limits, installation and local withdrawal.
-- [Pages](Documentation/Pages.md): inert text and exact-content approval.
+- [Pages](Documentation/Pages.md): inert components and exact-content approval.
+- [HyperPage](Documentation/HyperPage.md): bounded layout, colours and local controls.
 - [Federation](Documentation/Federation.md): bilateral treaties, author opt-in,
   separate import review and signed freshness evidence.
 - [Confined bridges](Documentation/Bridge.md): dual-signed endpoint consent and

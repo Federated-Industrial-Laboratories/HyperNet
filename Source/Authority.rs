@@ -186,7 +186,7 @@ pub fn apply(
     now: u64,
     revision: i64,
 ) -> Result<Reply, &'static str> {
-    if !(1..=7).contains(&state.version) {
+    if state.version != crate::types::STATE_VERSION {
         return Err("UnsupportedState");
     }
     if state.high_water_time > now.saturating_add(2) {
@@ -388,7 +388,7 @@ pub fn apply(
             if *expires > member.expires {
                 return Err("InvalidExpiry");
             }
-            if let Some(document) = document {
+            {
                 use base64::Engine;
                 let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
                     .decode(document)
@@ -402,7 +402,6 @@ pub fn apply(
                 if consent.grants != *mask || consent.expires != *expires {
                     return Err("InvalidConsent");
                 }
-                state.version = state.version.max(2);
             }
             state.consents.insert(
                 request.key.clone(),
@@ -472,6 +471,8 @@ pub fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use ed25519_dalek::{Signer, SigningKey};
 
     fn request(key: &str, id: u8, command: Command) -> VerifiedRequest {
         VerifiedRequest {
@@ -493,7 +494,7 @@ mod tests {
     }
     fn setup() -> (State, String, String) {
         let admin = hex::encode([1; 32]);
-        let user = hex::encode([2; 32]);
+        let user = hex::encode(SigningKey::from_bytes(&[2; 32]).verifying_key().as_bytes());
         (
             State::initial(hex::encode([9; 32]), admin.clone(), 100),
             admin,
@@ -619,10 +620,47 @@ mod tests {
         );
     }
     #[test]
+    fn only_current_complete_state_is_read_or_mutated() {
+        let (state, admin, _) = setup();
+        assert_eq!(state.version, STATE_VERSION);
+        let current = serde_json::to_value(&state).unwrap();
+        assert!(serde_json::from_value::<State>(current.clone()).is_ok());
+        for version in (0..=STATE_VERSION + 1).filter(|version| *version != STATE_VERSION) {
+            let mut old = current.clone();
+            old["version"] = json!(version);
+            assert!(serde_json::from_value::<State>(old).is_err());
+            let mut old = state.clone();
+            old.version = version;
+            let before = serde_json::to_vec(&old).unwrap();
+            let command = request(&admin, 1, Command::Status { device_key: None });
+            assert_eq!(
+                apply(&mut old, &command, None, 100, 1).err(),
+                Some("UnsupportedState")
+            );
+            assert_eq!(serde_json::to_vec(&old).unwrap(), before);
+        }
+        for field in ["pages", "mail", "transfers", "ssh", "applications"] {
+            let mut incomplete = current.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<State>(incomplete).is_err());
+        }
+    }
+
+    #[test]
     fn hosting_needs_matching_certificate_consent_and_current_grants() {
         let (mut state, admin, user) = setup();
         enrol(&mut state, &admin, &user);
-        let profile = hex::encode([3; 32]);
+        let payload = serde_json::to_vec(&json!({"version":3,"network":state.network,
+            "deviceKey":user,"grants":2,"expires":900,"memoryBytes":67108864,
+            "pids":32,"cpuQuota":10000,"cpuPeriod":100000,"stateBytes":1048576,
+            "authorityEndpoint":"https://authority.example:8443","authorityAddress":"192.0.2.20:8443",
+            "services":[],"namespaces":[],"pageCacheBytes":0,"pageMediaCacheBytes":0})).unwrap();
+        let mut message = b"HyperNet/Consent/3\0".to_vec();
+        message.extend_from_slice(&payload);
+        let document = serde_json::to_vec(&json!({"payload":URL_SAFE_NO_PAD.encode(&payload),
+            "signature":hex::encode(SigningKey::from_bytes(&[2;32]).sign(&message).to_bytes())}))
+        .unwrap();
+        let profile = hex::encode(Sha256::digest(&document));
         let cert = hex::encode([4; 32]);
         apply(
             &mut state,
@@ -634,7 +672,7 @@ mod tests {
                     grants: HOST,
                     expires: 900,
                     certificate: cert.clone(),
-                    document: None,
+                    document: URL_SAFE_NO_PAD.encode(document),
                 },
             ),
             None,

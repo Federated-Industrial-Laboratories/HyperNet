@@ -170,7 +170,7 @@ pub fn apply(
     now: u64,
     revision: i64,
 ) -> Result<Reply, Failure> {
-    if !(1..=7).contains(&state.version) {
+    if state.version != crate::types::STATE_VERSION {
         return Err("UnsupportedState");
     }
     // Expired grants must not revive after their unreferenced records are reclaimed.
@@ -363,7 +363,7 @@ pub fn apply(
     if mutate {
         state.epoch = state.epoch.checked_add(1).ok_or("CapacityExceeded")?;
     }
-    state.version = 7;
+
     state.high_water_time = now;
     let reply = Reply::success(state.epoch, result);
     if mutate {

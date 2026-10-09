@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "hypernet"
-version = "0.7.0"
+version = "0.7.5"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

@@ -65,7 +65,7 @@ fn validate_treaty(treaty: &FederationTreaty) -> Result<(), &'static str> {
     }
     if treaty.version != 1
         || treaty.service != "Pages"
-        || treaty.profile != "HyperNetPage/1"
+        || treaty.profile != crate::markup::PROFILE
         || treaty.source_network == treaty.destination_network
         || !markup::namespace(&treaty.source_namespace)
         || !markup::namespace(&treaty.destination_namespace)
@@ -296,12 +296,7 @@ fn bridge_document(
         return Err("BridgeConsentRequired");
     }
     let bytes = URL_SAFE_NO_PAD
-        .decode(
-            registered
-                .document
-                .as_ref()
-                .ok_or("BridgeConsentRequired")?,
-        )
+        .decode(&registered.document)
         .map_err(|_| "InvalidBridgeConsent")?;
     if hex::encode(Sha256::digest(&bytes)) != profile {
         return Err("InvalidBridgeConsent");
@@ -370,7 +365,7 @@ pub fn preflight(
     certificate: Option<&str>,
     now: u64,
 ) -> Result<(), &'static str> {
-    if !(1..=7).contains(&state.version) {
+    if state.version != crate::types::STATE_VERSION {
         return Err("UnsupportedState");
     }
     if state.high_water_time > now.saturating_add(2) {
@@ -593,6 +588,7 @@ fn exportable<'a>(
     if !share.allowed
         || share.descriptor_digest != descriptor_digest(descriptor)?
         || descriptor.namespace != treaty.source_namespace
+        || descriptor.profile != treaty.profile
     {
         return Err("AuthorShareRequired");
     }
@@ -845,7 +841,7 @@ pub fn apply(
                     expires: *expires,
                     certificate: certificate.clone(),
                     active: true,
-                    document: Some(document.clone()),
+                    document: document.clone(),
                 },
             );
             json!({"deviceKey":request.key,"consent":state.bridge_consents.get(&request.key)})
@@ -886,7 +882,8 @@ pub fn apply(
             if descriptor.author != request.key {
                 return Err("PageOwnerMismatch");
             }
-            if descriptor.namespace != value.treaty.source_namespace
+            if descriptor.profile != value.treaty.profile
+                || descriptor.namespace != value.treaty.source_namespace
                 || descriptor.publication_version != *publication_version
                 || descriptor_digest(descriptor)? != *bound
             {
@@ -1359,7 +1356,7 @@ pub fn apply(
     if changed {
         state.epoch = state.epoch.checked_add(1).ok_or("CapacityExceeded")?;
     }
-    state.version = state.version.max(4);
+
     state.high_water_time = state.high_water_time.max(now);
     let reply = Reply::success(state.epoch, result);
     encoded(&reply, 256 * 1024)?;

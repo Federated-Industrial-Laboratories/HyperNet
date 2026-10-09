@@ -5,9 +5,9 @@ device identity, a client transport certificate and a signed local consent
 document. Hosting requires both local consent and a current authority lease.
 Network administration cannot enlarge the signed local permissions or resources.
 
-Version 1 host consent enables membership and hosting readiness only. Version 2
-can additionally enable approved Pages replication in selected namespaces.
-Neither profile stores mail or transferred files. Writable state is bounded
+Version 3 host consent names its services explicitly. An empty list enables
+hosting readiness only; `["Pages"]` enables approved Pages replication in the
+selected namespaces. Host consent does not enable mail or transferred files. Writable state is bounded
 tmpfs and is recreated on restart. Authority storage has a separate durable deployment;
 see [Authority.md](Authority.md).
 Federation uses a separate dual-identity bridge and consent profile; see
@@ -58,7 +58,7 @@ machine isolation.
 
 The document has exactly two fields, `payload` and `signature`. `payload` contains
 unpadded base64url UTF-8 JSON. An Ed25519 signature covers the ASCII bytes
-`HyperNet/Consent/1` for version 1 or `HyperNet/Consent/2` for version 2,
+`HyperNet/Consent/3`,
 a zero byte, then those exact decoded payload bytes. The
 profile identifier is SHA-256 of the complete document file, including any
 trailing newline. Do not reformat a document after registering its profile.
@@ -67,7 +67,7 @@ The payload fields are:
 
 | Field | Meaning |
 | --- | --- |
-| `version` | Integer 1 for readiness only, or integer 2 for Pages |
+| `version` | Integer 3 |
 | `network`, `deviceKey` | Lowercase hexadecimal network and signing-key identities |
 | `grants` | Integer 2, hosting only |
 | `expires` | Unix seconds, within seven days of signing/activation |
@@ -78,15 +78,15 @@ The payload fields are:
 | `authorityEndpoint` | HTTPS DNS endpoint at the root path, without user information, query or fragment |
 | `authorityAddress` | Literal IP address and port for the fixed relay destination |
 
-Version 2 requires three additional fields. Version 1 rejects these fields,
-including explicit null values; upgrading a program cannot enable Pages for an
-existing version 1 consent document.
+Every version-3 document also requires these fields. No earlier consent version
+is accepted and no omitted field implies a default permission or resource quota.
 
 | Field | Meaning |
 | --- | --- |
-| `services` | Exactly `["Pages"]` |
-| `namespaces` | One through 16 distinct, case-sensitive namespace labels |
-| `pageCacheBytes` | At least 64 KiB and no more than `stateBytes` minus 256 KiB |
+| `services` | Empty for heartbeat only, or exactly `["Pages"]` |
+| `namespaces` | Empty without Pages; otherwise one through 16 distinct namespace labels |
+| `pageCacheBytes` | Zero without Pages; otherwise at least 64 KiB and no more than `stateBytes` minus 256 KiB |
+| `pageMediaCacheBytes` | Mandatory zero; media caching is unavailable in this contract |
 
 A namespace begins with an ASCII letter, contains only ASCII letters and digits,
 and has at most 32 bytes. Wildcards, prefixes and implicit child namespaces are
@@ -99,7 +99,7 @@ Host resource limits are checked against the signature after their effective
 cgroup values are read. The writable filesystem must be tmpfs with a capacity
 no greater than `stateBytes`.
 
-Both consent versions also select a separate fixed relay allowance: 128 MiB memory,
+Consent also selects a separate fixed relay allowance: 128 MiB memory,
 32 PIDs, half a CPU, 8 MiB tmpfs, 16 simultaneous connections and an aggregate
 1 MiB/s byte rate in both directions, with an initial 8 KiB scheduling quantum.
 Each direction of a connection is limited to 16 MiB. Idle reads expire after ten
@@ -113,25 +113,26 @@ then register its exact profile and client leaf-certificate digest using the
 authority `Consent` command. Membership needs the hosting grant before consent
 can be registered. Consent does not create membership or an administrative role.
 Register the base64url encoding of the complete consent document bytes in the
-command's `document` field to enable Pages remotely. Its hash must match
+command's mandatory `document` field for every registration. Its hash must match
 `profile`; its signature, service, namespace and resource limits are checked.
 Use a separate hosting identity: an administrative identity cannot register
 hosting consent, and a credential with retained hosting consent cannot perform
 ordinary Pages or administration operations.
 
-Add all three service fields to the resource specification to select version 2:
+Include all four service fields in the resource specification:
 
 ```json
 {
   "services": ["Pages"],
   "namespaces": ["Public", "Manual"],
-  "pageCacheBytes": 524288
+  "pageCacheBytes": 524288,
+  "pageMediaCacheBytes": 0
 }
 ```
 
-The fields belong inside the existing specification object. Omitting all three
-retains version 1; providing only some is an error. Sign and register with the
-separate hosting device configuration:
+The fields belong inside the resource specification object. For heartbeat only,
+use empty service and namespace arrays and zero for both cache quotas. Omission
+or null is an error. Sign and register with the separate hosting device configuration:
 
 ```sh
 HyperNetSuite --config Device/Profile.json host-consent \
@@ -149,8 +150,9 @@ the DER-encoded hosting client certificate.
 
 The host uses its existing outbound TLS connection through the fixed relay. It
 opens no inbound listener and receives no authority database credentials.
-Version 1 profiles never request page inventory or content. Version 2 profiles
-receive only current approved publications in their explicit namespaces.
+Profiles with empty services never request page inventory or content. Profiles
+with the Pages service receive only current approved publications in their
+explicit namespaces.
 
 `PageSync` supplies a scoped inventory and, when requested, one approved bundle.
 Inventory is limited to 256 descriptors; responses are limited to 256 KiB.

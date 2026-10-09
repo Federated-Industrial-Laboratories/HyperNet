@@ -178,9 +178,9 @@ document for the exact profile and resources, and submits that document's digest
 and transport-certificate fingerprint to the authority. The nonvoting host
 requires a current authority heartbeat and enforces the intersection of network
 grant and local consent. A grant alone cannot widen the local runtime profile.
-Version-1 consent enables heartbeat operation only. Version-2 consent can
-add the Pages replica service for an exact namespace list and bounded volatile
-cache; see [Hosting.md](Hosting.md). This consent covers heartbeat and Pages only.
+Version-3 consent requires explicit services. Empty services permit heartbeat
+only; `["Pages"]` enables replication for an exact namespace list and bounded
+volatile cache; see [Hosting.md](Hosting.md). This consent covers heartbeat and Pages only.
 [Mail](MailStore.md), [transfers](TransferStore.md) and [SSH](SshServices.md) use
 separate service identities and consent contracts.
 
@@ -219,7 +219,7 @@ separate 60-second past and 30-second future tolerance.
 
 ## Publish and replicate Pages
 
-Authors submit bounded `HyperNetPage/1` text into quarantine. Only its author or
+Authors submit bounded `HyperNetPage/2` text into quarantine. Only its author or
 an administrator can inspect a pending object. An administrator must explicitly
 approve the exact author signature, content digest, namespace, audience and
 revision. A pending replacement leaves the previous approved object readable;
@@ -275,15 +275,15 @@ author opt-ins; do not transplant prior sharing permissions or withdrawal floors
 The guard cannot protect against an administrator who replaces both the entire
 trusted cluster and every client's trust material and rollback floor.
 
-## Bounds and upgrade contract
+## Bounds and current state contract
 
 The initial authority profile supports 1,024 lifetime member identities and
 1,024 lifetime invitation verifiers. Revoked and redeemed records are retained
 to prevent resurrection. At most 2,048 unexpired request receipts are retained,
 and the serialised authority state cannot exceed 1 MiB. Whichever bound is met
 first causes an explicit capacity error. These are small-network limits, not
-unlimited federation claims. Increasing or compacting them requires a reviewed
-state migration that preserves revocation and invitation history.
+unlimited federation claims. The current contract does not compact retained security history or migrate
+state from another contract.
 
 Each non-administrative device is limited to 64 outstanding mutation receipts;
 64 global slots are reserved for administrative mutations. Read-only commands
@@ -305,72 +305,36 @@ the service immune to denial of service. Deployment ingress and voter storage
 quotas remain necessary. Logs contain readiness and static operational failures,
 not invitation secrets or request bodies. There is no third-party telemetry.
 
-The request wire protocol remains version 1. Version 0.7.0 brokers accept state
-schemas 1 through 7. Pages and version-2 consent use at least schema 2; successful
-Federation commands use at least schema 4, retaining monotonic author sharing
-generations and withdrawal tombstones. Missing feature maps default to empty
-for earlier schemas. Mail introduces schema 5. Every successful normal mail
-command writes schema 5, including MailHosts and MailAddressGet directory reads.
-MailAuthorise and MailPolicySync are separate read-only paths. Later Pages,
-Federation and hosting operations preserve the newer schema.
+The request envelope uses version 1. The authority state uses exactly version 8;
+these identify different objects. New networks begin at state 8 and every state
+reader and writer retains that contract. All current feature fields are required,
+including empty maps. Retired state versions, missing fields and unknown versions
+are rejected without rewriting or deleting stored bytes. There is no migration,
+version negotiation or backward-compatible reader. Use a separate new network for
+this contract; preserve an older network with its original software and state.
 
-Upgrade every authority broker to version 0.4.0 or a subsequently qualified
-compatible release before permitting the first successful mail command. This
-includes brokers serving only existing Pages or Federation traffic: they share
-the authority state and version 0.3.1 cannot read schema 5. Do not use MailHosts
-as an early rollout probe while older brokers are running. First update all
-brokers with their existing private rollback floors, check ordinary membership
-and existing services, then provision the separate mail signer and enable mail.
 Configure the same pinned mail authority signer on each broker serving that
 network, separately from the Federation signer and all member/mail identities.
-[Mail store operation](MailStore.md) describes the private signer file and host
-transport trust provisioning. Mail metadata uses the existing exact authority
-RBAC key; it requires no ciphertext or inbox prefix.
-
-Transfers and SSH introduce schema 6. Upgrade every broker to 0.5.0 or a
-qualified compatible release before any successful transfer or SSH command,
-including directory queries. Version 0.4.0 cannot read schema 6. These features
-use a separate `serviceSigningKey` identity shared by the compatible brokers,
-distinct from member, mail, Federation and native SSH keys. Provision the private
-`ServiceSigningKey.json` through `Tools/Authority.sh`. Existing rollback floors
-and authority RBAC keys remain in use; file payloads never enter etcd. Later
-mail and other feature commands preserve schema 6. Disabling services does not
-make a schema-6 namespace readable by older binaries. Native SSH key histories
-remain reserved after withdrawal, expiry or revocation, including invitations
-that existed before those keys acquired their scoped role.
-
-Applications introduce schema 7. Upgrade every broker to 0.6.0 or a qualified
-compatible release before any successful application command, including get and
-list. Earlier brokers cannot read schema 7. Applications use existing member
-approval and distinct request keys; no new authority signer is required. Other
-feature commands preserve schema 7. See [Applications](Applications.md) for
-record bounds, key separation and the strict reclamation clock floor.
+[Mail store operation](MailStore.md) describes its private file and transport trust.
+Mail metadata uses the exact authority RBAC key; ciphertext stays outside etcd.
+Transfers and SSH use a separate `serviceSigningKey`, distinct from member, mail,
+Federation and native SSH keys. Provision `ServiceSigningKey.json` through
+`Tools/Authority.sh`. Native SSH key histories remain reserved after withdrawal,
+expiry or revocation. Applications use existing member approval and distinct
+request keys; see [Applications](Applications.md) for record and reclamation bounds.
 
 Extend broker etcd roles to the required Pages and Federation prefixes before
-enabling those respective features, and configure the dedicated Federation signer
-on each broker serving bilateral agreements. Once schema 5 has been committed,
-disabling mail or removing its signer does not restore compatibility with older
-executables. Roll forward with a compatible binary. Never delete feature fields,
-reset the schema version or restore an older snapshot to attempt a downgrade;
+enabling those features and configure the dedicated Federation signer on each
+broker serving bilateral agreements. Never delete feature fields, reset the state
+version or restore an older snapshot to force a different executable to start;
 these actions discard security history and conflict with durable rollback floors.
+Administration and hosting require separate identities from initial provisioning.
 
-Before upgrading, migrate any administrator key previously used for hosting to
-a separate administrator identity without a consent history. Create and verify
-that identity using a still-authorised administrator, then remove administration
-from the service key. Previously consented administrators fail closed under the
-new separation rules. If no independent administrator remains after an upgrade,
-use the independent new-network recovery procedure above; modifying authoritative
-records outside the protocol is not a supported recovery method.
-
-Unsupported state and wire versions are refused.
-Keep `Cargo.lock`, run the documented build and validation before installing an
-update, and retain the prior executable for rollback only while its state format
-remains compatible. An update must not broaden mounts, endpoints, role or resource
-limits without renewed local consent. No automatic updater or certificate issuer
-runs inside either daemon.
-[Offline packages](Packages.md) describes stopped-profile image switching and
-compatible rollback. Version 0.7.0 retains authority schema 7; no state migration
-is required solely for that update.
+Keep `Cargo.lock` and validate a replacement before installing it. A stopped-profile
+image switch requires the same current state contract and must not broaden mounts,
+endpoints, roles or resource limits without renewed local consent. No automatic
+updater or certificate issuer runs inside either daemon. [Offline packages](Packages.md)
+describes exact-contract image switching. Rollback to an obsolete contract is refused.
 
 References: [etcd security model](https://etcd.io/docs/v3.6/op-guide/security/),
 [etcd runtime reconfiguration](https://etcd.io/docs/v3.6/op-guide/runtime-configuration/),

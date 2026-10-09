@@ -115,7 +115,7 @@ fn page(
     Ok(change.reply)
 }
 fn submit(state: &State, signer: u8, nonce: u8, id: u8, namespace: &str) -> VerifiedRequest {
-    let body = "HyperNetPage/1\n# Notice\n: Pending content.\n";
+    let body = "HyperNetPage/2\n# Notice\n: Pending content.\n";
     request(
         state,
         signer,
@@ -126,7 +126,7 @@ fn submit(state: &State, signer: u8, nonce: u8, id: u8, namespace: &str) -> Veri
             expected_version: 0,
             namespace: namespace.into(),
             audience: "Members".into(),
-            profile: "HyperNetPage/1".into(),
+            profile: crate::markup::PROFILE.into(),
             digest: hex::encode(Sha256::digest(body)),
             body: body.into(),
         },
@@ -470,7 +470,7 @@ fn expired_unreferenced_grants_recover_capacity_without_clock_revival() {
         Some("ClockRollback")
     );
     let decoded: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
-    assert_eq!(decoded.version, 7);
+    assert_eq!(decoded.version, crate::types::STATE_VERSION);
     assert_eq!(decoded.high_water_time, 161);
     assert_eq!(decoded.applications.len(), 1);
 }

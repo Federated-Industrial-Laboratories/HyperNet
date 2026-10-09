@@ -256,11 +256,12 @@ class Workflow:
         source=self.root/'HostConfiguration'; source.mkdir(mode=0o700)
         specification={'grants':2,'expires':int(expiry),'memoryBytes':268435456,'pids':64,
                        'cpuQuota':100000,'cpuPeriod':100000,'stateBytes':16777216,
-                       'authorityEndpoint':'https://authority.example:8443','authorityAddress':self.broker_address+':8443'}
+                       'authorityEndpoint':'https://authority.example:8443','authorityAddress':self.broker_address+':8443',
+                       'services':[],'namespaces':[],'pageCacheBytes':0,'pageMediaCacheBytes':0}
         self.write(source/'Specification.json',specification)
         consent=self.call('Member','host-consent','--spec',source/'Specification.json','--output',source/'Consent.json')
         self.profile=consent['profile']
-        self.call('Member','consent','--profile',self.profile,'--grants','2','--expires',expiry,'--certificate',fingerprint)
+        self.call('Member','consent','--profile',self.profile,'--grants','2','--expires',expiry,'--certificate',fingerprint,'--document',source/'Consent.json')
         for origin,destination in [(self.root/'Member'/'Identity.json','Identity.json'),
                                    (self.pki/'NetworkCa.pem','Ca.pem'),(self.pki/'Host.pem','Client.pem'),
                                    (self.pki/'HostKey.pem','ClientKey.pem')]:
@@ -354,7 +355,13 @@ class Workflow:
         # DER output uses binary mode separately; never pass private material through output.
         der=subprocess.check_output(['openssl','x509','-in',str(self.pki/'Host.pem'),'-outform','DER'])
         fingerprint=hashlib.sha256(der).hexdigest()
-        self.call('Member','consent','--profile',self.profile,'--grants','2','--expires',expiry,'--certificate',fingerprint)
+        source=self.root/'InitialHostConsent'; source.mkdir(mode=0o700)
+        self.write(source/'Specification.json',{'grants':2,'expires':int(expiry),'memoryBytes':268435456,'pids':64,
+            'cpuQuota':100000,'cpuPeriod':100000,'stateBytes':16777216,
+            'authorityEndpoint':'https://authority.example:8443','authorityAddress':self.broker_address+':8443',
+            'services':[],'namespaces':[],'pageCacheBytes':0,'pageMediaCacheBytes':0})
+        self.profile=self.call('Member','host-consent','--spec',source/'Specification.json','--output',source/'Consent.json')['profile']
+        self.call('Member','consent','--profile',self.profile,'--grants','2','--expires',expiry,'--certificate',fingerprint,'--document',source/'Consent.json')
         self.check('mTLS and consent permit heartbeat',self.call('Member','heartbeat','--profile',self.profile)['result']['effectiveGrants']==2)
         self.check('signature alone cannot host',not self.request(self.signed('Member',{'type':'Heartbeat','profile':self.profile}))['ok'])
         self.call('Member','withdraw')

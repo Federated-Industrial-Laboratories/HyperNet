@@ -36,7 +36,8 @@ destinationNamespace, service, profile, expires
 `version` is 1. `agreementId` is 16 random bytes in lowercase hexadecimal.
 Network identities and public keys are 32-byte lowercase hexadecimal values.
 The networks differ. Namespace labels use `[A-Za-z][A-Za-z0-9]{0,31}`.
-`service` is `Pages`; `profile` is `HyperNetPage/1`. `expires` is a Unix timestamp
+`service` is `Pages`; `profile` is exactly `HyperNetPage/2`. Source sharing and
+export require the approved descriptor profile to equal the treaty profile. `expires` is a Unix timestamp
 in the next seven days. The treaty digest is SHA-256 of ASCII
 `HyperNet/FederationTreaty/1`, one zero byte, and the compact typed JSON bytes in
 the field order above. The serializer emits unsigned decimal integers and no
@@ -228,7 +229,7 @@ protect against a compromised authority signing key or malicious trusted quorum.
 
 ## Storage and limits
 
-Federation uses schema 4. Its authority metadata and source revision floors share
+Federation uses the current authority state 8. Its authority metadata and source revision floors share
 the ordinary quorum and compare-and-swap history. Foreign bundles use
 `/HyperNet/<network>/Federation/Foreign/`; author share envelopes use
 `/HyperNet/<network>/Federation/Share/`. Native and imported objects remain
@@ -246,13 +247,13 @@ These are logical bounds, independent of etcd's historical MVCC disk usage.
 Configure backend quota, compaction, backup retention and storage encryption.
 Deleting or suppressing publication is not secure erasure from backups.
 
-Upgrade every broker before enabling Federation, extend its database role, and
-preserve its rollback floor. Native Pages and version-1/version-2 hosting retain
-their existing consent semantics. Existing share records acquire generation zero;
-new grants must include `expectedGeneration`. Existing archived author signatures
-remain verifiable. After schema 4 is written, older executables
-are not a supported downgrade path. See Authority.md for new-network recovery
-when authoritative state or trust roots are lost.
+Configure every broker for the current state-8 contract before enabling Federation,
+extend its database role, and preserve its rollback floor. Host consent uses
+version 3 with explicit services. Share records require retained generation and
+withdrawal fields; new grants must include `expectedGeneration`. There is no
+migration from older records or supported downgrade to an obsolete contract.
+See Authority.md for new-network recovery when authoritative state or trust roots
+are lost.
 
 ## Installed verification
 

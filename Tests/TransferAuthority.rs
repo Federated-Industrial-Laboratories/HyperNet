@@ -283,7 +283,7 @@ fn cancellation_and_host_withdrawal_do_not_revive_on_retries() {
 #[test]
 fn schema_six_survives_later_mail_reads_and_service_hosts_cannot_be_clients() {
     let mut f = Fixture::new();
-    assert_eq!(f.state.version, 6);
+    assert_eq!(f.state.version, crate::types::STATE_VERSION);
     assert!(page_authority::client(&f.state, &public(&f.host), 100).is_err());
     let mail_signer = key(8);
     mail_authority::apply(
@@ -295,7 +295,7 @@ fn schema_six_survives_later_mail_reads_and_service_hosts_cannot_be_clients() {
         Some(&mail_signer),
     )
     .unwrap();
-    assert_eq!(f.state.version, 6);
+    assert_eq!(f.state.version, crate::types::STATE_VERSION);
 }
 
 #[test]

@@ -11,10 +11,9 @@ Withdrawal or expiry of one service role does not erase this history.
 
 Generate a separate authority transfer signing identity in a private
 `ServiceSigningKey.json` file and add `serviceSigningKey` to `Authority.json` before
-initialising the broker. For an existing network, first upgrade every authority
-broker to 0.5.0 or a qualified compatible release before enabling transfer: even a
-successful TransferHosts directory query commits schema 6, which 0.4.0 cannot read.
-See the [authority migration rules](Authority.md). Then stop each broker,
+initialising the broker. Every broker must use the current authority state-8
+contract; other state versions are refused without migration. To enable the
+service on a current network, stop each broker,
 provision its separate signing file and update its confined configuration before
 restarting. Never
 replace a signer silently: existing host consents pin it. `Tools/Authority.sh`
