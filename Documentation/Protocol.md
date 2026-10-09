@@ -122,8 +122,10 @@ script or external fetch is available. `audience` is exactly `Members` in this
 profile. More restricted audiences need a separate permission and placement
 contract; they are not implied by a namespace name.
 
-Every ordinary Pages command requires an active client membership. Review also
-requires administration. Hosting credentials use the replica commands instead.
+Ordinary client Pages commands require active membership; human review additionally
+requires administration. A separate [application grant](ApplicationProtocol.md)
+can delegate exact native Page operations without creating membership. Hosting
+credentials use the replica commands instead.
 The following fields appear inside the `command` object beside `type`:
 
 | Command | Fields | Result |
@@ -151,14 +153,20 @@ at most 32 entries sorted by page ID. Ordinary authors see only their submission
 and cursor ordering. Pagination observes current state on each request, not a
 long-lived snapshot.
 
-An approval is a distinct manual `PageReview` with `decision: "Approve"`.
+An approval is a distinct `PageReview` with `decision: "Approve"`. Manual review
+is the default; application review requires an explicit scoped policy and mode.
 `Reject` discards the pending object. Every review field must match the pending
 submission, including its signature-message digest. Replacing an existing page
 keeps its previous approved revision readable while the replacement is pending.
 Rejection preserves that previous publication. Approval atomically publishes the
 replacement. Author or administrator withdrawal removes both pending and published
 objects and retains the version tombstone. An earlier signature cannot resurrect
-the withdrawn revision.
+the withdrawn revision. Application reviews additionally bind policy, mode and a
+signed `reviewExpires` deadline. It must be later than authority time and at most
+300 seconds ahead. Human reviews may omit this deadline; adapter-driven human
+reviews should include it. The authority checks it again immediately before the
+publication transaction. Archived proof verification does not revive a decision
+whose live deadline has passed.
 
 A `PageDescriptor` has these fields, in this order for inventory hashing:
 
@@ -182,10 +190,11 @@ window. A valid archived signature proves bytes; it does not prove current
 publication or current permission.
 
 Normal reading also requires a fresh authoritative published descriptor, an
-active author and an active administrative reviewer. The fresh read checks
+currently authorised author and reviewer. Application signers require their live
+grant and current owner rights. The fresh read checks
 revocation and withdrawal at its authoritative linearization point. Replies carry
 `authorityRevision` and `validUntil`, no later than five seconds after the check
-or an applicable membership expiry. Clients must verify the bundle and freshness
+or an applicable membership or application-grant expiry. Clients must verify the bundle and freshness
 before rendering it. Previously read text cannot be recalled from a recipient.
 
 The serialized submission envelope is limited to 48 KiB, the approval envelope

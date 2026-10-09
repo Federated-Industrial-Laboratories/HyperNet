@@ -28,6 +28,9 @@ fn grants(member: &Member, now: u64, epoch: u64) -> u64 {
 }
 
 pub(crate) fn require(state: &State, key: &str, mask: u64, now: u64) -> Result<(), &'static str> {
+    if state.applications.contains_key(key) {
+        return Err("SeparateApplicationIdentityRequired");
+    }
     if mask & ADMIN != 0
         && (state.consents.contains_key(key)
             || state.bridge_consents.contains_key(key)
@@ -120,8 +123,9 @@ fn check_existing_permission(
     match &request.request.command {
         Command::Redeem { .. } => {
             // A pending invitation cannot change a key's subsequently assigned role.
-            if (state.mail.device_history.contains(&request.key)
-                || state.ssh.key_history.contains(&request.key))
+            if state.applications.contains_key(&request.key)
+                || (state.mail.device_history.contains(&request.key)
+                    || state.ssh.key_history.contains(&request.key))
                 || state
                     .mail
                     .addresses
@@ -182,7 +186,7 @@ pub fn apply(
     now: u64,
     revision: i64,
 ) -> Result<Reply, &'static str> {
-    if !(1..=6).contains(&state.version) {
+    if !(1..=7).contains(&state.version) {
         return Err("UnsupportedState");
     }
     if state.high_water_time > now.saturating_add(2) {
@@ -229,8 +233,9 @@ pub fn apply(
         } => {
             fixed_hex::<32>(verifier)?;
             fixed_hex::<32>(device_key)?;
-            if (state.mail.device_history.contains(device_key)
-                || state.ssh.key_history.contains(device_key))
+            if state.applications.contains_key(device_key)
+                || (state.mail.device_history.contains(device_key)
+                    || state.ssh.key_history.contains(device_key))
                 || state
                     .mail
                     .addresses
@@ -320,8 +325,9 @@ pub fn apply(
             expires,
         } => {
             fixed_hex::<32>(device_key)?;
-            if (state.mail.device_history.contains(device_key)
-                || state.ssh.key_history.contains(device_key))
+            if state.applications.contains_key(device_key)
+                || (state.mail.device_history.contains(device_key)
+                    || state.ssh.key_history.contains(device_key))
                 || state
                     .mail
                     .addresses

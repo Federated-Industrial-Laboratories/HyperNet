@@ -353,7 +353,7 @@ impl Store {
             bail!("Authority state exceeds its size bound");
         }
         let state: State = serde_json::from_slice(kv.value())?;
-        if !(1..=6).contains(&state.version) || state.network != self.network {
+        if !(1..=7).contains(&state.version) || state.network != self.network {
             bail!("Authority state identity is invalid");
         }
         for signer in [
@@ -438,6 +438,9 @@ impl Store {
         if state.network != self.network {
             bail!("Authority network mismatch");
         }
+        if let Err(code) = crate::application_authority::admit(&state, request) {
+            return Ok(Reply::error(code));
+        }
         if crate::transfer_authority::read_only(&request.request.command) {
             return Ok(crate::transfer_authority::authorise(
                 &state,
@@ -497,6 +500,27 @@ impl Store {
             let mut state: State = serde_json::from_slice(kv.value())?;
             if state.network != self.network {
                 bail!("Authority network identity mismatch");
+            }
+            if let Err(code) = crate::application_authority::admit(&state, request) {
+                return Ok(Reply::error(code));
+            }
+            let application_key =
+                if let Command::ApplicationGrantCreate { consent } = &request.request.command {
+                    Some(consent.public_key.as_str())
+                } else {
+                    None
+                };
+            if application_key.is_some_and(|candidate| {
+                [
+                    &self.federation_signing_key,
+                    &self.mail_signing_key,
+                    &self.service_signing_key,
+                ]
+                .into_iter()
+                .flatten()
+                .any(|key| hex::encode(key.verifying_key().as_bytes()) == candidate)
+            }) {
+                return Ok(Reply::error("DedicatedAuthorityKeyRequired"));
             }
             let membership_key = match &request.request.command {
                 Command::Invite { device_key, .. } | Command::Grant { device_key, .. } => {
@@ -571,7 +595,17 @@ impl Store {
                 return Ok(Reply::error("DedicatedAuthorityKeyRequired"));
             }
             let mut operations = Vec::new();
-            let reply = if page_authority::handles(&request.request.command) {
+            let reply = if crate::application_authority::handles(&request.request.command) {
+                match crate::application_authority::apply(
+                    &mut state,
+                    request,
+                    now,
+                    header.revision(),
+                ) {
+                    Ok(reply) => reply,
+                    Err(code) => return Ok(Reply::error(code)),
+                }
+            } else if page_authority::handles(&request.request.command) {
                 if let Err(code) = page_authority::preflight(&state, request, certificate, now) {
                     return Ok(Reply::error(code));
                 }
@@ -717,6 +751,14 @@ impl Store {
                 return Ok(Reply::error("CapacityExceeded"));
             }
             operations.push(TxnOp::put(self.namespace.as_str(), bytes, None));
+            if matches!(request.request.command, Command::PageReview { .. }) {
+                // Recheck the signed decision deadline immediately before the compare-and-swap.
+                if let Err(code) =
+                    page_authority::preflight(&state, request, certificate, crate::store::now()?)
+                {
+                    return Ok(Reply::error(code));
+                }
+            }
             let transaction = self
                 .client
                 .txn(

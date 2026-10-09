@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT
+#[path = "ApplicationAuthority.rs"]
+mod application_authority;
 #[path = "Authority.rs"]
 mod authority;
 #[path = "Bridge.rs"]

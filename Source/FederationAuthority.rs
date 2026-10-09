@@ -370,7 +370,7 @@ pub fn preflight(
     certificate: Option<&str>,
     now: u64,
 ) -> Result<(), &'static str> {
-    if !(1..=6).contains(&state.version) {
+    if !(1..=7).contains(&state.version) {
         return Err("UnsupportedState");
     }
     if state.high_water_time > now.saturating_add(2) {
@@ -985,15 +985,12 @@ pub fn apply(
             let mut until = bounded_until(state, &request.key, treaty, now).min(permit.valid_until);
             if let Some(page_id) = page_id {
                 let descriptor = exportable(state, treaty, page_id, now)?.clone();
-                for identity in [&descriptor.author, &descriptor.reviewer] {
-                    until = until.min(
-                        state
-                            .members
-                            .get(identity)
-                            .ok_or("PageUnavailable")?
-                            .expires,
-                    );
-                }
+                until = until.min(page_authority::until(
+                    state,
+                    &request.key,
+                    Some(&descriptor),
+                    now,
+                ));
                 let author_share: Envelope = blob(blobs, &share_key(agreement_id, page_id))?;
                 let author_share_digest = verify_share(treaty, &descriptor, &author_share)?;
                 if author_share_digest
