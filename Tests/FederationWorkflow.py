@@ -71,7 +71,8 @@ class FederationWorkflow:
             s.call('Administrator','federation','agreements')['result']['entries'][0]['digest'] == self.digest
             and d.call('Administrator','federation','agreements')['result']['entries'][0]['digest'] == self.digest)
         self.page = secrets.token_hex(16)
-        local_author=d.client('Author'); d.admit('Author',local_author,1)
+        local_author=d.client('Author'); self.local_author=local_author
+        d.admit('Author',local_author,1)
         self.local_page=secrets.token_hex(16)
         d.submit(self.local_page,f'HyperNetPage/2\n# LocalGate\n=> hypernet://{s.network}/{self.author}/News/{self.page} Partner page\n')
         d.review(d.inspect(self.local_page))
@@ -189,26 +190,34 @@ class FederationWorkflow:
         fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',32,140,0,0))
         original=termios.tcgetattr(slave)
         process=subprocess.Popen([d.suite,'--config',str(d.root/'Reader'/'Profile.json'),
-            'pages','read','--page-id',self.local_page,'--tui'],stdin=slave,stdout=slave,stderr=slave,
+            'browse',f'hypernet://{d.network}/{self.local_author}/News/{self.local_page}','--namespace','News'],stdin=slave,stdout=slave,stderr=slave,
             env=dict(os.environ,TERM='xterm-256color'),start_new_session=True)
-        def expect(title):
+        transcript=bytearray()
+        def expect(title,status):
             output=b''; end=time.monotonic()+12
-            marker=b'HyperNet Pages | '+title
-            while marker not in output and time.monotonic()<end:
+            marker=title if title == b'Address:' else b'HyperNet Browser | '+title
+            while (marker not in output or status not in output) and time.monotonic()<end:
                 if select.select([master],[],[],.1)[0]:
                     try: output+=os.read(master,65536)
                     except OSError: break
-            assert marker in output, 'cross-network terminal navigation did not reach '+title.decode()
+            transcript.extend(output)
+            assert marker in output and status in output, 'cross-network terminal navigation did not reach '+title.decode()+': '+repr(output[-2000:])
         try:
-            expect(b'LocalGate')
-            os.write(master,b'\t\r'); expect(b'Partner')
-            os.write(master,b'r'); expect(b'Partner')
-            os.write(master,b'\t\r'); expect(b'LocalGate')
-            os.write(master,b'b'); expect(b'Partner')
-            os.write(master,b'b'); expect(b'LocalGate')
+            expect(b'LocalGate',b'Page opened')
+            os.write(master,b'\t\r'); expect(b'Partner',b'Page opened')
+            os.write(master,b'r'); expect(b'Partner',b'Page refreshed')
+            os.write(master,b'\t\r'); expect(b'LocalGate',b'Page opened')
+            os.write(master,b'b'); expect(b'Partner',b'Retained view restored')
+            os.write(master,b'o')
+            expect(b'Address:',b'Address:')
+            invalid=f'hypernet://{self.source.network}/{"ff"*32}/News/{self.page}'.encode()
+            os.write(master,b'\x15\x1b[200~'+invalid+b'\x1b[201~\r')
+            expect(b'Partner',b'Could not open:')
+            os.write(master,b'b'); expect(b'LocalGate',b'Retained view restored')
             os.write(master,b'q'); process.wait(timeout=5)
             self.check('installed TUI follows native foreign and return links with verified refresh and shared Back history',
-                process.returncode==0 and termios.tcgetattr(slave)==original)
+                process.returncode==0 and termios.tcgetattr(slave)==original
+                and transcript.count(b'\x1b[?1049h')==1)
         finally:
             if process.poll() is None: process.kill(); process.wait()
             os.close(master); os.close(slave)

@@ -48,3 +48,20 @@ the required kernel and rootless runtime capabilities. Native AArch64 remains
 pending. Core qualification does not establish Suite graphics support or native
 Windows/macOS support. A public release additionally requires its own complete
 platform and security assessment.
+
+
+## Installed client workflows
+
+`Tests/BrowserWorkflow.py` runs an independently installed HyperNetSuite against
+a disposable three-voter authority. It checks the 32-entry catalogue boundary,
+namespace and quarantine exclusions, explicit addresses, retained view state,
+changed-publication refresh, bounded input, navigation errors and cancellation
+during quorum loss. Its command arguments match `Tests/PagesWorkflow.py`: supply
+the trusted installed client, node executable, image ID, etcd directory, seccomp
+file and a private output-report path.
+
+`Tests/FederationWorkflow.py` checks native-to-foreign browser navigation through
+explicitly accepted treaties, exact identity matching, refresh and shared Back
+history. Both workflows use synthetic content and remove their own resources.
+The browser remains a Suite feature; these tests add no frontend dependency to
+the daemon or authority protocol.

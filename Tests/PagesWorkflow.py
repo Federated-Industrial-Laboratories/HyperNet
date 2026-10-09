@@ -125,18 +125,19 @@ else: paths[0].write_bytes(b'Untrusted cache replacement\\n')
         process=subprocess.Popen([self.suite,'--config',str(self.root/'Reader'/'Profile.json'),
             'pages','read','--page-id',page,'--tui'],stdin=slave,stdout=slave,stderr=slave,
             env=dict(os.environ,TERM='xterm-256color'),start_new_session=True)
-        def expect(marker):
+        def expect(marker, status):
+            marker=b'HyperNet Browser | '+marker
             output=b''; end=time.monotonic()+12
-            while marker not in output and time.monotonic()<end:
+            while (marker not in output or status not in output) and time.monotonic()<end:
                 if select.select([master],[],[],.1)[0]:
                     try: output+=os.read(master,65536)
                     except OSError: break
-            assert marker in output, 'authenticated terminal navigation did not reach expected page'
+            assert marker in output and status in output, 'authenticated terminal navigation did not reach expected page'
         try:
-            expect(b'HyperNet Pages | Outside')
-            os.write(master,b'\t\r'); expect(b'HyperNet Pages | Welcome')
-            os.write(master,b'r'); expect(b'HyperNet Pages | Welcome')
-            os.write(master,b'b'); expect(b'HyperNet Pages | Outside')
+            expect(b'Outside',b'Page opened')
+            os.write(master,b'\t\r'); expect(b'Welcome',b'Page opened')
+            os.write(master,b'r'); expect(b'Welcome',b'Page refreshed')
+            os.write(master,b'b'); expect(b'Outside',b'Retained view restored')
             os.write(master,b'q'); process.wait(timeout=5)
             self.check('authenticated TUI follows verifies refreshes and returns through internal links',
                        process.returncode==0 and termios.tcgetattr(slave)==original)
