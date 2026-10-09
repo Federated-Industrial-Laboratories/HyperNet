@@ -11,7 +11,7 @@ Withdrawal or expiry of one service role does not erase this history.
 
 Generate a separate authority mail signing identity in a private
 `MailSigningKey.json` file and add `mailSigningKey` to `Authority.json` before
-initialising the broker. Every broker must use the current authority state-8
+initialising the broker. Every broker must use the current authority state-9
 contract; other state versions are refused without migration. To enable the
 service on a current network, stop each broker,
 provision its separate signing file and update its confined configuration before

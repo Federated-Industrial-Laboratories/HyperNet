@@ -40,6 +40,157 @@ struct Fixture {
 }
 
 #[test]
+fn foreign_media_permissions_follow_pending_and_local_publication_deadlines() {
+    use crate::{mail_authority, media_authority, media_types as media};
+    let mut f = Fixture::new();
+    f.call(true, 3, f.share(true), 100).unwrap();
+    f.transfer(true).unwrap();
+    f.destination.members.insert(
+        public(10),
+        Member {
+            grants: MEMBER | HOST,
+            expires: 1000,
+            revoked: false,
+        },
+    );
+    let host = media::HostConsent {
+        version: 1,
+        network: f.destination.network.clone(),
+        host_key: public(10),
+        generation: 1,
+        services: vec!["PageMedia".into()],
+        endpoint: "https://media.test:8443/".into(),
+        address: "127.0.0.1:8443".parse().unwrap(),
+        ca_digest: "01".repeat(32),
+        certificate_digest: "02".repeat(32),
+        authority_endpoint: "https://authority.test:8443/".into(),
+        authority_address: "127.0.0.1:8443".parse().unwrap(),
+        authority_signer: public(11),
+        memory_bytes: 536870912,
+        pids: 64,
+        cpu_quota: 100000,
+        cpu_period: 100000,
+        state_bytes: 8388608,
+        expires: 900,
+        namespaces: vec!["Imported".into()],
+        retention_seconds: 600,
+    };
+    let consent =
+        mail_authority::sign(media::HOST, &f.destination.network, &host, &key(10)).unwrap();
+    let registration = request(
+        &f.destination.network,
+        10,
+        50,
+        Command::PageMediaHostRegister { consent },
+    );
+    media_authority::apply(
+        &mut f.destination,
+        &registration,
+        Some(&"02".repeat(32)),
+        100,
+        100,
+        Some(&key(11)),
+    )
+    .unwrap();
+    let asset = crate::markup::media::Asset {
+        id: "Photo".into(),
+        profile: "HyperNetRaster/1".into(),
+        width: 1,
+        height: 1,
+        bytes: 3,
+        digest: mail_authority::hash(&[1, 2, 3]),
+        hosts: vec![public(12)],
+        copies: 1,
+    };
+    f.destination.media.assets.insert(
+        media::asset_key(
+            Some(&f.treaty.agreement_id),
+            &f.descriptor.page_id,
+            1,
+            "Photo",
+        ),
+        media::AssetRecord {
+            agreement_id: Some(f.treaty.agreement_id.clone()),
+            storage_hosts: vec![public(10)],
+            required_copies: 1,
+            page_id: f.descriptor.page_id.clone(),
+            revision: 1,
+            source_digest: f.descriptor.digest.clone(),
+            author: f.descriptor.author.clone(),
+            namespace: "Imported".into(),
+            asset,
+            upload_expires: 101,
+            expires: 700,
+            receipts: Default::default(),
+            reviewed_by: Default::default(),
+        },
+    );
+    let expiry = |f: &Fixture, actor| {
+        let operation = media::Operation {
+            admission: None,
+            agreement_id: Some(f.treaty.agreement_id.clone()),
+            version: 1,
+            network: f.destination.network.clone(),
+            operation_id: "33".repeat(16),
+            issued_at: 100,
+            host_key: public(10),
+            page_id: f.descriptor.page_id.clone(),
+            revision: 1,
+            asset_id: "Photo".into(),
+            source_digest: f.descriptor.digest.clone(),
+            action: "Fetch".into(),
+            offset: 0,
+            chunk_bytes: 3,
+            chunk_digest: None,
+        };
+        let operation = mail_authority::sign(
+            media::OPERATION,
+            &f.destination.network,
+            &operation,
+            &key(actor),
+        )
+        .unwrap();
+        let call = request(
+            &f.destination.network,
+            10,
+            51,
+            Command::PageMediaAuthorise {
+                host_key: public(10),
+                operation,
+            },
+        );
+        let reply = media_authority::authorise(
+            &f.destination,
+            &call,
+            Some(&"02".repeat(32)),
+            100,
+            100,
+            Some(&key(11)),
+        )
+        .unwrap();
+        let signed = serde_json::from_value(reply.result["permission"].clone()).unwrap();
+        mail_authority::verify::<media::Permission>(
+            media::PERMISSION,
+            &signed,
+            &f.destination.network,
+        )
+        .unwrap()
+        .expires
+    };
+    assert_eq!(expiry(&f, 2), 101);
+    f.call(
+        false,
+        2,
+        f.review(descriptor_digest(&f.descriptor).unwrap()),
+        100,
+    )
+    .unwrap();
+    assert_eq!(expiry(&f, 4), 105);
+    f.destination.members.get_mut(&public(2)).unwrap().expires = 102;
+    assert_eq!(expiry(&f, 4), 102);
+}
+
+#[test]
 fn source_share_capacity_preserves_existing_refresh_after_excess_admission() {
     let mut fixture = Fixture::new();
     for id in 1..32 {
@@ -130,7 +281,12 @@ fn source_disclosure_requires_the_exact_treaty_page_profile() {
 impl Fixture {
     fn new() -> Self {
         let treaty = FederationTreaty {
-            version: 1,
+            version: 2,
+            media_profiles: vec![],
+            media_source_hosts: vec![],
+            media_destination_hosts: vec![],
+            media_max_bytes: 0,
+            media_required_copies: 0,
             agreement_id: hex::encode([44; 16]),
             source_network: hex::encode([11; 32]),
             destination_network: hex::encode([12; 32]),
@@ -234,6 +390,7 @@ impl Fixture {
                 namespace: "Public".into(),
                 pending: None,
                 published: Some(PublishedPage {
+                    assets: vec![],
                     descriptor: descriptor.clone(),
                     bytes: bytes.len() as u64,
                 }),
@@ -278,11 +435,11 @@ impl Fixture {
             "deviceKey":if source {public(5)}else{public(6)},"authorityKey":if source{public(7)}else{public(8)},
             "authorityEndpoint":"https://Authority.example:8443/","authorityAddress":"192.0.2.1:8443","caCertificateDigest":hex::encode([33;32])})
         };
-        let payload=serde_json::to_vec(&json!({"version":1,"service":"FederationPages","agreementId":result.treaty.agreement_id,
+        let payload=serde_json::to_vec(&json!({"version":2,"service":"FederationPages","mediaProfiles":[],"mediaSourceHosts":[],"mediaDestinationHosts":[],"mediaMaxBytes":0,"mediaRequiredCopies":0,"media":[],"agreementId":result.treaty.agreement_id,
             "treatyDigest":treaty_digest(&result.treaty).unwrap(),"sourceNamespace":"Public","destinationNamespace":"Imported",
             "source":endpoint(true),"destination":endpoint(false),"expires":1000,"memoryBytes":67108864,"pids":32,
             "cpuQuota":100000,"cpuPeriod":100000,"stateBytes":1048576})).unwrap();
-        let mut message = b"HyperNet/BridgeConsent/1\0".to_vec();
+        let mut message = b"HyperNet/BridgeConsent/2\0".to_vec();
         message.extend_from_slice(&payload);
         let document=serde_json::to_vec(&json!({"payload":URL_SAFE_NO_PAD.encode(payload),
             "sourceSignature":hex::encode(key(5).sign(&message).to_bytes()),"destinationSignature":hex::encode(key(6).sign(&message).to_bytes())})).unwrap();

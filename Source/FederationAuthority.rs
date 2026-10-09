@@ -32,7 +32,7 @@ fn digest<T: Serialize>(domain: &[u8], value: &T) -> Result<String, &'static str
 
 pub fn treaty_digest(treaty: &FederationTreaty) -> Result<String, &'static str> {
     validate_treaty(treaty)?;
-    digest(b"HyperNet/FederationTreaty/1\0", treaty)
+    digest(b"HyperNet/FederationTreaty/2\0", treaty)
 }
 
 pub fn descriptor_digest(descriptor: &PageDescriptor) -> Result<String, &'static str> {
@@ -63,7 +63,7 @@ fn validate_treaty(treaty: &FederationTreaty) -> Result<(), &'static str> {
             return Err("SeparateFederationIdentityRequired");
         }
     }
-    if treaty.version != 1
+    if treaty.version != 2
         || treaty.service != "Pages"
         || treaty.profile != crate::markup::PROFILE
         || treaty.source_network == treaty.destination_network
@@ -71,6 +71,35 @@ fn validate_treaty(treaty: &FederationTreaty) -> Result<(), &'static str> {
         || !markup::namespace(&treaty.destination_namespace)
     {
         return Err("InvalidFederationTreaty");
+    }
+    let enabled = !treaty.media_profiles.is_empty();
+    if treaty.media_profiles.windows(2).any(|p| p[0] >= p[1])
+        || treaty
+            .media_profiles
+            .iter()
+            .any(|p| !matches!(p.as_str(), "HyperNetRaster/1" | "HyperNetVector/1"))
+        || (enabled
+            && (treaty.media_max_bytes == 0
+                || treaty.media_max_bytes > 4 * 1024 * 1024
+                || !(1..=3).contains(&treaty.media_required_copies)
+                || treaty.media_required_copies as usize > treaty.media_destination_hosts.len()))
+        || (!enabled
+            && (treaty.media_max_bytes != 0
+                || treaty.media_required_copies != 0
+                || !treaty.media_source_hosts.is_empty()
+                || !treaty.media_destination_hosts.is_empty()))
+    {
+        return Err("InvalidFederationMediaScope");
+    }
+    for hosts in [&treaty.media_source_hosts, &treaty.media_destination_hosts] {
+        if (enabled && (hosts.is_empty() || hosts.len() > 3))
+            || hosts.windows(2).any(|p| p[0] >= p[1])
+        {
+            return Err("InvalidFederationMediaScope");
+        }
+        for host in hosts {
+            protocol::fixed_hex::<32>(host)?;
+        }
     }
     Ok(())
 }
@@ -236,7 +265,7 @@ pub fn handles(command: &Command) -> bool {
     )
 }
 
-fn agreement<'a>(
+pub(crate) fn agreement<'a>(
     state: &'a State,
     id: &str,
     now: u64,
@@ -268,7 +297,7 @@ fn side<'a>(
     Ok(key)
 }
 
-fn bridge_document(
+pub(crate) fn bridge_document(
     state: &State,
     treaty: &FederationTreaty,
     key: &str,
@@ -280,6 +309,7 @@ fn bridge_document(
         || state.consents.contains_key(key)
         || (state.mail.hosts.contains_key(key)
             || state.transfers.hosts.contains_key(key)
+            || state.media.hosts.contains_key(key)
             || state.ssh.services.contains_key(key))
     {
         return Err("SeparateBridgeIdentityRequired");
@@ -324,6 +354,11 @@ fn match_consent(
         || consent.destination.device_key != treaty.destination_bridge_key
         || consent.source.authority_key != treaty.source_authority_key
         || consent.destination.authority_key != treaty.destination_authority_key
+        || consent.media_profiles != treaty.media_profiles
+        || consent.media_source_hosts != treaty.media_source_hosts
+        || consent.media_destination_hosts != treaty.media_destination_hosts
+        || consent.media_max_bytes != treaty.media_max_bytes
+        || consent.media_required_copies != treaty.media_required_copies
         || consent.expires > treaty.expires
     {
         return Err("BridgeTreatyMismatch");
@@ -383,6 +418,7 @@ pub fn preflight(
                 || state.consents.contains_key(&request.key)
                 || (state.mail.hosts.contains_key(&request.key)
                     || state.transfers.hosts.contains_key(&request.key)
+                    || state.media.hosts.contains_key(&request.key)
                     || state.ssh.services.contains_key(&request.key))
             {
                 return Err("SeparateBridgeIdentityRequired");
@@ -573,14 +609,16 @@ fn blob<T: DeserializeOwned>(
     serde_json::from_slice(bytes).map_err(|_| "InvalidFederationObject")
 }
 
-fn exportable<'a>(
+pub(crate) fn exportable<'a>(
     state: &'a State,
     treaty: &FederationTreaty,
     page_id: &str,
     now: u64,
 ) -> Result<&'a PageDescriptor, &'static str> {
     protocol::fixed_hex::<16>(page_id)?;
-    let descriptor = &page_authority::published(state, page_id, now)?.descriptor;
+    let page = page_authority::published(state, page_id, now)?;
+    crate::media_authority::export_scope(state, treaty, &page.descriptor, &page.assets, now)?;
+    let descriptor = &page.descriptor;
     let share = state
         .federation_shares
         .get(&object_key(&treaty.agreement_id, page_id))
@@ -596,7 +634,7 @@ fn exportable<'a>(
     Ok(descriptor)
 }
 
-fn foreign_current<'a>(
+pub(crate) fn foreign_current<'a>(
     state: &'a State,
     agreement_id: &str,
     page_id: &str,
@@ -630,7 +668,7 @@ fn foreign_current<'a>(
     Ok((agreement, record, export))
 }
 
-fn foreign_published<'a>(
+pub(crate) fn foreign_published<'a>(
     state: &'a State,
     agreement_id: &str,
     page_id: &str,
@@ -878,7 +916,15 @@ pub fn apply(
             if &value.digest != agreement_digest {
                 return Err("FederationTreatyMismatch");
             }
-            let descriptor = &page_authority::published(state, page_id, now)?.descriptor;
+            let page = page_authority::published(state, page_id, now)?;
+            crate::media_authority::export_scope(
+                state,
+                &value.treaty,
+                &page.descriptor,
+                &page.assets,
+                now,
+            )?;
+            let descriptor = &page.descriptor;
             if descriptor.author != request.key {
                 return Err("PageOwnerMismatch");
             }
@@ -1143,6 +1189,21 @@ pub fn apply(
                 .get_mut(agreement_id)
                 .ok_or("FederationUnavailable")?
                 .source_revision = exported.authority_revision;
+            let body = page_authority::verify_bundle(
+                &value.treaty.source_network,
+                &state.federation_pages[&key].observed,
+                &object.bundle,
+            )?;
+            let descriptor = state.federation_pages[&key].observed.clone();
+            if !same {
+                crate::media_authority::import_assets(
+                    state,
+                    &value.treaty,
+                    &descriptor,
+                    &markup::parse(&body)?.assets,
+                    now,
+                )?;
+            }
             let record = state
                 .federation_pages
                 .get(&key)
@@ -1254,6 +1315,22 @@ pub fn apply(
                 &object.bundle,
             )?;
             verify_share(&value.treaty, &record.observed, &object.author_share)?;
+            if decision == "Approve" {
+                let body = page_authority::verify_bundle(
+                    &value.treaty.source_network,
+                    &record.observed,
+                    &object.bundle,
+                )?;
+                crate::media_authority::approve_foreign(
+                    state,
+                    agreement_id,
+                    page_id,
+                    record.observed.revision,
+                    &markup::parse(&body)?.assets,
+                    &request.key,
+                    now,
+                )?;
+            }
             let version = record.version.checked_add(1).ok_or("CapacityExceeded")?;
             let record = state
                 .federation_pages
@@ -1349,7 +1426,7 @@ pub fn apply(
                         .expires,
                 );
             json!({"treaty":value.treaty,"agreementDigest":value.digest,"descriptor":record.observed,"bundle":object.bundle,"authorShare":object.author_share,
-                "approval":approval,"admission":record.admission,"export":record.export,"authorityRevision":revision,"validUntil":until})
+                "approval":approval,"admission":record.admission,"export":record.export,"authorityRevision":revision,"validUntil":until,"mediaHosts":value.treaty.media_destination_hosts})
         }
         _ => return Err("UnsupportedCommand"),
     };

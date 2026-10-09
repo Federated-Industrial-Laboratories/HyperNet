@@ -23,7 +23,7 @@ import time
 
 
 class Workflow:
-    def __init__(self, args, slot=0, federation=False, mail=False, services=False):
+    def __init__(self, args, slot=0, federation=False, mail=False, services=False, media=False):
         self.args = args
         self.root = Path(tempfile.mkdtemp(prefix='HyperNetQualification'))
         self.network = secrets.token_hex(32)
@@ -46,6 +46,7 @@ class Workflow:
         self.federation = federation
         self.mail = mail
         self.services = services
+        self.media_enabled = media
         self.endpoint = f'https://localhost:{self.broker_port}'
         self.broker = self.prefix + 'Broker'
 
@@ -181,6 +182,10 @@ class Workflow:
             signer = configdir/'FederationSigningKey.json'
             self.signer = json.loads(self.run(self.suite,'keygen','--output',signer).stdout)['publicKey']
             config['federationSigningKey'] = str(signer)
+        if self.media_enabled:
+            signer = configdir/'PageMediaSigningKey.json'
+            self.media_signer = json.loads(self.run(self.suite,'keygen','--output',signer).stdout)['publicKey']
+            config['pageMediaSigningKey'] = str(signer)
         if self.mail:
             signer = configdir/'MailSigningKey.json'
             self.mail_signer = json.loads(self.run(self.suite,'keygen','--output',signer).stdout)['publicKey']
@@ -189,7 +194,7 @@ class Workflow:
             signer = configdir/'ServiceSigningKey.json'
             self.service_signer = json.loads(self.run(self.suite,'keygen','--output',signer).stdout)['publicKey']
             config['serviceSigningKey'] = str(signer)
-        if self.mail or self.services:
+        if self.mail or self.services or self.media_enabled:
             with (configdir/'HostCa.pem').open('ab') as bundle:
                 bundle.write((self.pki/'NetworkCa.pem').read_bytes())
         self.write(directory/'Bootstrap.json',config)
@@ -198,6 +203,8 @@ class Workflow:
         config['etcdEndpoints']=[f'https://{self.subnet}.{10+i}:2379' for i in range(1,4)]
         if self.federation:
             config['federationSigningKey']='/Config/FederationSigningKey.json'
+        if self.media_enabled:
+            config['pageMediaSigningKey']='/Config/PageMediaSigningKey.json'
         if self.mail:
             config['mailSigningKey']='/Config/MailSigningKey.json'
         if self.services:
@@ -209,7 +216,7 @@ class Workflow:
                                    ('HostCa.pem','HostingCa.pem'),('StoreCa.pem','VoterCa.pem'),
                                    ('BrokerStore.pem','BrokerCertificate.pem'),('BrokerStoreKey.pem','BrokerKey.pem')]:
             shutil.copy2(self.pki/origin,configdir/destination)
-        if self.mail or self.services:
+        if self.mail or self.services or self.media_enabled:
             shutil.copy2(configdir/'HostCa.pem',configdir/'HostingCa.pem')
         self.authority_profile=self.root/'AuthorityProfile'
         self.run('bash',self.authority_tool,'Initialise',self.authority_profile,configdir,statedir,

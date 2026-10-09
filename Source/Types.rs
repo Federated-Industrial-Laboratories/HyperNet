@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 mod federation;
 pub use federation::*;
 
-pub const STATE_VERSION: u32 = 8;
+pub const STATE_VERSION: u32 = 9;
 
 pub const MEMBER: u64 = 1;
 pub const HOST: u64 = 2;
@@ -60,6 +60,31 @@ pub enum Command {
     },
     ApplicationGrantRevoke {
         application_key: String,
+    },
+    PageMediaHostRegister {
+        consent: Envelope,
+    },
+    PageMediaHostWithdraw {
+        host_key: String,
+        expected_generation: u64,
+    },
+    PageMediaHosts,
+    PageMediaPolicySet {
+        minimum_copies: u16,
+    },
+    PageMediaReceipt {
+        agreement_id: Option<String>,
+        page_id: String,
+        revision: u64,
+        asset_id: String,
+        receipt: Envelope,
+    },
+    PageMediaAuthorise {
+        host_key: String,
+        operation: Envelope,
+    },
+    PageMediaPolicySync {
+        host_key: String,
     },
     TransferHostRegister {
         consent: Envelope,
@@ -454,6 +479,7 @@ pub struct PendingPage {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PublishedPage {
     pub descriptor: PageDescriptor,
+    pub assets: Vec<crate::markup::media::Asset>,
     pub bytes: u64,
 }
 
@@ -525,6 +551,7 @@ pub struct State {
     pub federation_pages: BTreeMap<String, FederationPageRecord>,
     pub mail: crate::mail_types::MailState,
     pub transfers: crate::transfer_types::TransferState,
+    pub media: crate::media_types::MediaState,
     pub ssh: crate::ssh_types::SshState,
     pub applications: BTreeMap<String, crate::application_authority::ApplicationRecord>,
 }
@@ -563,6 +590,7 @@ impl State {
             federation_pages: BTreeMap::new(),
             mail: Default::default(),
             transfers: Default::default(),
+            media: Default::default(),
             ssh: Default::default(),
             applications: BTreeMap::new(),
         }
@@ -589,4 +617,6 @@ pub struct AuthorityConfig {
     pub mail_signing_key: Option<std::path::PathBuf>,
     #[serde(default)]
     pub service_signing_key: Option<std::path::PathBuf>,
+    #[serde(default)]
+    pub page_media_signing_key: Option<std::path::PathBuf>,
 }

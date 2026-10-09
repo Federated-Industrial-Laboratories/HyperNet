@@ -52,6 +52,7 @@ struct Transfer {
     destination: Connection,
     treaty: types::FederationTreaty,
     profile: String,
+    media: Vec<super::media::Route>,
 }
 
 impl Transfer {
@@ -184,6 +185,130 @@ impl Transfer {
         Ok((descriptor, fetched.evidence.valid_until))
     }
 
+    fn media_operation(
+        &self,
+        descriptor: &types::PageDescriptor,
+        asset: &crate::markup::media::Asset,
+        route: &super::media::Route,
+        action: &str,
+        offset: u64,
+    ) -> Result<crate::media_types::Operation> {
+        let mut nonce = [0u8; 16];
+        use rand::RngCore;
+        rand::rngs::OsRng.fill_bytes(&mut nonce);
+        Ok(crate::media_types::Operation {
+            version: 1,
+            agreement_id: Some(self.treaty.agreement_id.clone()),
+            admission: None,
+            network: route.endpoint.network.clone(),
+            operation_id: hex::encode(nonce),
+            issued_at: now()?,
+            host_key: route.endpoint.host_key.clone(),
+            page_id: descriptor.page_id.clone(),
+            revision: descriptor.revision,
+            asset_id: asset.id.clone(),
+            source_digest: descriptor.digest.clone(),
+            action: action.into(),
+            offset,
+            chunk_bytes: if matches!(action, "Put" | "Fetch") {
+                crate::media_types::CHUNK.min(asset.bytes.saturating_sub(offset))
+            } else {
+                0
+            },
+            chunk_digest: None,
+        })
+    }
+    async fn renew_media_reference(&self, descriptor: &types::PageDescriptor) -> Result<()> {
+        let renewed = self.fetch(descriptor.clone(), false).await?;
+        self.import(renewed).await?;
+        Ok(())
+    }
+    async fn copy_media(
+        &self,
+        descriptor: &types::PageDescriptor,
+        assets: &[crate::markup::media::Asset],
+    ) -> Result<()> {
+        use crate::{mail_authority, media_types as media};
+        ensure!(
+            assets.iter().map(|a| a.bytes).sum::<u64>() <= self.treaty.media_max_bytes,
+            "media treaty quota exceeded"
+        );
+        for asset in assets {
+            let source = self
+                .media
+                .iter()
+                .find(|r| {
+                    r.endpoint.network == self.treaty.source_network
+                        && asset.hosts.contains(&r.endpoint.host_key)
+                })
+                .ok_or_else(|| anyhow::anyhow!("no consented source media route"))?;
+            let mut bytes = Vec::with_capacity(asset.bytes as usize);
+            while (bytes.len() as u64) < asset.bytes {
+                let mut op =
+                    self.media_operation(descriptor, asset, source, "Fetch", bytes.len() as u64)?;
+                op.admission = Some(self.permit().await?.0);
+                let (receipt, chunk) = source.execute(&self.source, &op, None).await?;
+                let value: media::StoreReceipt =
+                    mail_authority::verify(media::RECEIPT, &receipt, &op.network)
+                        .map_err(anyhow::Error::msg)?;
+                ensure!(
+                    value.status == "Complete"
+                        && value.digest == asset.digest
+                        && value.bytes == asset.bytes,
+                    "source media receipt differs"
+                );
+                bytes.extend(chunk.ok_or_else(|| anyhow::anyhow!("source omitted media bytes"))?);
+            }
+            crate::markup::media::validate_asset_bytes(asset, &bytes)
+                .map_err(anyhow::Error::msg)?;
+            for destination in self.media.iter().filter(|r| {
+                r.endpoint.network == self.treaty.destination_network
+                    && self
+                        .treaty
+                        .media_destination_hosts
+                        .contains(&r.endpoint.host_key)
+            }) {
+                self.renew_media_reference(descriptor).await?;
+                let op = self.media_operation(descriptor, asset, destination, "Status", 0)?;
+                let (receipt, _) = destination.execute(&self.destination, &op, None).await?;
+                let status: media::StoreReceipt =
+                    mail_authority::verify(media::RECEIPT, &receipt, &op.network)
+                        .map_err(anyhow::Error::msg)?;
+                ensure!(
+                    status.digest == asset.digest
+                        && status.bytes == asset.bytes
+                        && status.stored_bytes <= asset.bytes,
+                    "destination media receipt differs"
+                );
+                let mut offset = status.stored_bytes;
+                while offset < asset.bytes {
+                    self.renew_media_reference(descriptor).await?;
+                    let mut op =
+                        self.media_operation(descriptor, asset, destination, "Put", offset)?;
+                    let chunk = &bytes[offset as usize..(offset + op.chunk_bytes) as usize];
+                    op.chunk_digest = Some(mail_authority::hash(chunk));
+                    destination
+                        .execute(&self.destination, &op, Some(chunk))
+                        .await?;
+                    offset += op.chunk_bytes;
+                }
+                self.renew_media_reference(descriptor).await?;
+                let op = self.media_operation(descriptor, asset, destination, "Seal", 0)?;
+                let (receipt, _) = destination.execute(&self.destination, &op, None).await?;
+                self.destination
+                    .request(types::Command::PageMediaReceipt {
+                        agreement_id: Some(self.treaty.agreement_id.clone()),
+                        page_id: descriptor.page_id.clone(),
+                        revision: descriptor.revision,
+                        asset_id: asset.id.clone(),
+                        receipt,
+                    })
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn synchronise(
         &self,
         known: &mut BTreeMap<String, types::PageDescriptor>,
@@ -217,7 +342,27 @@ impl Transfer {
             // The destination rejects source revision rollback across the whole agreement.
             fetched.sort_by_key(|item| item.evidence.authority_revision);
             for value in fetched {
-                let (descriptor, expires) = self.import(value).await?;
+                let assets = value
+                    .value
+                    .bundle
+                    .as_ref()
+                    .map(|b| {
+                        page_authority::verify_bundle(
+                            &self.treaty.source_network,
+                            &value.value.descriptor,
+                            b,
+                        )
+                        .and_then(|body| crate::markup::parse(&body).map(|d| d.assets))
+                    })
+                    .transpose()
+                    .map_err(anyhow::Error::msg)?
+                    .unwrap_or_default();
+                let (descriptor, mut expires) = self.import(value).await?;
+                if !assets.is_empty() {
+                    self.copy_media(&descriptor, &assets).await?;
+                    let renewed = self.fetch(descriptor.clone(), false).await?;
+                    expires = self.import(renewed).await?.1;
+                }
                 until = until.min(expires);
                 known.insert(descriptor.page_id.clone(), descriptor);
                 count += 1;
@@ -259,6 +404,7 @@ pub(super) async fn run(config: BridgeConfig, confinement: confinement::Profile)
         destination: Connection::new(config.destination)?,
         treaty: config.treaty,
         profile: config.profile,
+        media: config.media,
     });
     let mut known = BTreeMap::new();
     let mut previous_time = now()?;

@@ -121,7 +121,7 @@ def validate_manifest(value):
     require(isinstance(metadata['imageId'], str) and re.fullmatch(r'sha256:[a-f0-9]{64}', metadata['imageId']), 'Invalid immutable image identity')
     require(metadata['imageArchive'] == 'Images/HyperNetOci.tar', 'Unexpected image path')
     require(isinstance(metadata['binaries'], dict) and set(metadata['binaries']) == {'HyperNet', 'HyperNetGate'} and all(isinstance(v, str) and HEX.fullmatch(v) for v in metadata['binaries'].values()), 'Invalid binary inventory')
-    require(type(metadata['authoritySchema']) is int and metadata['authoritySchema'] == 8, 'Invalid authority schema')
+    require(type(metadata['authoritySchema']) is int and metadata['authoritySchema'] == 9, 'Invalid authority schema')
     require(isinstance(metadata['prerequisites'], list) and len(metadata['prerequisites']) <= 32 and all(isinstance(v, str) and len(v) <= 256 for v in metadata['prerequisites']), 'Invalid prerequisites')
     files = value['files']
     require(isinstance(files, list) and 1 <= len(files) <= MAX_FILES, 'Invalid file count')
@@ -429,7 +429,7 @@ def create(args):
                 files['Documentation/' + path.name] = path
         manifest = {'format': 1, 'product': PRODUCT, 'version': runtime_version, 'architecture': machine,
                     'metadata': {'imageId': image_id, 'imageArchive': 'Images/HyperNetOci.tar',
-                    'authoritySchema': 8,
+                    'authoritySchema': 9,
                     'binaries': {name: digest_file(package / 'RootFs' / name) for name in ('HyperNet', 'HyperNetGate')},
                     'prerequisites': ['Linux; package architecture must match the native processor', 'Python 3.11+, OpenSSH ssh-keygen Ed25519 SSHSIG, Bash, GNU coreutils, jq and flock', 'Rootless Podman with a maintained OCI runtime, nomap and subordinate UID/GID mappings', 'Delegated cgroup v2 CPU, memory and PID controllers; seccomp; Landlock ABI 6+', 'GNU/Linux dynamic libraries and their loader are carried inside the OCI image', 'The build packager uses Debian-format library inventory; runtime hosts do not require dpkg']},
                     'files': [{'path': name, 'size': path.stat().st_size, 'mode': 0o700 if name.startswith('Tools/') else 0o600, 'sha256': digest_file(path)} for name, path in sorted(files.items())]}

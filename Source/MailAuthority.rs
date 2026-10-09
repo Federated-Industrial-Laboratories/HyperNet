@@ -338,6 +338,7 @@ fn check_keys(
                 || state.members.contains_key(key)
                 || (state.mail.hosts.contains_key(key)
                     || state.transfers.hosts.contains_key(key)
+                    || state.media.hosts.contains_key(key)
                     || state.ssh.services.contains_key(key))
                 || state
                     .mail
@@ -359,6 +360,7 @@ fn check_keys(
         || state.ssh.key_history.contains(&new.owner_key)
         || (state.mail.hosts.contains_key(&new.owner_key)
             || state.transfers.hosts.contains_key(&new.owner_key)
+            || state.media.hosts.contains_key(&new.owner_key)
             || state.ssh.services.contains_key(&new.owner_key))
     {
         return Err("SeparateMailIdentityRequired");
@@ -591,6 +593,7 @@ pub fn apply(
                 || state.consents.contains_key(&request.key)
                 || state.bridge_consents.contains_key(&request.key)
                 || state.transfers.hosts.contains_key(&request.key)
+                || state.media.hosts.contains_key(&request.key)
                 || state.ssh.services.contains_key(&request.key)
                 || (state.mail.device_history.contains(&request.key)
                     || state.ssh.key_history.contains(&request.key))

@@ -36,6 +36,7 @@ pub(crate) fn require(state: &State, key: &str, mask: u64, now: u64) -> Result<(
             || state.bridge_consents.contains_key(key)
             || (state.mail.hosts.contains_key(key)
                 || state.transfers.hosts.contains_key(key)
+                || state.media.hosts.contains_key(key)
                 || state.ssh.services.contains_key(key)))
     {
         return Err("ServiceIdentity");
@@ -97,6 +98,7 @@ fn preserve_admin(
             || state.bridge_consents.contains_key(key)
             || state.mail.hosts.contains_key(key)
             || state.transfers.hosts.contains_key(key)
+            || state.media.hosts.contains_key(key)
             || state.ssh.services.contains_key(key))
             && grants(member, now, state.epoch) & ADMIN != 0
     }) {
@@ -116,6 +118,7 @@ fn check_existing_permission(
         Command::Consent { .. } | Command::Heartbeat { .. }
     ) && (state.mail.hosts.contains_key(&request.key)
         || state.transfers.hosts.contains_key(&request.key)
+        || state.media.hosts.contains_key(&request.key)
         || state.ssh.services.contains_key(&request.key))
     {
         return Err("ServiceIdentity");
@@ -639,7 +642,7 @@ mod tests {
             );
             assert_eq!(serde_json::to_vec(&old).unwrap(), before);
         }
-        for field in ["pages", "mail", "transfers", "ssh", "applications"] {
+        for field in ["pages", "mail", "transfers", "media", "ssh", "applications"] {
             let mut incomplete = current.clone();
             incomplete.as_object_mut().unwrap().remove(field);
             assert!(serde_json::from_value::<State>(incomplete).is_err());

@@ -200,6 +200,7 @@ pub fn apply(
                 || state.bridge_consents.contains_key(&request.key)
                 || state.mail.hosts.contains_key(&request.key)
                 || state.transfers.hosts.contains_key(&request.key)
+                || state.media.hosts.contains_key(&request.key)
                 || certificate != Some(body.certificate_digest.as_str())
                 || body.authority_signer != hex::encode(key.verifying_key().as_bytes())
                 || native == body.authority_signer

@@ -1,0 +1,335 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HyperNet static media",
+  "description": "Structural schema. HyperPage.md also requires bounded pixel arithmetic, exact lengths and digests, canonical field order, contour transitions and aggregate limits.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/Asset"
+    },
+    {
+      "$ref": "#/$defs/Vector"
+    }
+  ],
+  "$defs": {
+    "Asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "profile",
+        "width",
+        "height",
+        "bytes",
+        "digest",
+        "hosts",
+        "copies"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9]{0,31}$"
+        },
+        "profile": {
+          "enum": [
+            "HyperNetRaster/1",
+            "HyperNetVector/1"
+          ]
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 786432
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "hosts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "copies": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        }
+      }
+    },
+    "Vector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile",
+        "width",
+        "height",
+        "background",
+        "paths"
+      ],
+      "properties": {
+        "profile": {
+          "const": "HyperNetVector/1"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "background": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          }
+        },
+        "paths": {
+          "type": "array",
+          "maxItems": 512,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "commands",
+              "fill",
+              "stroke",
+              "fillRule"
+            ],
+            "properties": {
+              "commands": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 2048,
+                "items": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "kind",
+                        "x",
+                        "y"
+                      ],
+                      "properties": {
+                        "kind": {
+                          "const": "Move"
+                        },
+                        "x": {
+                          "type": "integer",
+                          "minimum": -16777216,
+                          "maximum": 16777216
+                        },
+                        "y": {
+                          "type": "integer",
+                          "minimum": -16777216,
+                          "maximum": 16777216
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "kind",
+                        "x",
+                        "y"
+                      ],
+                      "properties": {
+                        "kind": {
+                          "const": "Line"
+                        },
+                        "x": {
+                          "type": "integer",
+                          "minimum": -16777216,
+                          "maximum": 16777216
+                        },
+                        "y": {
+                          "type": "integer",
+                          "minimum": -16777216,
+                          "maximum": 16777216
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "kind",
+                        "x1",
+                        "y1",
+                        "x",
+                        "y"
+                      ],
+                      "properties": {
+                        "kind": {
+                          "const": "Quad"
+                        },
+                        "x1": {
+                          "type": "integer",
+                          "minimum": -16777216,
+                          "maximum": 16777216
+                        },
+                        "y1": {
+                          "type": "integer",
+                          "minimum": -16777216,
+                          "maximum": 16777216
+                        },
+                        "x": {
+                          "type": "integer",
+                          "minimum": -16777216,
+                          "maximum": 16777216
+                        },
+                        "y": {
+                          "type": "integer",
+                          "minimum": -16777216,
+                          "maximum": 16777216
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "kind",
+                        "x1",
+                        "y1",
+                        "x2",
+                        "y2",
+                        "x",
+                        "y"
+                      ],
+                      "properties": {
+                        "kind": {
+                          "const": "Cubic"
+                        },
+                        "x1": {
+                          "type": "integer",
+                          "minimum": -16777216,
+                          "maximum": 16777216
+                        },
+                        "y1": {
+                          "type": "integer",
+                          "minimum": -16777216,
+                          "maximum": 16777216
+                        },
+                        "x2": {
+                          "type": "integer",
+                          "minimum": -16777216,
+                          "maximum": 16777216
+                        },
+                        "y2": {
+                          "type": "integer",
+                          "minimum": -16777216,
+                          "maximum": 16777216
+                        },
+                        "x": {
+                          "type": "integer",
+                          "minimum": -16777216,
+                          "maximum": 16777216
+                        },
+                        "y": {
+                          "type": "integer",
+                          "minimum": -16777216,
+                          "maximum": 16777216
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "kind"
+                      ],
+                      "properties": {
+                        "kind": {
+                          "const": "Close"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              "fill": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "array",
+                    "minItems": 4,
+                    "maxItems": 4,
+                    "items": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 255
+                    }
+                  }
+                ]
+              },
+              "stroke": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "colour",
+                      "width"
+                    ],
+                    "properties": {
+                      "colour": {
+                        "type": "array",
+                        "minItems": 4,
+                        "maxItems": 4,
+                        "items": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 255
+                        }
+                      },
+                      "width": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 65536
+                      }
+                    }
+                  }
+                ]
+              },
+              "fillRule": {
+                "enum": [
+                  "NonZero",
+                  "EvenOdd"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -34,6 +34,8 @@ Unsupported hosting profiles fail closed.
   resource limits, installation and local withdrawal.
 - [Pages](Documentation/Pages.md): inert components and exact-content approval.
 - [HyperPage](Documentation/HyperPage.md): bounded layout, colours and local controls.
+- [Static media](Documentation/PageMedia.md): consented raster/vector storage, review,
+  explicit access and independent media permissions.
 - [Federation](Documentation/Federation.md): bilateral treaties, author opt-in,
   separate import review and signed freshness evidence.
 - [Confined bridges](Documentation/Bridge.md): dual-signed endpoint consent and
