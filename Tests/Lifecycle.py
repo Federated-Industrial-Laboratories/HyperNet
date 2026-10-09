@@ -185,6 +185,21 @@ class LifecycleTests(unittest.TestCase):
         finally:
             retry.finish()
 
+    def test_transfer_withdrawal_stops_store_and_relay_after_restart(self):
+        profile = self.profile('Transfer')
+        containers = overlap(self.tools/'TransferStore.sh', profile, 'TransferGate',
+                             self.root/'Barrier', start='Restart')
+        self.assertTrue((profile/'Withdrawn').exists())
+        self.assertEqual(list(containers.iterdir()), [])
+        retry = Barrier(self.root/'Retry', '')
+        try:
+            process = retry.launch(self.tools/'TransferStore.sh', 'Start', profile)
+            process.communicate(timeout=5)
+            self.assertNotEqual(process.returncode, 0)
+            self.assertEqual(list((retry.directory/'Containers').iterdir()), [])
+        finally:
+            retry.finish()
+
     def test_authority_stop_orders_after_concurrent_start(self):
         profile = self.profile('Authority')
         containers = overlap(self.tools/'Authority.sh', profile, 'Authority', self.root/'Barrier', finish='Stop')
@@ -192,7 +207,7 @@ class LifecycleTests(unittest.TestCase):
 
     def test_initialisation_uses_a_persistent_lock_before_profile_exists(self):
         import fcntl
-        for tool in ['Host.sh', 'Authority.sh', 'Bridge.sh']:
+        for tool in ['Host.sh', 'Authority.sh', 'Bridge.sh', 'TransferStore.sh']:
             profile = self.root / tool.removesuffix('.sh')
             lock_directory = Path(str(profile)+'Lifecycle')
             lock_directory.mkdir(mode=0o700)

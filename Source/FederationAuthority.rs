@@ -278,7 +278,9 @@ fn bridge_document(
     authority::require(state, key, MEMBER | FEDERATION, now)?;
     if state.members.get(key).ok_or("NotMember")?.grants != MEMBER | FEDERATION
         || state.consents.contains_key(key)
-        || state.mail.hosts.contains_key(key)
+        || (state.mail.hosts.contains_key(key)
+            || state.transfers.hosts.contains_key(key)
+            || state.ssh.services.contains_key(key))
     {
         return Err("SeparateBridgeIdentityRequired");
     }
@@ -368,7 +370,7 @@ pub fn preflight(
     certificate: Option<&str>,
     now: u64,
 ) -> Result<(), &'static str> {
-    if !(1..=5).contains(&state.version) {
+    if !(1..=6).contains(&state.version) {
         return Err("UnsupportedState");
     }
     if state.high_water_time > now.saturating_add(2) {
@@ -384,7 +386,9 @@ pub fn preflight(
             authority::require(state, &request.key, MEMBER | FEDERATION, now)?;
             if state.members.get(&request.key).ok_or("NotMember")?.grants != MEMBER | FEDERATION
                 || state.consents.contains_key(&request.key)
-                || state.mail.hosts.contains_key(&request.key)
+                || (state.mail.hosts.contains_key(&request.key)
+                    || state.transfers.hosts.contains_key(&request.key)
+                    || state.ssh.services.contains_key(&request.key))
             {
                 return Err("SeparateBridgeIdentityRequired");
             }

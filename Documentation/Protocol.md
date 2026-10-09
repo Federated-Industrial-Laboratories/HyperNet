@@ -245,3 +245,8 @@ approval, a cached file or a previous inventory never authorizes stale delivery.
 Mail authority commands and the separate store endpoint are specified in
 [Mail protocol](MailProtocol.md). Mail-only children are not general members;
 private store admission is read-only and never enters authority receipts.
+
+Recipient-accepted file offers and direct encrypted storage are specified in
+[Transfer protocol](TransferProtocol.md). Separately accepted native SSH grants
+and supervised service operation are specified in [SSH services](SshServices.md).
+Neither feature grants cross-network access or general host administration.

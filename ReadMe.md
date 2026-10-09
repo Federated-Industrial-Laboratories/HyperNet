@@ -37,6 +37,12 @@ Unsupported hosting profiles fail closed.
   key packages and persistent ciphertext only on selected hosts.
 - [Mail store operation](Documentation/MailStore.md): consent, bounded storage
   and confinement.
+- [Encrypted file transfers](Documentation/Transfers.md): explicit acceptance,
+  selected stores, resumable upload and verified delivery.
+- [Transfer store operation](Documentation/TransferStore.md): consented resources
+  and durable bounded storage.
+- [SSH services](Documentation/SshServices.md): separate grants and supervised
+  OpenSSH endpoints.
 - [Authority protocol](Documentation/Protocol.md): independent client interface.
 - [Requirements](Documentation/Requirements.md): the broader product scope.
 
@@ -49,7 +55,10 @@ review. It grants no shared membership or administration and cannot re-export
 foreign imports. Local vetoes apply on fresh authority checks; remote vetoes and
 partitions stop new reads after at most five seconds of existing evidence.
 Private mail uses independent client end-to-end encryption and explicit selected
-storage. File transfers and shell services remain future capabilities.
+storage. Encrypted file transfers require explicit recipient acceptance and
+selected storage. Separately consented OpenSSH services run a fixed command in
+an isolated account; current grants supervise their whole process lifetime.
+Arbitrary full-shell services are outside this initial profile.
 
 The implementation is not yet a qualified production Internet release. The
 replication profile assumes trusted administrators and crash faults; it does not

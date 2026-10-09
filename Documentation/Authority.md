@@ -180,8 +180,9 @@ requires a current authority heartbeat and enforces the intersection of network
 grant and local consent. A grant alone cannot widen the local runtime profile.
 Version-1 consent enables heartbeat operation only. Version-2 consent can
 add the Pages replica service for an exact namespace list and bounded volatile
-cache; see [Hosting.md](Hosting.md). Shell, mail and file-transfer services are
-not provided by this protocol version.
+cache; see [Hosting.md](Hosting.md). This consent covers heartbeat and Pages only.
+[Mail](MailStore.md), [transfers](TransferStore.md) and [SSH](SshServices.md) use
+separate service identities and consent contracts.
 
 Use separate keys for administrators, readers/authors and hosting services.
 Any retained hosting-consent record permanently designates that key as a service
@@ -304,8 +305,8 @@ the service immune to denial of service. Deployment ingress and voter storage
 quotas remain necessary. Logs contain readiness and static operational failures,
 not invitation secrets or request bodies. There is no third-party telemetry.
 
-The request wire protocol remains version 1. Version 0.4.0 brokers accept state
-schemas 1 through 5. Pages and version-2 consent use at least schema 2; successful
+The request wire protocol remains version 1. Version 0.5.0 brokers accept state
+schemas 1 through 6. Pages and version-2 consent use at least schema 2; successful
 Federation commands use at least schema 4, retaining monotonic author sharing
 generations and withdrawal tombstones. Missing feature maps default to empty
 for earlier schemas. Mail introduces schema 5. Every successful normal mail
@@ -325,6 +326,18 @@ network, separately from the Federation signer and all member/mail identities.
 [Mail store operation](MailStore.md) describes the private signer file and host
 transport trust provisioning. Mail metadata uses the existing exact authority
 RBAC key; it requires no ciphertext or inbox prefix.
+
+Transfers and SSH introduce schema 6. Upgrade every broker to 0.5.0 or a
+qualified compatible release before any successful transfer or SSH command,
+including directory queries. Version 0.4.0 cannot read schema 6. These features
+use a separate `serviceSigningKey` identity shared by the compatible brokers,
+distinct from member, mail, Federation and native SSH keys. Provision the private
+`ServiceSigningKey.json` through `Tools/Authority.sh`. Existing rollback floors
+and authority RBAC keys remain in use; file payloads never enter etcd. Later
+mail and other feature commands preserve schema 6. Disabling services does not
+make a schema-6 namespace readable by older binaries. Native SSH key histories
+remain reserved after withdrawal, expiry or revocation, including invitations
+that existed before those keys acquired their scoped role.
 
 Extend broker etcd roles to the required Pages and Federation prefixes before
 enabling those respective features, and configure the dedicated Federation signer

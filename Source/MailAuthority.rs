@@ -137,6 +137,15 @@ pub fn manifest(object: &SignedMailObject, network: &str) -> Result<AddressManif
 }
 pub fn host_consent(object: &SignedMailObject, network: &str) -> Result<MailHostConsent, Failure> {
     let value: MailHostConsent = verify(crate::mail_types::HOST, object, network)?;
+    validate_host(&value, network, &object.public_key, "Mail")?;
+    Ok(value)
+}
+pub fn validate_host(
+    value: &MailHostConsent,
+    network: &str,
+    public_key: &str,
+    service: &str,
+) -> Result<(), Failure> {
     for digest in [
         &value.ca_digest,
         &value.certificate_digest,
@@ -159,9 +168,9 @@ pub fn host_consent(object: &SignedMailObject, network: &str) -> Result<MailHost
     }
     if value.version != 1
         || value.network != network
-        || value.host_key != object.public_key
+        || value.host_key != public_key
         || value.generation == 0
-        || value.services != ["Mail"]
+        || value.services != [service]
         || value.address.port() == 0
         || value.authority_address.port() == 0
         || value.address.ip().is_unspecified()
@@ -176,7 +185,7 @@ pub fn host_consent(object: &SignedMailObject, network: &str) -> Result<MailHost
     {
         return Err("MailInvalidObject");
     }
-    Ok(value)
+    Ok(())
 }
 fn address<'a>(
     state: &'a State,
@@ -268,7 +277,7 @@ fn signer<'a>(state: &State, key: Option<&'a SigningKey>) -> Result<&'a SigningK
 }
 pub fn reserved_identity_conflict(state: &State, key: &str) -> bool {
     state.members.contains_key(key)
-        || state.mail.device_history.contains(key)
+        || (state.mail.device_history.contains(key) || state.ssh.key_history.contains(key))
         || state
             .mail
             .addresses
@@ -299,7 +308,7 @@ pub fn read_only(command: &Command) -> bool {
     )
 }
 fn check_state(state: &State, now: u64) -> Result<(), Failure> {
-    if !(1..=5).contains(&state.version) {
+    if !(1..=6).contains(&state.version) {
         return Err("UnsupportedState");
     }
     if state.high_water_time > now.saturating_add(2) {
@@ -325,13 +334,17 @@ fn check_keys(
             });
             if key == &dedicated
                 || state.members.contains_key(key)
-                || state.mail.hosts.contains_key(key)
+                || (state.mail.hosts.contains_key(key)
+                    || state.transfers.hosts.contains_key(key)
+                    || state.ssh.services.contains_key(key))
                 || state
                     .mail
                     .addresses
                     .values()
                     .any(|r| r.manifest.public_key == *key)
-                || (!retained && state.mail.device_history.contains(key))
+                || (!retained
+                    && (state.mail.device_history.contains(key)
+                        || state.ssh.key_history.contains(key)))
             {
                 return Err("SeparateMailIdentityRequired");
             }
@@ -340,7 +353,10 @@ fn check_keys(
     if new.owner_key == dedicated
         || state.members.contains_key(&new.owner_key)
         || state.mail.device_history.contains(&new.owner_key)
-        || state.mail.hosts.contains_key(&new.owner_key)
+        || state.ssh.key_history.contains(&new.owner_key)
+        || (state.mail.hosts.contains_key(&new.owner_key)
+            || state.transfers.hosts.contains_key(&new.owner_key)
+            || state.ssh.services.contains_key(&new.owner_key))
     {
         return Err("SeparateMailIdentityRequired");
     }
@@ -571,7 +587,10 @@ pub fn apply(
                 || state.members[&request.key].grants != types::MEMBER | types::HOST
                 || state.consents.contains_key(&request.key)
                 || state.bridge_consents.contains_key(&request.key)
-                || state.mail.device_history.contains(&request.key)
+                || state.transfers.hosts.contains_key(&request.key)
+                || state.ssh.services.contains_key(&request.key)
+                || (state.mail.device_history.contains(&request.key)
+                    || state.ssh.key_history.contains(&request.key))
                 || state
                     .mail
                     .addresses
@@ -855,7 +874,7 @@ pub fn apply(
     if mutate {
         state.epoch = state.epoch.checked_add(1).ok_or("CapacityExceeded")?;
     }
-    state.version = 5;
+    state.version = state.version.max(5);
     state.high_water_time = state.high_water_time.max(now);
     let reply = Reply::success(state.epoch, result);
     if mutate {

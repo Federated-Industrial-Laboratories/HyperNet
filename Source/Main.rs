@@ -27,8 +27,26 @@ mod page_authority;
 mod policy;
 #[path = "Protocol.rs"]
 mod protocol;
+#[path = "SshAuthority.rs"]
+mod ssh_authority;
+#[path = "SshProof.rs"]
+mod ssh_proof;
+#[path = "SshService.rs"]
+mod ssh_service;
+#[path = "SshTypes.rs"]
+mod ssh_types;
 #[path = "Store.rs"]
 mod store;
+#[path = "TransferAuthority.rs"]
+mod transfer_authority;
+#[path = "TransferDisk.rs"]
+mod transfer_disk;
+#[path = "TransferStore.rs"]
+mod transfer_store;
+#[path = "TransferTransport.rs"]
+mod transfer_transport;
+#[path = "TransferTypes.rs"]
+mod transfer_types;
 #[path = "Transport.rs"]
 mod transport;
 #[path = "Types.rs"]
@@ -78,6 +96,23 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
     },
+    /// Run a recipient-selected encrypted transfer store.
+    TransferStore {
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Supervise a separately consented OpenSSH service.
+    SshService {
+        #[arg(long)]
+        config: PathBuf,
+    },
+    #[command(hide = true)]
+    SshChild {
+        #[arg(long)]
+        port: u16,
+    },
+    #[command(name = "ssh-command", hide = true)]
+    SshRun,
     /// Verify the mandatory container and Landlock restrictions.
     CheckConfinement {
         #[arg(long, default_value = "/State")]
@@ -143,6 +178,9 @@ fn run() -> Result<()> {
             if let Some(path) = &config.mail_signing_key {
                 reads.push(path.clone());
             }
+            if let Some(path) = &config.service_signing_key {
+                reads.push(path.clone());
+            }
             let mut ports = Vec::new();
             for endpoint in &config.etcd_endpoints {
                 let url = reqwest::Url::parse(endpoint)?;
@@ -204,6 +242,30 @@ fn run() -> Result<()> {
             println!("{}", serde_json::to_string(&profile)?);
             runtime()?.block_on(mail_transport::serve(config))?;
         }
+        Command::TransferStore { config: path } => {
+            let config = transfer_store::Config::load(&path)?;
+            let profile = confinement::enter_mail(
+                &config.state_file,
+                &[config.listen.port()],
+                &[config.relay_address.port()],
+                config.consent.state_bytes,
+            )?;
+            confinement::mail_canaries(&config.state_file)?;
+            config.check_resources(&profile)?;
+            println!("{}", serde_json::to_string(&profile)?);
+            runtime()?.block_on(transfer_transport::serve(config))?;
+        }
+        Command::SshService { config: path } => {
+            let config = ssh_service::Config::load(&path)?;
+            let profile = confinement::enter_ssh_parent(
+                &config.state_directory,
+                &[config.listen.port()],
+                &[config.relay_address.port()],
+            )?;
+            runtime()?.block_on(ssh_service::run(config, profile))?;
+        }
+        Command::SshChild { port } => ssh_service::child(port)?,
+        Command::SshRun => ssh_service::command()?,
         Command::CheckConfinement { state } => {
             let profile = confinement::enter(&state, &[], &[], &[])?;
             confinement::canaries(&state)?;
