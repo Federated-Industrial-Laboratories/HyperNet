@@ -41,6 +41,10 @@ mod page_authority;
 mod policy;
 #[path = "Protocol.rs"]
 mod protocol;
+#[path = "RuntimeGuard.rs"]
+mod runtime_guard;
+#[path = "Runtime.rs"]
+mod runtime_management;
 #[path = "SshAuthority.rs"]
 mod ssh_authority;
 #[path = "SshProof.rs"]
@@ -63,6 +67,9 @@ mod transfer_transport;
 mod transfer_types;
 #[path = "Transport.rs"]
 mod transport;
+#[path = "TrustWire.rs"]
+#[allow(dead_code)]
+mod trust_wire;
 #[path = "Types.rs"]
 mod types;
 
@@ -83,6 +90,20 @@ struct Arguments {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(hide = true)]
+    RuntimeGuard {
+        #[arg(long, value_enum)]
+        kind: runtime_guard::Kind,
+        #[arg(long)]
+        expires: u64,
+        #[arg(last = true)]
+        arguments: Vec<String>,
+    },
+    /// Prepare and manage an explicitly consented local runtime.
+    Runtime {
+        #[command(subcommand)]
+        command: runtime_management::Command,
+    },
     /// Initialise a new authority namespace without opening an ingress listener.
     Initialise {
         #[arg(long)]
@@ -169,6 +190,12 @@ fn run() -> Result<()> {
         .install_default()
         .map_err(|_| anyhow::anyhow!("The TLS provider was already configured"))?;
     match Arguments::parse().command {
+        Command::RuntimeGuard {
+            kind,
+            expires,
+            arguments,
+        } => runtime_guard::run(kind, expires, arguments)?,
+        Command::Runtime { command } => runtime_management::run(command)?,
         Command::Initialise { config, admin_key } => {
             let config = authority_config(&config)?;
             runtime()?.block_on(async {

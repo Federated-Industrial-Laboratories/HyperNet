@@ -1,9 +1,10 @@
 # HyperNet 0.8.0 contracts
 
-These documents define the replacement network contract. They do not add runtime
-features to the current 0.7.5 executables. In particular, the current authority
-still uses its documented trusted crash-fault model. No Byzantine, relay-privacy,
-sealed-publication or runtime qualification follows from these specifications.
+These documents define the replacement network contract. Native runtime management
+and offline trust preparation implement the subsets stated in their operation
+manuals. The current serving authority retains its documented trusted crash-fault
+model. These specifications do not establish Byzantine consensus, relay privacy,
+sealed publication or complete replacement-network qualification.
 
 | Contract | Defines |
 | --- | --- |

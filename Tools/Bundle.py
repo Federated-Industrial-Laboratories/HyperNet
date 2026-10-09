@@ -106,9 +106,13 @@ def image_architecture(value):
 
 
 def allowed_path(name):
-    if name in ('Licence.txt', 'ReadMe.md', 'ImageId.txt', 'Images/HyperNetOci.tar'):
+    if name in ('Licence.txt', 'ReadMe.md', 'ImageId.txt', 'Images/HyperNetOci.tar', 'Bin/HyperNet', 'Tests/RuntimeWorkflow.py'):
         return True
     return bool(re.fullmatch(r'(Tools/[A-Z][A-Za-z0-9]*\.(py|sh)|Documentation/[A-Z][A-Za-z0-9]*\.(md|txt|tsv|json)|Packaging/(LibraryLicences\.md|Containerfile|SshdConfig))', name))
+
+
+def file_mode(name):
+    return 0o700 if name.startswith(('Bin/', 'Tools/', 'Tests/')) else 0o600
 
 
 def validate_manifest(value):
@@ -117,12 +121,19 @@ def validate_manifest(value):
     require(isinstance(value['version'], str) and re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', value['version']), 'Invalid package version')
     require(value['architecture'] in ('x86_64', 'aarch64'), 'Unsupported package architecture')
     metadata = value['metadata']
-    require(isinstance(metadata, dict) and set(metadata) == {'imageId', 'imageArchive', 'binaries', 'authoritySchema', 'prerequisites'}, 'Invalid package metadata')
+    require(isinstance(metadata, dict) and set(metadata) == {'imageId', 'imageArchive', 'binaries', 'authoritySchema', 'hostRuntime', 'prerequisites'}, 'Invalid package metadata')
     require(isinstance(metadata['imageId'], str) and re.fullmatch(r'sha256:[a-f0-9]{64}', metadata['imageId']), 'Invalid immutable image identity')
     require(metadata['imageArchive'] == 'Images/HyperNetOci.tar', 'Unexpected image path')
     require(isinstance(metadata['binaries'], dict) and set(metadata['binaries']) == {'HyperNet', 'HyperNetGate'} and all(isinstance(v, str) and HEX.fullmatch(v) for v in metadata['binaries'].values()), 'Invalid binary inventory')
     require(type(metadata['authoritySchema']) is int and metadata['authoritySchema'] == 9, 'Invalid authority schema')
     require(isinstance(metadata['prerequisites'], list) and len(metadata['prerequisites']) <= 32 and all(isinstance(v, str) and len(v) <= 256 for v in metadata['prerequisites']), 'Invalid prerequisites')
+    host = metadata['hostRuntime']
+    require(isinstance(host, dict) and set(host) == {'elfInterpreter', 'neededLibraries', 'glibcMinimum'}, 'Invalid native runtime metadata')
+    require(host['elfInterpreter'] == {'x86_64': '/lib64/ld-linux-x86-64.so.2', 'aarch64': '/lib/ld-linux-aarch64.so.1'}[value['architecture']], 'Invalid native ELF interpreter')
+    require(isinstance(host['neededLibraries'], list) and 1 <= len(host['neededLibraries']) <= 32
+            and all(isinstance(v, str) and re.fullmatch(r'[A-Za-z0-9_.+-]+\.so(\.[0-9]+)*', v) for v in host['neededLibraries'])
+            and host['neededLibraries'] == sorted(set(host['neededLibraries'])), 'Invalid native libraries')
+    require(isinstance(host['glibcMinimum'], str) and re.fullmatch(r'2\.[0-9]+', host['glibcMinimum']), 'Invalid native glibc requirement')
     files = value['files']
     require(isinstance(files, list) and 1 <= len(files) <= MAX_FILES, 'Invalid file count')
     paths = []
@@ -132,12 +143,14 @@ def validate_manifest(value):
         name = item['path']
         require(isinstance(name, str) and allowed_path(name) and str(PurePosixPath(name)) == name, 'Unexpected package path')
         require(type(item['size']) is int and 0 <= item['size'] <= MAX_FILE, 'Invalid file size')
-        require(type(item['mode']) is int and item['mode'] == (0o700 if name.startswith('Tools/') else 0o600), 'Invalid file mode')
+        require(type(item['mode']) is int and item['mode'] == file_mode(name), 'Invalid file mode')
         require(isinstance(item['sha256'], str) and HEX.fullmatch(item['sha256']), 'Invalid file digest')
         paths.append(name)
         total += item['size']
     require(paths == sorted(set(paths)) and total <= MAX_ARCHIVE, 'Duplicate, unordered or oversized inventory')
-    require({'Images/HyperNetOci.tar', 'ImageId.txt', 'Licence.txt', 'ReadMe.md', 'Tools/Bundle.py', 'Tools/Qualify.py', 'Tools/Upgrade.py', 'Tools/Authority.sh', 'Tools/Lifecycle.sh', 'Tools/Seccomp.sh', 'Documentation/ThirdPartyNotices.txt', 'Documentation/SystemLibraries.tsv', 'Documentation/SystemLibraryNotices.txt'}.issubset(paths), 'Required package files are missing')
+    require({'Bin/HyperNet', 'Images/HyperNetOci.tar', 'ImageId.txt', 'Licence.txt', 'ReadMe.md', 'Tools/Bundle.py', 'Tools/Qualify.py', 'Tools/Upgrade.py', 'Tools/Authority.sh', 'Tools/Lifecycle.sh', 'Tools/Seccomp.sh', 'Documentation/ThirdPartyNotices.txt', 'Documentation/SystemLibraries.tsv', 'Documentation/SystemLibraryNotices.txt'}.issubset(paths), 'Required package files are missing')
+    native = next(item for item in files if item['path'] == 'Bin/HyperNet')
+    require(native['sha256'] == metadata['binaries']['HyperNet'], 'Native and confined runtime identities differ')
     return value
 
 
@@ -279,6 +292,36 @@ def image_binaries(image, temporary):
             run(['podman', 'rm', container])
 
 
+def runtime_matches(manifest):
+    require(manifest['architecture'] == architecture(), 'Package architecture does not match this machine')
+    require(platform.system() == 'Linux', 'Only native Linux packages are qualified')
+    try:
+        libc_version = os.confstr('CS_GNU_LIBC_VERSION').split()
+    except (OSError, ValueError, AttributeError):
+        raise ValueError('GNU libc is required') from None
+    require(len(libc_version) == 2 and libc_version[0] == 'glibc', 'GNU libc is required')
+    require(tuple(map(int, libc_version[1].split('.'))) >= tuple(map(int, manifest['metadata']['hostRuntime']['glibcMinimum'].split('.'))), 'Host glibc is older than the package requirement')
+    require(Path(manifest['metadata']['hostRuntime']['elfInterpreter']).is_file(), 'Required ELF interpreter is unavailable')
+
+
+def binary_metadata(binary):
+    with open_regular(binary, MAX_FILE) as source:
+        header = source.read(20)
+    require(header[:6] == b'\x7fELF\x02\x01', 'A little-endian ELF64 binary is required')
+    require(int.from_bytes(header[18:20], 'little') == {'x86_64': 62, 'aarch64': 183}[architecture()], 'ELF architecture does not match the package')
+    program = run(['readelf', '--program-headers', '--wide', str(binary)]).decode('ascii')
+    dynamic = run(['readelf', '--dynamic', '--wide', str(binary)]).decode('ascii')
+    versions = run(['readelf', '--version-info', '--wide', str(binary)]).decode('ascii')
+    interpreters = re.findall(r'Requesting program interpreter: ([^]\n]+)', program)
+    require(len(interpreters) == 1, 'One ELF interpreter is required')
+    needed = sorted(set(re.findall(r'\(NEEDED\).*Shared library: \[([^]\n]+)\]', dynamic)))
+    glibc = re.findall(r'GLIBC_(2\.[0-9]+)\b', versions)
+    require(glibc and needed, 'Dynamic GNU/Linux dependency information is missing')
+    require(not re.search(r'\((?:RPATH|RUNPATH)\)', dynamic), 'Embedded library search paths are forbidden')
+    return {'elfInterpreter': interpreters[0], 'neededLibraries': needed,
+            'glibcMinimum': max(glibc, key=lambda v: tuple(map(int, v.split('.'))))}
+
+
 def private_parent(path):
     path = Path(os.path.abspath(path))
     require(path.name not in ('', '.', '..') and path != Path.home(), 'Select a dedicated installation prefix')
@@ -324,7 +367,7 @@ def install(args):
         staged = temporary / 'Install'
         staged.mkdir(mode=0o700)
         manifest, original = parse_archive(archive, staged)
-        require(manifest['architecture'] == architecture(), 'Package architecture does not match this machine')
+        runtime_matches(manifest)
         require((staged / 'ImageId.txt').read_text().strip() == manifest['metadata']['imageId'], 'Packaged image ID differs from the manifest')
         run(['podman', 'load', '--input', str(staged / manifest['metadata']['imageArchive'])])
         image_matches(manifest)
@@ -418,8 +461,8 @@ def create(args):
         image = temporary / 'HyperNetOci.tar'
         run(['podman', 'save', '--format', 'oci-archive', '--output', str(image), image_id])
         image.chmod(0o600)
-        files = {'Images/HyperNetOci.tar': image, 'ImageId.txt': package / 'ImageId.txt', 'Licence.txt': repository / 'Licence.txt', 'ReadMe.md': repository / 'ReadMe.md'}
-        for folder in ('Tools', 'Documentation', 'Packaging'):
+        files = {'Bin/HyperNet': package / 'RootFs/HyperNet', 'Images/HyperNetOci.tar': image, 'ImageId.txt': package / 'ImageId.txt', 'Licence.txt': repository / 'Licence.txt', 'ReadMe.md': repository / 'ReadMe.md'}
+        for folder in ('Tools', 'Documentation', 'Packaging', 'Tests'):
             for path in sorted((repository / folder).iterdir()):
                 name = str(path.relative_to(repository))
                 if allowed_path(name) and path.is_file():
@@ -429,10 +472,10 @@ def create(args):
                 files['Documentation/' + path.name] = path
         manifest = {'format': 1, 'product': PRODUCT, 'version': runtime_version, 'architecture': machine,
                     'metadata': {'imageId': image_id, 'imageArchive': 'Images/HyperNetOci.tar',
-                    'authoritySchema': 9,
+                    'authoritySchema': 9, 'hostRuntime': binary_metadata(package / 'RootFs/HyperNet'),
                     'binaries': {name: digest_file(package / 'RootFs' / name) for name in ('HyperNet', 'HyperNetGate')},
-                    'prerequisites': ['Linux; package architecture must match the native processor', 'Python 3.11+, OpenSSH ssh-keygen Ed25519 SSHSIG, Bash, GNU coreutils, jq and flock', 'Rootless Podman with a maintained OCI runtime, nomap and subordinate UID/GID mappings', 'Delegated cgroup v2 CPU, memory and PID controllers; seccomp; Landlock ABI 6+', 'GNU/Linux dynamic libraries and their loader are carried inside the OCI image', 'The build packager uses Debian-format library inventory; runtime hosts do not require dpkg']},
-                    'files': [{'path': name, 'size': path.stat().st_size, 'mode': 0o700 if name.startswith('Tools/') else 0o600, 'sha256': digest_file(path)} for name, path in sorted(files.items())]}
+                    'prerequisites': ['Linux; package architecture must match the native processor', 'Python 3.11+, OpenSSH ssh-keygen Ed25519 SSHSIG, Bash, GNU coreutils, jq and flock', 'Rootless Podman with a maintained OCI runtime, nomap and subordinate UID/GID mappings', 'Delegated cgroup v2 CPU, memory and PID controllers; seccomp; Landlock ABI 6+', 'Confined GNU/Linux libraries and their loader are carried inside the OCI image', 'Native Bin/HyperNet requires the declared host GNU libc ABI, ELF loader and maintained shared libraries', 'OpenSSL 3 and explicitly selected etcd/etcdctl binaries are required for native runtime setup', 'The build packager uses Debian-format library inventory; runtime hosts do not require dpkg']},
+                    'files': [{'path': name, 'size': path.stat().st_size, 'mode': file_mode(name), 'sha256': digest_file(path)} for name, path in sorted(files.items())]}
         validate_manifest(manifest)
         image_matches(manifest)
         require(image_binaries(image_id, temporary) == manifest['metadata']['binaries'], 'Image binaries differ from the supplied build files')

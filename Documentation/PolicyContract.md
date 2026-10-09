@@ -476,6 +476,14 @@ and report Ready only after confinement, current authority, quota/storage and
 role-specific endpoint checks. Readiness itself never substitutes for a fresh
 per-operation authority permit.
 
+Ordinary lifecycle mutations require the exact current expected local generation.
+For an unchanged immutable desired profile, Withdraw additionally accepts an
+observed generation from one through the current generation. This restrictive
+veto cannot add authority or clear a tombstone; a different profile digest or
+future generation still refuses. It advances the current generation under the
+same lock, so a queued withdrawal can stop an activation that committed while
+the request waited.
+
 Withdrawal advances a durable tombstone before stopping work. An in-flight start
 or update with the old generation cannot activate, even offline. Stop preserves
 state and consent. Withdrawn requires explicit new local consent covering the

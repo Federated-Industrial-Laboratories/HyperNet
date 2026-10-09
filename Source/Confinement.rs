@@ -121,7 +121,7 @@ fn require_subordinate_mapping(mapping: &str) -> Result<()> {
     Ok(())
 }
 
-fn preflight() -> Result<Profile> {
+pub(crate) fn preflight() -> Result<Profile> {
     ensure!(
         Path::new("/run/.containerenv").is_file(),
         "an isolated OCI container is required"

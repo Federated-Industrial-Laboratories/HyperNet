@@ -290,6 +290,14 @@ impl Store {
     }
 
     pub async fn initialise(&mut self, admin: &str) -> Result<()> {
+        self.initialise_at(admin, now()?, false).await
+    }
+
+    pub(crate) async fn initialise_runtime(&mut self, admin: &str, created: u64) -> Result<()> {
+        self.initialise_at(admin, created, true).await
+    }
+
+    async fn initialise_at(&mut self, admin: &str, created: u64, resume: bool) -> Result<()> {
         if [
             &self.federation_signing_key,
             &self.mail_signing_key,
@@ -307,11 +315,33 @@ impl Store {
         let key = crate::protocol::fixed_hex::<32>(admin).map_err(anyhow::Error::msg)?;
         ed25519_dalek::VerifyingKey::from_bytes(&key)
             .context("Invalid initial administrator key")?;
-        if self.floor.cluster != 0 {
+        if !resume && self.floor.cluster != 0 {
             bail!("This authority directory already has a network floor");
         }
-        let now = now()?;
-        let state = serde_json::to_vec(&State::initial(self.network.clone(), admin.into(), now))?;
+        if created > now()? {
+            bail!("Initial authority time is in the future");
+        }
+        let state =
+            serde_json::to_vec(&State::initial(self.network.clone(), admin.into(), created))?;
+        if resume {
+            let response = self.client.get(self.namespace.as_str(), None).await?;
+            if let Some(kv) = response.kvs().first() {
+                if kv.value() != state.as_slice()
+                    || kv.version() != 1
+                    || kv.create_revision() != kv.mod_revision()
+                {
+                    bail!("Retained authority is not the exact unmodified initial namespace");
+                }
+                let header = response
+                    .header()
+                    .context("Authority response has no header")?;
+                self.accept_floor(header.cluster_id(), header.revision(), created)?;
+                return Ok(());
+            }
+            if self.floor.cluster != 0 {
+                bail!("Retained authority floor has no corresponding namespace");
+            }
+        }
         let response = self
             .client
             .txn(
@@ -330,7 +360,7 @@ impl Store {
         let header = response
             .header()
             .context("Authority response has no header")?;
-        self.accept_floor(header.cluster_id(), header.revision(), now)?;
+        self.accept_floor(header.cluster_id(), header.revision(), created)?;
         Ok(())
     }
 

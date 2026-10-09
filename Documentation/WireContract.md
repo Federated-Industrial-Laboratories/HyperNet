@@ -1,8 +1,9 @@
 # Authority wire contract
 
 This document specifies the replacement authority contract for HyperNet 0.8.0.
-The 0.7.5 executables do not implement it. A specification or a valid signature
-does not establish an operational Byzantine network. Activation requires the
+The native offline trust tools implement the bootstrap subset described below.
+Serving authority still uses the existing trusted backend. A specification or a
+valid signature does not establish an operational Byzantine network. Activation requires the
 complete authority, consumer, routing and runtime contracts.
 
 Core and Suite distribute the same specification and conformance vectors.
@@ -141,6 +142,43 @@ An envelope digest never substitutes for a verified payload or chain.
 
 The phase, persistence and view rules are in [AuthorityContract.md](AuthorityContract.md).
 A prepare QC or commit vote by itself does not certify an executed result.
+
+## Offline bootstrap preparation
+
+Offline preparation uses two additional canonical records:
+
+| Kind | Name | Fields in order |
+| --- | --- | --- |
+| 30 | Bootstrap | descriptor:bytes, genesis:bytes, recoveryAcceptance:bytes-or-null, route:bytes |
+| 31 | BootstrapRoute | network:Id, incarnation:Id, relayService:Id, relayOrigin:text, relayTransport:Key, relayDomain:Id, admissionService:Id, admissionOrigin:text, admissionTransport:Key, admissionDomain:Id, assurance:U64, notBeforeMs:U64, expiresMs:U64 |
+
+Descriptor, genesis and route contain their complete canonical record bytes.
+RecoveryAcceptance is the signed envelope over the exact genesis RecoveryPolicy
+payload, verified against that policy's proposed custody threshold. It is not a
+kind-116 successor-recovery acceptance. Null is permitted only in an unaccepted
+local draft. A client refuses a draft as prepared trust.
+
+The independently authenticated fingerprint is the kind-30 **record digest of
+this entire bundle**. Pinning only the descriptor does not authenticate route
+metadata. Clients also retain the descriptor digest for subsequent authority
+verification. All nested records retain their normal size, type and depth bounds.
+Network/incarnation and every governance reference must agree before acceptance.
+Voter, administrator, recovery and transport roles use distinct identities.
+
+Assurance is Organisational=0 or Independent=1, as in NetworkPolicy. Origins are bounded HTTPS origins,
+with no credentials, query, fragment or application path. Both service identities,
+transport keys and declared control domains are pinned. Independent mode requires
+different declared relay and admission domains. The stronger network/client
+privacy minimum prevails. A signature authenticates a declaration; it cannot prove
+independent operators or absence of collusion.
+
+This is an offline route plan. It carries no invitation, relay voucher, service
+registration, current quorum evidence or membership. Expired route material is
+refused. Preparation produces `OfflinePrepared`, not a live connection. Online
+joining remains unavailable until the mandatory relay connector is implemented.
+The current trusted authority backend cannot serve as a BasicHotStuff network
+merely because such a draft was prepared. Runtime setup and offline trust drafting
+remain separate until the replacement authority and route consumers are integrated.
 
 ## Requests, recipient challenges and executed results
 

@@ -1,8 +1,9 @@
 # Signed offline packages
 
 HyperNet packages install independently of HyperNetSuite. The initial package
-carries an immutable OCI image, launchers, operator documentation and dependency
-notices. It contains no network keys, certificates, profiles, voter database or
+carries the native `Bin/HyperNet` manager, an immutable OCI image, launchers,
+operator documentation and dependency notices. The native executable has the same
+SHA-256 digest as HyperNet inside the signed image. It contains no network keys, certificates, profiles, voter database or
 personal state. The daemon continues to require its confined rootless OCI
 profile; installing a package does not start a service or open an ingress port.
 
@@ -18,8 +19,14 @@ is not an independent trust anchor. No default publisher key is embedded.
 Build the binaries and image using [Hosting](Hosting.md). The packager reads
 Debian-format build-host library inventories; installation on another Linux
 family does not require `dpkg`. Copied runtime libraries and their loader stay
-inside the OCI image. The native host needs Python, OpenSSH tools, Bash, GNU
-core utilities, `jq`, `flock` and the qualified Podman/kernel profile.
+inside the OCI image. The native manager uses host-maintained shared libraries.
+The signed manifest declares its ELF interpreter, required libraries and minimum
+GNU libc version; installation refuses an older libc or missing interpreter.
+The native host also needs OpenSSL 3 and the qualified Podman/kernel profile.
+Current trusted authority setup requires explicitly selected `etcd` and `etcdctl`
+binaries. Package operations use Python and OpenSSH tools; existing individual
+role launchers additionally use Bash, GNU core utilities, `jq` and `flock`.
+See [Runtime](Runtime.md) for inert native setup and explicit local activation.
 
 ```sh
 python3 Tools/Bundle.py Create \
@@ -37,7 +44,8 @@ offline signing key; no signing secret enters the package.
 
 The detached signature covers the entire exact archive under SSHSIG namespace
 `HyperNetBundle1`. Manifest format 1 identifies product, runtime version, native
-architecture, immutable image ID, binary hashes, the exact authority schema and every
+architecture, immutable image ID, binary hashes, native host ABI, the exact
+authority schema and every
 payload file's SHA-256, size and mode. Archives are uncompressed USTAR, at most
 512 MiB, with at most 512 payload files and at most 256 MiB per file. Archives
 contain only one initial manifest and explicitly inventoried regular files.
@@ -68,7 +76,7 @@ The helper copies inputs into private temporary files and verifies the signature
 before reading archive metadata. It refuses duplicate paths, links, devices,
 traversal, unlisted files, missing files, unsupported metadata and hash or mode
 mismatches. Installation requires a new private prefix on Linux and the matching
-native architecture. It loads the signed OCI archive, checks the actual image ID
+native architecture and declared host ABI. It loads the signed OCI archive, checks the actual image ID
 and architecture, then atomically publishes the new installation without replacing
 an existing prefix. No archive-supplied program is run during verification.
 
@@ -94,7 +102,10 @@ inventory. It does not trust a modified local manifest. Qualify uses the native
 kernel and a disposable bounded container to verify actual confinement. A
 userspace container on another distribution is not a native kernel qualification.
 
-Stop the relevant profile through its existing launcher before changing its image.
+The following image-switch procedure applies only to individual role-launcher
+profiles. Native runtime deployments bind exact software in their consent; this
+helper cannot update them. Stop the relevant launcher profile before changing its
+image.
 All workload and relay containers must be removed by Stop, including exited
 containers. Select a fully verified installation and inspect the current network
 state schema before using the switch operation:
