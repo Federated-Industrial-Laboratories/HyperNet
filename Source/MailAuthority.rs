@@ -276,7 +276,8 @@ fn signer<'a>(state: &State, key: Option<&'a SigningKey>) -> Result<&'a SigningK
     Ok(key)
 }
 pub fn reserved_identity_conflict(state: &State, key: &str) -> bool {
-    state.members.contains_key(key)
+    state.applications.contains_key(key)
+        || state.members.contains_key(key)
         || (state.mail.device_history.contains(key) || state.ssh.key_history.contains(key))
         || state
             .mail
@@ -308,7 +309,7 @@ pub fn read_only(command: &Command) -> bool {
     )
 }
 fn check_state(state: &State, now: u64) -> Result<(), Failure> {
-    if !(1..=6).contains(&state.version) {
+    if !(1..=7).contains(&state.version) {
         return Err("UnsupportedState");
     }
     if state.high_water_time > now.saturating_add(2) {
@@ -332,7 +333,8 @@ fn check_keys(
                         && d.mls_signature_key == binding.mls_signature_key
                 })
             });
-            if key == &dedicated
+            if state.applications.contains_key(key)
+                || key == &dedicated
                 || state.members.contains_key(key)
                 || (state.mail.hosts.contains_key(key)
                     || state.transfers.hosts.contains_key(key)
@@ -350,7 +352,8 @@ fn check_keys(
             }
         }
     }
-    if new.owner_key == dedicated
+    if state.applications.contains_key(&new.owner_key)
+        || new.owner_key == dedicated
         || state.members.contains_key(&new.owner_key)
         || state.mail.device_history.contains(&new.owner_key)
         || state.ssh.key_history.contains(&new.owner_key)

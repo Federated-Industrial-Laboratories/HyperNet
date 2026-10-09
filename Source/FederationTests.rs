@@ -164,6 +164,9 @@ impl Fixture {
                 audience: "Members".into(),
                 submission_digest: submission.digest.clone(),
                 decision: "Approve".into(),
+                application_policy_digest: None,
+                application_review_mode: None,
+                review_expires: None,
             },
         );
         let descriptor = PageDescriptor {

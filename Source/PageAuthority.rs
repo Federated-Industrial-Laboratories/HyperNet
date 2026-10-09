@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 use crate::{
-    authority, host, markup,
+    application_authority as applications, authority, host, markup,
     protocol::{self, VerifiedRequest},
     types::*,
 };
@@ -112,11 +112,126 @@ pub(crate) fn published<'a>(
         .get(page_id)
         .and_then(|record| record.published.as_ref())
         .ok_or("PageUnavailable")?;
-    authority::require(state, &publication.descriptor.author, MEMBER, now)
-        .map_err(|_| "PageUnavailable")?;
-    authority::require(state, &publication.descriptor.reviewer, MEMBER | ADMIN, now)
-        .map_err(|_| "PageUnavailable")?;
+    signer_permission(
+        state,
+        &publication.descriptor.author,
+        "PagesSubmit",
+        &publication.descriptor.namespace,
+        page_id,
+        now,
+    )
+    .map_err(|_| "PageUnavailable")?;
+    signer_permission(
+        state,
+        &publication.descriptor.reviewer,
+        "ReviewDecide",
+        &publication.descriptor.namespace,
+        page_id,
+        now,
+    )
+    .map_err(|_| "PageUnavailable")?;
     Ok(publication)
+}
+
+fn signer_permission(
+    state: &State,
+    key: &str,
+    permission: &str,
+    namespace: &str,
+    page_id: &str,
+    now: u64,
+) -> Result<(), &'static str> {
+    if state.applications.contains_key(key) {
+        applications::permits(state, key, permission, namespace, Some(page_id), now)
+    } else {
+        authority::require(
+            state,
+            key,
+            if permission == "ReviewDecide" {
+                MEMBER | ADMIN
+            } else {
+                MEMBER
+            },
+            now,
+        )
+    }
+}
+
+fn application_preflight(
+    state: &State,
+    request: &VerifiedRequest,
+    now: u64,
+) -> Result<(), &'static str> {
+    let record = applications::current(state, &request.key, now)?;
+    match &request.request.command {
+        Command::PageSubmit {
+            namespace, page_id, ..
+        } => applications::permits(
+            state,
+            &request.key,
+            "PagesSubmit",
+            namespace,
+            Some(page_id),
+            now,
+        ),
+        Command::PageList { namespace, .. } | Command::PageQueue { namespace, .. } => {
+            let permission = if matches!(request.request.command, Command::PageList { .. }) {
+                "PagesRead"
+            } else {
+                "ReviewInspect"
+            };
+            applications::permits(
+                state,
+                &request.key,
+                permission,
+                namespace.as_deref().ok_or("ApplicationNamespaceRequired")?,
+                None,
+                now,
+            )
+        }
+        Command::PageRead { page_id }
+        | Command::PageInspect { page_id }
+        | Command::PageWithdraw { page_id, .. }
+        | Command::PageReview { page_id, .. } => {
+            let page = state.pages.get(page_id).ok_or("PageUnavailable")?;
+            let permission = match &request.request.command {
+                Command::PageRead { .. } => "PagesRead",
+                Command::PageInspect { .. } => "ReviewInspect",
+                Command::PageWithdraw { .. } => {
+                    if page.author != request.key {
+                        return Err("PageOwnerMismatch");
+                    }
+                    "PagesSubmit"
+                }
+                Command::PageReview {
+                    application_policy_digest,
+                    application_review_mode,
+                    ..
+                } => {
+                    if application_policy_digest != &record.review_policy_digest
+                        || application_review_mode != &record.review_mode
+                    {
+                        return Err("ApplicationReviewMismatch");
+                    }
+                    "ReviewDecide"
+                }
+                _ => unreachable!(),
+            };
+            applications::permits(
+                state,
+                &request.key,
+                permission,
+                &page.namespace,
+                Some(page_id),
+                now,
+            )?;
+            if permission == "PagesRead" {
+                published(state, page_id, now)?;
+            }
+            Ok(())
+        }
+        _ => Err("ApplicationPermissionDenied"),
+    }
 }
 
 fn inspectable(state: &State, page_id: &str, key: &str, now: u64) -> Result<(), &'static str> {
@@ -133,11 +248,32 @@ pub fn preflight(
     certificate: Option<&str>,
     now: u64,
 ) -> Result<(), &'static str> {
-    if !(1..=6).contains(&state.version) {
+    if !(1..=7).contains(&state.version) {
         return Err("UnsupportedState");
     }
     if state.high_water_time > now.saturating_add(2) {
         return Err("ClockRollback");
+    }
+    if let Command::PageReview { review_expires, .. } = &request.request.command {
+        if review_expires.is_some_and(|expires| expires <= now || expires > now.saturating_add(300))
+        {
+            return Err("InvalidReviewExpiry");
+        }
+        if review_expires.is_none() && state.applications.contains_key(&request.key) {
+            return Err("ApplicationReviewExpiryRequired");
+        }
+    }
+    if state.applications.contains_key(&request.key) {
+        return application_preflight(state, request, now);
+    }
+    if let Command::PageReview {
+        application_policy_digest,
+        application_review_mode,
+        ..
+    } = &request.request.command
+        && (application_policy_digest.is_some() || application_review_mode.is_some())
+    {
+        return Err("ApplicationReviewMismatch");
     }
     match &request.request.command {
         Command::PageSync { profile, .. } | Command::ReplicaDeliver { profile, .. } => {
@@ -312,10 +448,30 @@ pub fn verify_bundle(
         audience,
         submission_digest,
         decision,
+        application_policy_digest,
+        application_review_mode,
+        review_expires,
     } = &approval.request.command
     else {
         return Err("InvalidPageProof");
     };
+    if review_expires == &Some(0) {
+        return Err("InvalidPageProof");
+    }
+    if let Some(policy) = application_policy_digest {
+        if review_expires.is_none() {
+            return Err("InvalidPageProof");
+        }
+        protocol::fixed_hex::<32>(policy)?;
+        if !matches!(
+            application_review_mode.as_deref(),
+            Some("Manual" | "Automatic")
+        ) {
+            return Err("InvalidPageProof");
+        }
+    } else if application_review_mode.is_some() {
+        return Err("InvalidPageProof");
+    }
     if decision != "Approve"
         || page_id != &descriptor.page_id
         || *revision != descriptor.revision
@@ -362,18 +518,18 @@ fn validate_content(
     Ok(())
 }
 
-fn until(state: &State, key: &str, descriptor: Option<&PageDescriptor>, now: u64) -> u64 {
+pub(crate) fn until(
+    state: &State,
+    key: &str,
+    descriptor: Option<&PageDescriptor>,
+    now: u64,
+) -> u64 {
     let mut deadline = now
         .saturating_add(5)
-        .min(state.members.get(key).map_or(now, |member| member.expires));
+        .min(applications::deadline(state, key, now));
     if let Some(descriptor) = descriptor {
         for signer in [&descriptor.author, &descriptor.reviewer] {
-            deadline = deadline.min(
-                state
-                    .members
-                    .get(signer)
-                    .map_or(now, |member| member.expires),
-            );
+            deadline = deadline.min(applications::deadline(state, signer, now));
         }
     }
     deadline
@@ -535,14 +691,25 @@ pub fn apply(
         }
         Command::PageQueue { namespace, after } => {
             list_filter(namespace, after)?;
-            let admin = authority::require(state, &request.key, ADMIN, now).is_ok();
+            let app = state.applications.contains_key(&request.key);
+            let admin = app || authority::require(state, &request.key, ADMIN, now).is_ok();
             let mut entries = Vec::new();
             let mut next = None;
             for (page_id, page) in &state.pages {
                 let Some(pending) = &page.pending else {
                     continue;
                 };
-                if (!admin && page.author != request.key)
+                if (app
+                    && applications::permits(
+                        state,
+                        &request.key,
+                        "ReviewInspect",
+                        &page.namespace,
+                        Some(page_id),
+                        now,
+                    )
+                    .is_err())
+                    || (!admin && page.author != request.key)
                     || namespace
                         .as_ref()
                         .is_some_and(|value| value != &page.namespace)
@@ -589,6 +756,7 @@ pub fn apply(
             audience,
             submission_digest,
             decision,
+            ..
         } => {
             if decision != "Approve" && decision != "Reject" {
                 return Err("InvalidReviewDecision");
@@ -611,7 +779,7 @@ pub fn apply(
             }
             let version = expected_version.checked_add(1).ok_or("CapacityExceeded")?;
             let publication = if decision == "Approve" {
-                authority::require(state, author, MEMBER, now)?;
+                signer_permission(state, author, "PagesSubmit", namespace, page_id, now)?;
                 let submission = decode_blob(blobs, &quarantine_key(page_id, pending.revision))?;
                 let bundle = PageBundle {
                     submission,
@@ -691,9 +859,19 @@ pub fn apply(
                 let Ok(page) = published(state, page_id, now) else {
                     continue;
                 };
-                if namespace
-                    .as_ref()
-                    .is_some_and(|value| value != &page.descriptor.namespace)
+                if (state.applications.contains_key(&request.key)
+                    && applications::permits(
+                        state,
+                        &request.key,
+                        "PagesRead",
+                        &page.descriptor.namespace,
+                        Some(page_id),
+                        now,
+                    )
+                    .is_err())
+                    || namespace
+                        .as_ref()
+                        .is_some_and(|value| value != &page.descriptor.namespace)
                     || after.as_ref().is_some_and(|value| page_id <= value)
                 {
                     continue;
@@ -990,6 +1168,9 @@ mod tests {
                 audience: pending.audience.clone(),
                 submission_digest: pending.submission_digest.clone(),
                 decision: decision.into(),
+                application_policy_digest: None,
+                application_review_mode: None,
+                review_expires: None,
             },
         )
     }

@@ -38,6 +38,27 @@ pub struct Request {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "type", deny_unknown_fields, rename_all_fields = "camelCase")]
 pub enum Command {
+    ApplicationConsent {
+        owner_key: String,
+        expires: u64,
+        namespaces: Vec<String>,
+        page_ids: Option<Vec<String>>,
+        permissions: Vec<String>,
+        review_policy_digest: Option<String>,
+        review_mode: Option<String>,
+    },
+    ApplicationGrantCreate {
+        consent: Envelope,
+    },
+    ApplicationGrantGet {
+        application_key: String,
+    },
+    ApplicationGrantList {
+        after: Option<String>,
+    },
+    ApplicationGrantRevoke {
+        application_key: String,
+    },
     TransferHostRegister {
         consent: Envelope,
     },
@@ -216,6 +237,12 @@ pub enum Command {
         audience: String,
         submission_digest: String,
         decision: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        application_policy_digest: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        application_review_mode: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        review_expires: Option<u64>,
     },
     PageWithdraw {
         page_id: String,
@@ -510,6 +537,8 @@ pub struct State {
     pub transfers: crate::transfer_types::TransferState,
     #[serde(default, skip_serializing_if = "crate::ssh_types::SshState::is_empty")]
     pub ssh: crate::ssh_types::SshState,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub applications: BTreeMap<String, crate::application_authority::ApplicationRecord>,
 }
 
 impl State {
@@ -539,6 +568,7 @@ impl State {
             mail: Default::default(),
             transfers: Default::default(),
             ssh: Default::default(),
+            applications: BTreeMap::new(),
         }
     }
 }

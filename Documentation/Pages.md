@@ -59,3 +59,13 @@ The authority and independent Suite keep the same conformance vectors in
 `Tests/MarkupVectors.json`. Only application-generated controls may reach a
 terminal. Page text cannot set a title, write a clipboard or generate terminal
 graphics. Trusted approval information is displayed separately from content.
+
+## Scoped applications
+
+A member can delegate selected native Page operations to a distinct application
+identity. Permissions intersect explicit namespaces and optional page IDs.
+Review delegation additionally requires an administrator owner and a bound policy
+and mode; ordinary manual review remains the default. Application signatures keep
+their actual author or reviewer key. Fresh publication checks require that grant
+and its owner to retain the required rights. See [Applications](Applications.md)
+and the independent [application API](ApplicationProtocol.md).

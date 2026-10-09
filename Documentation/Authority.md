@@ -305,8 +305,8 @@ the service immune to denial of service. Deployment ingress and voter storage
 quotas remain necessary. Logs contain readiness and static operational failures,
 not invitation secrets or request bodies. There is no third-party telemetry.
 
-The request wire protocol remains version 1. Version 0.5.0 brokers accept state
-schemas 1 through 6. Pages and version-2 consent use at least schema 2; successful
+The request wire protocol remains version 1. Version 0.6.0 brokers accept state
+schemas 1 through 7. Pages and version-2 consent use at least schema 2; successful
 Federation commands use at least schema 4, retaining monotonic author sharing
 generations and withdrawal tombstones. Missing feature maps default to empty
 for earlier schemas. Mail introduces schema 5. Every successful normal mail
@@ -338,6 +338,13 @@ mail and other feature commands preserve schema 6. Disabling services does not
 make a schema-6 namespace readable by older binaries. Native SSH key histories
 remain reserved after withdrawal, expiry or revocation, including invitations
 that existed before those keys acquired their scoped role.
+
+Applications introduce schema 7. Upgrade every broker to 0.6.0 or a qualified
+compatible release before any successful application command, including get and
+list. Earlier brokers cannot read schema 7. Applications use existing member
+approval and distinct request keys; no new authority signer is required. Other
+feature commands preserve schema 7. See [Applications](Applications.md) for
+record bounds, key separation and the strict reclamation clock floor.
 
 Extend broker etcd roles to the required Pages and Federation prefixes before
 enabling those respective features, and configure the dedicated Federation signer

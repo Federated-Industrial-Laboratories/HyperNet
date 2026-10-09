@@ -43,6 +43,8 @@ Unsupported hosting profiles fail closed.
   and durable bounded storage.
 - [SSH services](Documentation/SshServices.md): separate grants and supervised
   OpenSSH endpoints.
+- [Scoped applications](Documentation/Applications.md): distinct page identities,
+  bounded delegation and explicit review policy.
 - [Authority protocol](Documentation/Protocol.md): independent client interface.
 - [Requirements](Documentation/Requirements.md): the broader product scope.
 
@@ -59,6 +61,9 @@ storage. Encrypted file transfers require explicit recipient acceptance and
 selected storage. Separately consented OpenSSH services run a fixed command in
 an isolated account; current grants supervise their whole process lifetime.
 Arbitrary full-shell services are outside this initial profile.
+Scoped applications use independent request identities for selected native Pages.
+Optional review delegation binds exact resources, expiry and operator policy;
+manual review remains the default.
 
 The implementation is not yet a qualified production Internet release. The
 replication profile assumes trusted administrators and crash faults; it does not
