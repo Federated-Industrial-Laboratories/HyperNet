@@ -421,6 +421,11 @@ pub fn verify_bundle(
         return Err("InvalidPageProof");
     };
     validate_content(page_id, namespace, audience, profile, digest, body)?;
+    if !markup::parse(body)?.forms.is_empty()
+        && encoded(bundle, MAX_BUNDLE)?.len() > markup::forms::MAX_BUNDLE_BYTES
+    {
+        return Err("FormBundleTooLarge");
+    }
     if page_id != &descriptor.page_id
         || namespace != &descriptor.namespace
         || audience != &descriptor.audience
@@ -1321,5 +1326,45 @@ mod tests {
             authority::require(&state, &public(3), ADMIN, 100).err(),
             Some("ServiceIdentity")
         );
+    }
+    #[test]
+    fn form_publication_bounds_exact_signed_bundle_without_mutating_pending_state() {
+        let (mut state, mut blobs) = initial();
+        let form = format!(
+            "@Form {{\"id\":\"Reply\",\"label\":\"Reply\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"{}\",\"owner\":\"{}\"}}\n@Field {{\"id\":\"Answer\",\"label\":\"Answer\",\"kind\":\"Text\",\"maxBytes\":128}}\n@Submit {{\"label\":\"Review\"}}\n@End\n",
+            "01".repeat(32),
+            "02".repeat(32)
+        );
+        let text = format!(": {}\n", "x".repeat(490)).repeat(29);
+        let oversized = format!("{PROFILE}\n# Form\n{form}{text}");
+        markup::validate(&oversized).unwrap();
+        let draft = submit(&state, 31, 7, 0, &oversized);
+        perform(&mut state, &mut blobs, &draft).unwrap();
+        let approval = review(&state, 32, 7, "Approve");
+        let before = serde_json::to_vec(&state).unwrap();
+        assert_eq!(
+            perform(&mut state, &mut blobs, &approval).err(),
+            Some("FormBundleTooLarge")
+        );
+        assert_eq!(serde_json::to_vec(&state).unwrap(), before);
+        assert_eq!(blobs.len(), 1);
+        let ordinary = format!("{PROFILE}\n# Ordinary\n{text}");
+        let draft = submit(&state, 33, 8, 0, &ordinary);
+        perform(&mut state, &mut blobs, &draft).unwrap();
+        let approval = review(&state, 34, 8, "Approve");
+        perform(&mut state, &mut blobs, &approval).unwrap();
+        assert!(
+            state.pages[&hex::encode([8; 16])]
+                .published
+                .as_ref()
+                .unwrap()
+                .bytes
+                > markup::forms::MAX_BUNDLE_BYTES as u64
+        );
+        let small = format!("{PROFILE}\n# Form\n{form}");
+        let draft = submit(&state, 35, 9, 0, &small);
+        perform(&mut state, &mut blobs, &draft).unwrap();
+        let approval = review(&state, 36, 9, "Approve");
+        perform(&mut state, &mut blobs, &approval).unwrap();
     }
 }

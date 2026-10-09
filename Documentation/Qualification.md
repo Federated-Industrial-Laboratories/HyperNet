@@ -65,3 +65,11 @@ explicitly accepted treaties, exact identity matching, refresh and shared Back
 history. Both workflows use synthetic content and remove their own resources.
 The browser remains a Suite feature; these tests add no frontend dependency to
 the daemon or authority protocol.
+
+`Tests/FormsWorkflow.py` uses the same arguments and an installed Suite package
+with its `Tools/FormsConsumer.py`. It adds two confined mail stores and separate
+Pages and mail credentials. It checks approved form publication, verified
+contacts, independent receiver acceptance, typed browser input, separate send
+confirmation, cancellation, partial delivery, restart, immutable retry and
+duplicate intake. The browser check uses a pseudoterminal and restores its
+attributes. Its fixtures are synthetic and are removed on exit.

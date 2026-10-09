@@ -2,9 +2,12 @@
 // Parse a bounded inert document; source bytes remain the publication identity.
 #[path = "PageComponents.rs"]
 mod components;
+#[path = "FormSchema.rs"]
+pub mod forms;
 use components::{Action, Directive};
 pub use components::{Colour, ScrollDirection};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -33,6 +36,9 @@ pub enum TextKind {
 }
 #[derive(Clone, Debug, Serialize)]
 pub enum PageAction {
+    Submit {
+        form: String,
+    },
     Navigate {
         link: usize,
     },
@@ -46,6 +52,14 @@ pub enum PageAction {
 }
 #[derive(Clone, Debug, Serialize)]
 pub enum Kind {
+    Form {
+        form: String,
+        label: String,
+    },
+    Field {
+        form: String,
+        field: forms::Field,
+    },
     Text {
         text: String,
         kind: TextKind,
@@ -95,6 +109,7 @@ pub struct Document {
     pub lines: Vec<String>,
     pub links: Vec<Link>,
     pub nodes: Vec<Node>,
+    pub forms: Vec<forms::Form>,
 }
 
 fn forbidden(ch: char) -> bool {
@@ -169,13 +184,43 @@ fn navigation(
     });
     Ok(PageAction::Navigate { link })
 }
-fn directive(line: &str, key: usize, links: &mut Vec<Link>) -> Result<Node, &'static str> {
+fn directive(
+    line: &str,
+    key: usize,
+    links: &mut Vec<Link>,
+    forms: &mut Vec<forms::Form>,
+    active_form: Option<&str>,
+) -> Result<Node, &'static str> {
     let (name, attributes) = line
         .strip_prefix('@')
         .ok_or("UnknownPageConstruct")?
         .split_once(' ')
         .ok_or("InvalidComponentJson")?;
     let mut value = components::strict_json(attributes)?;
+    if name == "Field" {
+        let form = active_form.ok_or("FieldOutsideForm")?;
+        let field = forms::field(value)?;
+        let schema = forms
+            .iter_mut()
+            .find(|entry| entry.id == form)
+            .ok_or("UnknownForm")?;
+        if schema.fields.len() >= forms::MAX_FIELDS
+            || schema.fields.iter().any(|entry| entry.id == field.id)
+        {
+            return Err("InvalidFormFields");
+        }
+        schema.fields.push(field.clone());
+        return Ok(Node {
+            key,
+            id: None,
+            style: Style::default(),
+            kind: Kind::Field {
+                form: form.into(),
+                field,
+            },
+            children: Vec::new(),
+        });
+    }
     let object = value.as_object_mut().ok_or("InvalidComponentJson")?;
     if object.contains_key("component") {
         return Err("UnknownComponentAttribute");
@@ -191,6 +236,45 @@ fn directive(line: &str, key: usize, links: &mut Vec<Link>) -> Result<Node, &'st
         children: Vec::new(),
     };
     node.kind = match props {
+        Directive::Form {
+            id,
+            label,
+            profile,
+            recipient,
+            owner,
+        } => {
+            if active_form.is_some() || forms.len() >= forms::MAX_FORMS {
+                return Err("InvalidFormNestingOrCount");
+            }
+            text(&label, 128, false)?;
+            if !namespace(&id)
+                || profile != forms::PROFILE
+                || !hex(&recipient, 64)
+                || !hex(&owner, 64)
+            {
+                return Err("InvalidFormDestination");
+            }
+            forms.push(forms::Form {
+                id: id.clone(),
+                label: label.clone(),
+                profile,
+                recipient,
+                owner,
+                schema_digest: String::new(),
+                fields: Vec::new(),
+            });
+            node.id = Some(id.clone());
+            Kind::Form { form: id, label }
+        }
+        Directive::Submit { label } => {
+            text(&label, 128, false)?;
+            Kind::Button {
+                label,
+                action: PageAction::Submit {
+                    form: active_form.ok_or("SubmitOutsideForm")?.into(),
+                },
+            }
+        }
         Directive::Column {
             id,
             colour,
@@ -317,7 +401,11 @@ fn directive(line: &str, key: usize, links: &mut Vec<Link>) -> Result<Node, &'st
 fn container(node: &Node) -> bool {
     matches!(
         node.kind,
-        Kind::Column { .. } | Kind::Row { .. } | Kind::Panel { .. } | Kind::ScrollBox { .. }
+        Kind::Column { .. }
+            | Kind::Row { .. }
+            | Kind::Panel { .. }
+            | Kind::ScrollBox { .. }
+            | Kind::Form { .. }
     )
 }
 fn append(node: Node, stack: &mut [Node], roots: &mut Vec<Node>) -> Result<(), &'static str> {
@@ -331,9 +419,21 @@ fn append(node: Node, stack: &mut [Node], roots: &mut Vec<Node>) -> Result<(), &
     }
     Ok(())
 }
-fn plain(nodes: &[Node], links: &[Link], output: &mut Vec<String>) {
+fn plain(nodes: &[Node], links: &[Link], forms: &[forms::Form], output: &mut Vec<String>) {
     for node in nodes {
         match &node.kind {
+            Kind::Form { form, label } => {
+                let schema = forms
+                    .iter()
+                    .find(|entry| &entry.id == form)
+                    .expect("parsed form");
+                output.push(format!("[ Form {label} ({form}) ]"));
+                output.push(format!("Profile: {}", schema.profile));
+                output.push(format!("Recipient: {}", schema.recipient));
+                output.push(format!("Owner: {}", schema.owner));
+                output.push(format!("Schema: {}", schema.schema_digest));
+            }
+            Kind::Field { field, .. } => output.push(forms::field_description(field)),
             Kind::Text { text, kind } => output.push(format!(
                 "{}{text}",
                 match kind {
@@ -356,6 +456,9 @@ fn plain(nodes: &[Node], links: &[Link], output: &mut Vec<String>) {
                 maximum,
             } => output.push(format!("{label}: {value}/{maximum}")),
             Kind::Button { label, action } => match action {
+                PageAction::Submit { form } => {
+                    output.push(format!("[ {label} ] Review form {form} before sending"))
+                }
                 PageAction::Navigate { link } => {
                     output.push(format!("[{}] {label}", link + 1));
                     output.push(format!("    {}", links[*link].target));
@@ -367,7 +470,7 @@ fn plain(nodes: &[Node], links: &[Link], output: &mut Vec<String>) {
             },
             Kind::Column { .. } | Kind::Row { .. } => {}
         }
-        plain(&node.children, links, output);
+        plain(&node.children, links, forms, output);
     }
 }
 pub fn parse(body: &str) -> Result<Document, &'static str> {
@@ -390,11 +493,43 @@ pub fn parse(body: &str) -> Result<Document, &'static str> {
     let mut references = BTreeSet::new();
     let mut count = 0;
     let mut controls = 0;
+    let mut forms: Vec<forms::Form> = Vec::new();
+    let mut form_start = None;
+    let mut offset = lines[0].len() + lines[1].len() + 2;
     for line in lines.iter().skip(2) {
+        let line_start = offset;
+        offset += line.len() + 1;
         if *line == "@End" {
             let node = stack.pop().ok_or("UnmatchedComponentEnd")?;
             if node.children.is_empty() {
                 return Err("EmptyPageContainer");
+            }
+            if let Kind::Form { form, .. } = &node.kind {
+                let schema = forms
+                    .iter_mut()
+                    .find(|entry| &entry.id == form)
+                    .ok_or("UnknownForm")?;
+                if schema.fields.is_empty()
+                    || node
+                        .children
+                        .iter()
+                        .filter(|node| {
+                            matches!(
+                                node.kind,
+                                Kind::Button {
+                                    action: PageAction::Submit { .. },
+                                    ..
+                                }
+                            )
+                        })
+                        .count()
+                        != 1
+                {
+                    return Err("InvalidFormFieldsOrSubmit");
+                }
+                schema.schema_digest = hex::encode(Sha256::digest(
+                    &body.as_bytes()[form_start.take().ok_or("InvalidFormSpan")?..offset],
+                ));
             }
             append(node, &mut stack, &mut roots)?;
             continue;
@@ -403,8 +538,12 @@ pub fn parse(body: &str) -> Result<Document, &'static str> {
         if count > MAX_NODES || stack.len() >= MAX_DEPTH {
             return Err("PageStructureLimit");
         }
+        let active_form = stack.last().and_then(|node| match &node.kind {
+            Kind::Form { form, .. } => Some(form.as_str()),
+            _ => None,
+        });
         let node = if line.starts_with('@') {
-            directive(line, count - 1, &mut links)?
+            directive(line, count - 1, &mut links, &mut forms, active_form)?
         } else if let Some(link) = line.strip_prefix("=> ") {
             let (address, label) = link.split_once(' ').ok_or("InvalidPageLink")?;
             text(label, 128, false)?;
@@ -454,6 +593,21 @@ pub fn parse(body: &str) -> Result<Document, &'static str> {
                 children: Vec::new(),
             }
         };
+        if active_form.is_some()
+            && !matches!(
+                node.kind,
+                Kind::Field { .. }
+                    | Kind::Button {
+                        action: PageAction::Submit { .. },
+                        ..
+                    }
+            )
+        {
+            return Err("InvalidFormChild");
+        }
+        if matches!(node.kind, Kind::Form { .. }) {
+            form_start = Some(line_start);
+        }
         if let Some(id) = &node.id
             && ids
                 .insert(id.clone(), matches!(node.kind, Kind::ScrollBox { .. }))
@@ -461,7 +615,10 @@ pub fn parse(body: &str) -> Result<Document, &'static str> {
         {
             return Err("DuplicateComponentId");
         }
-        if matches!(node.kind, Kind::ScrollBox { .. } | Kind::Button { .. }) {
+        if matches!(
+            node.kind,
+            Kind::ScrollBox { .. } | Kind::Button { .. } | Kind::Field { .. }
+        ) {
             controls += 1;
             if controls > 64 {
                 return Err("TooManyPageControls");
@@ -490,12 +647,13 @@ pub fn parse(body: &str) -> Result<Document, &'static str> {
         return Err("UnknownScrollBox");
     }
     let mut lines = vec![format!("# {title}")];
-    plain(&roots, &links, &mut lines);
+    plain(&roots, &links, &forms, &mut lines);
     Ok(Document {
         title: title.into(),
         lines,
         links,
         nodes: roots,
+        forms,
     })
 }
 pub fn validate(body: &str) -> Result<(), &'static str> {
@@ -543,5 +701,44 @@ mod tests {
             .is_err()
         );
         assert!(validate_profile("HyperNetPage/1", &format!("{PROFILE}\n# Title\n")).is_err());
+    }
+    #[test]
+    fn form_span_and_plain_review_bind_every_declared_semantic() {
+        let form = format!(
+            "@Form {{\"id\":\"Feedback\",\"label\":\"Feedback\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"{}\",\"owner\":\"{}\"}}\n@Field {{\"id\":\"Pick\",\"label\":\"Pick one\",\"required\":true,\"kind\":\"Choice\",\"options\":[\"Yes\",\"No\"]}}\n@Submit {{\"label\":\"Review answer\"}}\n@End\n",
+            "01".repeat(32),
+            "02".repeat(32)
+        );
+        let source = format!("{PROFILE}\n# Feedback\n{form}: After the form.\n");
+        let document = parse(&source).unwrap();
+        assert_eq!(document.forms.len(), 1);
+        assert_eq!(
+            document.forms[0].schema_digest,
+            hex::encode(Sha256::digest(&form))
+        );
+        let outside = parse(&source.replace("After the form.", "Different outside text.")).unwrap();
+        assert_eq!(
+            document.forms[0].schema_digest,
+            outside.forms[0].schema_digest
+        );
+        let inside = parse(&source.replace("Review answer", "Review response")).unwrap();
+        assert_ne!(
+            document.forms[0].schema_digest,
+            inside.forms[0].schema_digest
+        );
+        let plain = document.lines.join("\n");
+        for required in [
+            "HyperNetFormMail/1",
+            &"01".repeat(32),
+            &"02".repeat(32),
+            "Pick one [Pick]",
+            "Choice",
+            "Yes",
+            "No",
+            "required",
+            "Review answer",
+        ] {
+            assert!(plain.contains(required), "{required}");
+        }
     }
 }

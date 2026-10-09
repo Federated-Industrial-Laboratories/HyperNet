@@ -57,6 +57,16 @@ fn columns() -> u16 {
     rename_all_fields = "camelCase"
 )]
 pub enum Directive {
+    Form {
+        id: String,
+        label: String,
+        profile: String,
+        recipient: String,
+        owner: String,
+    },
+    Submit {
+        label: String,
+    },
     Column {
         id: Option<String>,
         colour: Option<Colour>,
