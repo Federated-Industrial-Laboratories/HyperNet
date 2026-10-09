@@ -84,7 +84,7 @@ commandDigest, imageDigest, authorityEndpoint, authorityAddress, authoritySigner
 certificateDigest (SHA256 of mutual TLS leaf DER), memoryBytes, pids, cpuQuota,
 cpuPeriod, stateBytes, maximumSessionSeconds and expires. Limits match the
 transfer hosting profile: 128 MiB-8 GiB memory, 32-512 PIDs, CPU period 100000,
-quota 1000-800000, state 8-64 MiB in 4096-byte units. The separate fixed relay
+quota 1000-800000, state 9-64 MiB in 4096-byte units. The separate fixed relay
 allowance is 128 MiB, 32 PIDs, 0.5 CPU and 8 MiB volatile storage.
 
 ```sh

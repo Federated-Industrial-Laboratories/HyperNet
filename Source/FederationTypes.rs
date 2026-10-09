@@ -16,6 +16,11 @@ pub struct FederationTreaty {
     pub source_namespace: String,
     pub destination_namespace: String,
     pub service: String,
+    pub media_profiles: Vec<String>,
+    pub media_source_hosts: Vec<String>,
+    pub media_destination_hosts: Vec<String>,
+    pub media_max_bytes: u64,
+    pub media_required_copies: u16,
     pub profile: String,
     pub expires: u64,
 }

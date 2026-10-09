@@ -97,6 +97,7 @@ pub struct Store {
     federation_signing_key: Option<SigningKey>,
     mail_signing_key: Option<SigningKey>,
     service_signing_key: Option<SigningKey>,
+    page_media_signing_key: Option<SigningKey>,
 }
 
 fn load_signing_key(path: &Option<PathBuf>) -> Result<Option<SigningKey>> {
@@ -130,6 +131,21 @@ impl Store {
         let federation_signing_key = load_signing_key(&config.federation_signing_key)?;
         let mail_signing_key = load_signing_key(&config.mail_signing_key)?;
         let service_signing_key = load_signing_key(&config.service_signing_key)?;
+        let page_media_signing_key = load_signing_key(&config.page_media_signing_key)?;
+        if let Some(media) = &page_media_signing_key {
+            for other in [
+                &federation_signing_key,
+                &mail_signing_key,
+                &service_signing_key,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if media.verifying_key() == other.verifying_key() {
+                    bail!("Page media requires a dedicated signing identity");
+                }
+            }
+        }
         if let Some(service) = &service_signing_key {
             for key in [&mail_signing_key, &federation_signing_key]
                 .into_iter()
@@ -244,6 +260,7 @@ impl Store {
             federation_signing_key,
             mail_signing_key,
             service_signing_key,
+            page_media_signing_key,
         })
     }
 
@@ -277,6 +294,7 @@ impl Store {
             &self.federation_signing_key,
             &self.mail_signing_key,
             &self.service_signing_key,
+            &self.page_media_signing_key,
         ]
         .iter()
         .any(|signer| {
@@ -360,6 +378,7 @@ impl Store {
             &self.federation_signing_key,
             &self.mail_signing_key,
             &self.service_signing_key,
+            &self.page_media_signing_key,
         ]
         .into_iter()
         .flatten()
@@ -386,6 +405,7 @@ impl Store {
         for attempt in 0..self.clients.len() {
             let operation = async {
                 if mail_authority::read_only(&request.request.command)
+                    || crate::media_authority::read_only(&request.request.command)
                     || crate::transfer_authority::read_only(&request.request.command)
                     || crate::ssh_authority::read_only(&request.request.command)
                 {
@@ -440,6 +460,17 @@ impl Store {
         }
         if let Err(code) = crate::application_authority::admit(&state, request) {
             return Ok(Reply::error(code));
+        }
+        if crate::media_authority::read_only(&request.request.command) {
+            return Ok(crate::media_authority::authorise(
+                &state,
+                request,
+                certificate,
+                current,
+                header.revision(),
+                self.page_media_signing_key.as_ref(),
+            )
+            .unwrap_or_else(Reply::error));
         }
         if crate::transfer_authority::read_only(&request.request.command) {
             return Ok(crate::transfer_authority::authorise(
@@ -515,6 +546,7 @@ impl Store {
                     &self.federation_signing_key,
                     &self.mail_signing_key,
                     &self.service_signing_key,
+                    &self.page_media_signing_key,
                 ]
                 .into_iter()
                 .flatten()
@@ -534,6 +566,7 @@ impl Store {
                     &self.federation_signing_key,
                     &self.mail_signing_key,
                     &self.service_signing_key,
+                    &self.page_media_signing_key,
                 ]
                 .into_iter()
                 .flatten()
@@ -552,6 +585,7 @@ impl Store {
                     &self.federation_signing_key,
                     &self.mail_signing_key,
                     &self.service_signing_key,
+                    &self.page_media_signing_key,
                 ]
                 .into_iter()
                 .flatten()
@@ -587,6 +621,7 @@ impl Store {
                     &self.federation_signing_key,
                     &self.mail_signing_key,
                     &self.service_signing_key,
+                    &self.page_media_signing_key,
                 ]
                 .into_iter()
                 .flatten()
@@ -706,6 +741,18 @@ impl Store {
                     operations.push(TxnOp::put(format!("{prefix}{key}"), value, None));
                 }
                 change.reply
+            } else if crate::media_authority::handles(&request.request.command) {
+                match crate::media_authority::apply(
+                    &mut state,
+                    request,
+                    certificate,
+                    now,
+                    header.revision(),
+                    self.page_media_signing_key.as_ref(),
+                ) {
+                    Ok(reply) => reply,
+                    Err(code) => return Ok(Reply::error(code)),
+                }
             } else if crate::transfer_authority::handles(&request.request.command) {
                 match crate::transfer_authority::apply(
                     &mut state,

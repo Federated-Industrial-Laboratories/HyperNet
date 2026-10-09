@@ -15,6 +15,7 @@ pub struct PolicyInput {
 }
 
 unsafe extern "C" {
+    fn HyperNetMediaChunk(total: u64, offset: u64, count: u64) -> std::ffi::c_uint;
     fn HyperNetEffectivePolicy(
         requested: u64,
         network: u64,
@@ -46,6 +47,10 @@ pub fn effective(input: PolicyInput) -> u64 {
             input.host_active.into(),
         )
     }
+}
+
+pub fn media_chunk(total: u64, offset: u64, count: u64) -> bool {
+    unsafe { HyperNetMediaChunk(total, offset, count) == 1 }
 }
 
 #[cfg(test)]

@@ -13,4 +13,17 @@ package body Policy with SPARK_Mode is
       end if;
       return Requested and Network and User and Host and Application;
    end Effective;
+   function Media_Chunk (Total, Offset, Count : Mask) return Flag is
+   begin
+      if Total = 0 or else Total > 786432 or else Offset >= Total
+        or else Offset mod 32768 /= 0 or else Count = 0
+        or else Count > 32768 or else Count > Total - Offset
+      then
+         return 0;
+      end if;
+      if Count /= Mask'Min (32768, Total - Offset) then
+         return 0;
+      end if;
+      return 1;
+   end Media_Chunk;
 end Policy;

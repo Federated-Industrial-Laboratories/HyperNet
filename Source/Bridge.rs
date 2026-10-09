@@ -18,6 +18,8 @@ use std::{
 };
 use zeroize::Zeroize;
 
+#[path = "BridgeMedia.rs"]
+mod media;
 #[path = "BridgeSync.rs"]
 mod synchronisation;
 
@@ -36,11 +38,28 @@ pub struct BridgeEndpoint {
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BridgeMediaEndpoint {
+    pub network: String,
+    pub host_key: String,
+    pub endpoint: String,
+    pub address: SocketAddr,
+    pub ca_digest: String,
+    pub certificate_digest: String,
+    pub authority_signer: String,
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BridgeConsent {
     pub version: u32,
     pub service: String,
     pub agreement_id: String,
     pub treaty_digest: String,
+    pub media_profiles: Vec<String>,
+    pub media_source_hosts: Vec<String>,
+    pub media_destination_hosts: Vec<String>,
+    pub media_max_bytes: u64,
+    pub media_required_copies: u16,
+    pub media: Vec<BridgeMediaEndpoint>,
     pub source_namespace: String,
     pub destination_namespace: String,
     pub source: BridgeEndpoint,
@@ -106,9 +125,46 @@ pub fn verify_bridge_consent(
     ensure!(payload.len() <= 8192, "bridge consent payload is too large");
     let consent: BridgeConsent = serde_json::from_slice(&payload)?;
     ensure!(
-        consent.version == 1 && consent.service == "FederationPages",
+        consent.version == 2 && consent.service == "FederationPages",
         "unsupported bridge consent"
     );
+    if consent.media.len()
+        != consent.media_source_hosts.len() + consent.media_destination_hosts.len()
+        || consent.media.len() > 6
+    {
+        anyhow::bail!("media routes differ from consented hosts");
+    }
+    let mut media_ids = BTreeSet::new();
+    for media in &consent.media {
+        for key in [
+            &media.network,
+            &media.host_key,
+            &media.ca_digest,
+            &media.certificate_digest,
+            &media.authority_signer,
+        ] {
+            fixed_hex::<32>(key)?;
+        }
+        let hosts = if media.network == consent.source.network {
+            &consent.media_source_hosts
+        } else if media.network == consent.destination.network {
+            &consent.media_destination_hosts
+        } else {
+            anyhow::bail!("media route outside federation");
+        };
+        ensure!(
+            hosts.contains(&media.host_key) && media_ids.insert((&media.network, &media.host_key)),
+            "duplicate or unconsented media route"
+        );
+        endpoint_url(&BridgeEndpoint {
+            network: media.network.clone(),
+            device_key: media.host_key.clone(),
+            authority_key: media.authority_signer.clone(),
+            authority_endpoint: media.endpoint.clone(),
+            authority_address: media.address,
+            ca_certificate_digest: media.ca_digest.clone(),
+        })?;
+    }
     fixed_hex::<16>(&consent.agreement_id)?;
     fixed_hex::<32>(&consent.treaty_digest)?;
     ensure!(
@@ -137,7 +193,7 @@ pub fn verify_bridge_consent(
             .any(|endpoint| endpoint.network == network && endpoint.device_key == device),
         "bridge consent identity mismatch"
     );
-    let mut message = b"HyperNet/BridgeConsent/1\0".to_vec();
+    let mut message = b"HyperNet/BridgeConsent/2\0".to_vec();
     message.extend_from_slice(&payload);
     for (endpoint, signature) in [
         (&consent.source, &signed.source_signature),
@@ -183,6 +239,7 @@ struct Configuration {
     state_directory: PathBuf,
     source: ConnectionConfiguration,
     destination: ConnectionConfiguration,
+    media: Vec<media::Configuration>,
 }
 
 #[derive(Deserialize)]
@@ -207,6 +264,7 @@ pub struct BridgeConfig {
     profile: String,
     source: Credentials,
     destination: Credentials,
+    media: Vec<media::Route>,
 }
 
 impl BridgeConfig {
@@ -219,6 +277,7 @@ impl BridgeConfig {
             self.destination.configuration.relay_address.port(),
         ])
         .into_iter()
+        .chain(self.media.iter().map(|m| m.relay.port()))
         .collect()
     }
 }
@@ -316,14 +375,38 @@ pub fn load(path: &Path) -> Result<BridgeConfig> {
             && treaty.destination_authority_key == consent.destination.authority_key
             && treaty.source_namespace == consent.source_namespace
             && treaty.destination_namespace == consent.destination_namespace
+            && consent.media_profiles == treaty.media_profiles
+            && consent.media_source_hosts == treaty.media_source_hosts
+            && consent.media_destination_hosts == treaty.media_destination_hosts
+            && consent.media_max_bytes == treaty.media_max_bytes
+            && consent.media_required_copies == treaty.media_required_copies
             && consent.expires <= treaty.expires,
         "bridge consent does not match the exact treaty"
     );
+    ensure!(
+        raw.media.len() == consent.media.len(),
+        "missing or extra media transport route"
+    );
+    let mut seen = BTreeSet::new();
+    let mut media = Vec::new();
+    for raw in raw.media {
+        ensure!(
+            seen.insert((raw.network.clone(), raw.host_key.clone())),
+            "duplicate media route"
+        );
+        let endpoint = consent
+            .media
+            .iter()
+            .find(|e| e.network == raw.network && e.host_key == raw.host_key)
+            .context("unconsented media route")?;
+        media.push(media::Route::new(raw, endpoint.clone())?);
+    }
     Ok(BridgeConfig {
         state_directory: raw.state_directory,
         consent,
         treaty,
         profile: hex::encode(Sha256::digest(document)),
+        media,
         source,
         destination,
     })
@@ -465,7 +548,7 @@ mod tests {
             )
         };
         json!({
-            "version":1,"service":"FederationPages","agreementId":hex::encode([5;16]),
+            "version":2,"service":"FederationPages","mediaProfiles":[],"mediaSourceHosts":[],"mediaDestinationHosts":[],"mediaMaxBytes":0,"mediaRequiredCopies":0,"media":[],"agreementId":hex::encode([5;16]),
             "treatyDigest":hex::encode([6;32]),"sourceNamespace":"Public","destinationNamespace":"Guests",
             "source":{"network":hex::encode([7;32]),"deviceKey":public(1),"authorityKey":public(3),
                 "authorityEndpoint":"https://source.example:8443/","authorityAddress":"192.0.2.1:8443",
@@ -479,7 +562,7 @@ mod tests {
 
     fn document(value: &Value) -> Vec<u8> {
         let payload = serde_json::to_vec(value).unwrap();
-        let mut message = b"HyperNet/BridgeConsent/1\0".to_vec();
+        let mut message = b"HyperNet/BridgeConsent/2\0".to_vec();
         message.extend_from_slice(&payload);
         let signature = |seed| {
             hex::encode(

@@ -47,7 +47,7 @@ class FederationWorkflow:
             domain.bridge = domain.client('Bridge', transport=True)
             domain.admit('Bridge', domain.bridge, 9)
         self.agreement = secrets.token_hex(16)
-        self.treaty = dict(version=1, agreementId=self.agreement,
+        self.treaty = dict(version=2, mediaProfiles=[], mediaSourceHosts=[], mediaDestinationHosts=[], mediaMaxBytes=0, mediaRequiredCopies=0, agreementId=self.agreement,
             sourceNetwork=s.network, destinationNetwork=d.network,
             sourceAuthorityKey=s.signer, destinationAuthorityKey=d.signer,
             sourceBridgeKey=s.bridge, destinationBridgeKey=d.bridge,
@@ -93,7 +93,7 @@ class FederationWorkflow:
                 authorityEndpoint='https://authority.example:8443',
                 authorityAddress=domain.broker_address+':8443',
                 caCertificateDigest=hashlib.sha256((domain.pki/'NetworkCa.pem').read_bytes()).hexdigest())
-        self.spec = dict(version=1, service='FederationPages', agreementId=self.agreement,
+        self.spec = dict(version=2, service='FederationPages', mediaProfiles=[], mediaSourceHosts=[], mediaDestinationHosts=[], mediaMaxBytes=0, mediaRequiredCopies=0, media=[], agreementId=self.agreement,
             treatyDigest=self.digest, sourceNamespace='News', destinationNamespace='PartnerNews',
             source=endpoint(s), destination=endpoint(d), expires=int(time.time())+1200,
             memoryBytes=268435456,pids=64,cpuQuota=100000,cpuPeriod=100000,stateBytes=16777216)
@@ -109,7 +109,7 @@ class FederationWorkflow:
             '--source-identity',s.root/'Bridge'/'Identity.json','--destination-identity',d.root/'Bridge'/'Identity.json',
             '--output',consent)
         self.consent_digest = json.loads(result.stdout)['profile']
-        config = dict(consentFile='/Config/Consent.json',treatyFile='/Config/Treaty.json',stateDirectory='/State')
+        config = dict(media=[],consentFile='/Config/Consent.json',treatyFile='/Config/Treaty.json',stateDirectory='/State')
         for role, domain in [('Source',s),('Destination',d)]:
             for origin, suffix in [(domain.root/'Bridge'/'Identity.json','Identity.json'),
                 (domain.pki/'NetworkCa.pem','Ca.pem'),(domain.pki/'Host.pem','Client.pem'),(domain.pki/'HostKey.pem','ClientKey.pem')]:
@@ -180,7 +180,7 @@ class FederationWorkflow:
         if self.profile and (self.profile/'Control.json').exists():
             if remove:
                 control=json.loads((self.profile/'Control.json').read_text())
-                for name in [control['name'],control['name']+'SourceGate',control['name']+'DestinationGate']:
+                for name in [control['name'],control['name']+'SourceGate',control['name']+'DestinationGate'] + [control['name']+'MediaGate'+str(i) for i in range(len(control['consent'].get('media', [])))]:
                     self.source.run('podman','rm','-f',name,good=False,timeout=30)
                 self.source.run('podman','network','rm',control['network'],good=False)
                 self.profile=None

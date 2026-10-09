@@ -48,7 +48,7 @@ class Packages(unittest.TestCase):
         self.manifest = {'format': 1, 'product': 'HyperNet', 'version': '0.7.5',
                          'architecture': Bundle.architecture(), 'metadata': {
                              'imageId': self.image, 'imageArchive': 'Images/HyperNetOci.tar',
-                             'authoritySchema': 8,
+                             'authoritySchema': 9,
                              'binaries': {'HyperNet': '2' * 64, 'HyperNetGate': '3' * 64},
                              'prerequisites': ['Synthetic package contract fixture']},
                          'files': [{'path': name, 'mode': 0o700 if name.startswith('Tools/') else 0o600,
@@ -192,14 +192,14 @@ class Packages(unittest.TestCase):
 
     def test_upgrade_keeps_schema_and_stopped_container_boundaries(self):
         metadata = self.manifest['metadata']
-        Upgrade.compatible(metadata, 8)
-        for schema in (0, 7, 9, 99):
+        Upgrade.compatible(metadata, 9)
+        for schema in (0, 7, 8, 99):
             with self.assertRaises(ValueError):
                 Upgrade.compatible(metadata, schema)
         for maximum in (6, 99):
             changed = dict(metadata, authoritySchema=maximum)
             with self.assertRaises(ValueError):
-                Upgrade.compatible(changed, 8)
+                Upgrade.compatible(changed, 9)
         with patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)):
             with self.assertRaises(ValueError):
                 Upgrade.stopped('HyperNetFixture', 'Authority')
@@ -208,7 +208,7 @@ class Packages(unittest.TestCase):
                 Upgrade.stopped('HyperNetFixture', 'Host')
         with patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 1)) as calls:
             Upgrade.stopped('HyperNetFixture', 'Bridge')
-            self.assertEqual(calls.call_count, 3)
+            self.assertEqual(calls.call_count, 9)
 
     def test_inspected_image_accepts_only_exact_bare_or_prefixed_sha256(self):
         value = {'Os': 'linux', 'Architecture': Bundle.image_architecture(Bundle.architecture())}
@@ -234,7 +234,7 @@ class Packages(unittest.TestCase):
         (state / 'Canary').write_bytes(b'Unchanged persistent state')
         args = argparse.Namespace(kind='Authority', profile=profile, installation=self.directory / 'Installed',
                                   public_key=Path(str(self.key) + '.pub'), ssh_keygen='/usr/bin/ssh-keygen',
-                                  state_schema=8, expected_image=old_image)
+                                  state_schema=9, expected_image=old_image)
         with patch.object(Bundle, 'installed_manifest', return_value=(self.manifest, {}, set())), \
                 patch.object(Bundle, 'image_matches'), patch.object(Upgrade, 'stopped') as stopped:
             result = Upgrade.switch(args)

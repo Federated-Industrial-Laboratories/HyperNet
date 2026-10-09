@@ -5,12 +5,17 @@ signed consent. The application never receives the member's private key and
 never becomes a member. Independent clients use the same TLS request endpoint
 and envelope as HyperNetSuite; the daemon has no client or model dependency.
 
-The first profile delegates native Pages only. A grant explicitly intersects
+The profile delegates native Pages and separately consented static media. A grant explicitly intersects
 permissions, one to eight exact namespaces and optionally one to sixteen page
 identifiers. There are no wildcards, namespace inheritance, updates or
 subdelegation. A changed grant requires a new application key. Mail's existing
 separate device grants remain independent. Application grants confer no mail,
 transfer, SSH, hosting, replica, imported-page, federation or membership access.
+
+Media bytes require separate `MediaRead`, `MediaSubmit` or `MediaInspect` rights.
+Adding images to a page does not expand a text review or model disclosure grant.
+`MediaInspect` requires a current administrator owner and explicit acknowledgement
+after independent byte validation and static inspection.
 
 Manual page review remains the default. `ReviewInspect` permits queue inspection.
 `ReviewDecide` additionally permits exact pending approval or rejection and
@@ -25,7 +30,7 @@ and model tools, and give it the smallest useful namespace and expiry.
 
 ## Provisioning and use
 
-1. Provision every broker under the current authority state-8 contract. Preserve
+1. Provision every broker under the current authority state-9 contract. Preserve
    authority floors, voter credentials and retained security history. Application
    commands preserve that exact schema; no earlier state format is accepted.
 2. Provision a distinct application Ed25519 identity and the network's normal TLS

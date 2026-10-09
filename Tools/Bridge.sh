@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
-# Manage one consented federation bridge and its two fixed-destination relays.
+# Manage one consented federation bridge and its fixed-destination authority and media relays.
 set -euo pipefail
 umask 077
 fail() { printf '%s\n' "$*" >&2; exit 1; }
@@ -41,16 +41,25 @@ initialise() {
             keys == ["authorityAddress","authorityEndpoint","authorityKey","caCertificateDigest","deviceKey","network"] and
             ([.network,.deviceKey,.authorityKey,.caCertificateDigest] | all(hexbytes(32))) and
             (.authorityAddress | type == "string") and (.authorityEndpoint | type == "string");
-        keys == ["agreementId","cpuPeriod","cpuQuota","destination","destinationNamespace","expires","memoryBytes","pids","service","source","sourceNamespace","stateBytes","treatyDigest","version"] and
-        .version == 1 and .service == "FederationPages" and (.agreementId | hexbytes(16)) and (.treatyDigest | hexbytes(32)) and
+        keys == ["agreementId","cpuPeriod","cpuQuota","destination","destinationNamespace","expires","media","mediaDestinationHosts","mediaMaxBytes","mediaProfiles","mediaRequiredCopies","mediaSourceHosts","memoryBytes","pids","service","source","sourceNamespace","stateBytes","treatyDigest","version"] and
+        .version == 2 and .service == "FederationPages" and (.agreementId | hexbytes(16)) and (.treatyDigest | hexbytes(32)) and
         (.sourceNamespace | namespace) and (.destinationNamespace | namespace) and (.source | endpoint) and (.destination | endpoint) and
         .source.network != .destination.network and
         ([.source.deviceKey,.destination.deviceKey,.source.authorityKey,.destination.authorityKey] | unique | length == 4) and
         ([.expires,.memoryBytes,.pids,.cpuQuota,.cpuPeriod,.stateBytes] | all(type == "number" and . == floor)) and
         .expires > $now and .expires <= $now+604800 and .memoryBytes >= 67108864 and .memoryBytes <= 8589934592 and
         .pids >= 16 and .pids <= 512 and .cpuPeriod == 100000 and .cpuQuota >= 1000 and .cpuQuota <= 800000 and
-        .stateBytes >= 1048576 and .stateBytes <= 268435456
+        .stateBytes >= 1048576 and .stateBytes <= 268435456 and
+        (.media | type == "array" and length <= 6) and
+        ([.media[] | .network,.hostKey,.caDigest,.certificateDigest,.authoritySigner] | all(hexbytes(32))) and
+        (.mediaMaxBytes >= 0 and .mediaMaxBytes <= 4194304) and (.mediaRequiredCopies >= 0 and .mediaRequiredCopies <= 3)
         ' <<< "$consent" >/dev/null || fail 'Invalid bridge resource or endpoint consent'
+    media_count=$(jq -er '.media | length' <<< "$consent")
+    for ((index=0; index<media_count; index++)); do
+        file="MediaCa$index.pem"
+        [[ -f "$source/$file" && ! -L "$source/$file" ]] || fail 'A media CA file is missing or symbolic'
+        files+=("$file")
+    done
     created_network=''
     mkdir -m 0700 "$directory"
     trap 'if [[ -n "$created_network" ]]; then podman network rm "$created_network" >/dev/null 2>&1 || true; fi; podman unshare rm -rf -- "$directory"' EXIT
@@ -87,6 +96,22 @@ initialise() {
         .destination.caCertificate="/Config/DestinationCa.pem" | .destination.clientCertificate="/Config/DestinationClient.pem" |
         .destination.clientKey="/Config/DestinationClientKey.pem"
         ' "$source/Bridge.json" > "$directory/Config/Bridge.json"
+    media_config='[]'
+    for ((index=0; index<media_count; index++)); do
+        route=$(jq -c --argjson i "$index" '.media[$i]' <<< "$consent")
+        destination=$(jq -er '.address' <<< "$route")
+        port=${destination##*:}
+        [[ "$port" =~ ^[0-9]+$ && "$port" -gt 0 && "$port" -le 65535 ]] || fail 'Invalid media port'
+        gate_address="$prefix.$((index+5))"
+        mkdir -m 0700 "$directory/MediaGate$index"
+        jq -n --arg listen "$gate_address:$port" --arg destination "$destination" --arg source "$bridge_address" --argjson expires "$(jq -er '.expires' <<< "$consent")" \
+            '{listen:$listen,destination:$destination,allowedSource:$source,expires:$expires,bytesPerSecond:1048576,maximumConnections:4,maximumConnectionBytes:131072}' > "$directory/MediaGate$index/Gate.json"
+        media_config=$(jq --argjson route "$route" --arg relay "$gate_address:$port" --arg ca "/Config/MediaCa$index.pem" '.+[{network:$route.network,hostKey:$route.hostKey,caCertificate:$ca,relayAddress:$relay}]' <<< "$media_config")
+        chmod 0400 "$directory/MediaGate$index/Gate.json"
+        podman unshare chown -R 1:1 "$directory/MediaGate$index"
+    done
+    jq --argjson media "$media_config" '.media=$media' "$directory/Config/Bridge.json" > "$directory/Config/Bridge.new"
+    mv "$directory/Config/Bridge.new" "$directory/Config/Bridge.json"
     bash "$(dirname "$0")/Seccomp.sh" "$directory/Seccomp.json"
     jq -n --arg name "$name" --arg image "$image" --arg network "$network" --arg sourceEgress "$source_egress" \
         --arg destinationEgress "$destination_egress" --arg bridgeAddress "$bridge_address" \
@@ -104,13 +129,16 @@ load() {
     name=$(jq -er '.name' "$control")
     image=$(jq -er '.image' "$control")
     network=$(jq -er '.network' "$control")
+    media_count=$(jq -er '.consent.media | length' "$control")
+    containers=("$name" "${name}SourceGate" "${name}DestinationGate")
+    for ((index=0; index<media_count; index++)); do containers+=("${name}MediaGate$index"); done
     common=(--pull=never --read-only --read-only-tmpfs=false --userns=nomap --user=0:0
         --cap-drop=all --security-opt=no-new-privileges --security-opt="seccomp=$directory/Seccomp.json"
         --ipc=private --pid=private --ulimit=nofile=256:256 --ulimit=core=0:0 --log-driver=k8s-file --log-opt=max-size=1mb)
 }
 
 stop() {
-    for container in "$name" "${name}SourceGate" "${name}DestinationGate"; do
+    for container in "${containers[@]}"; do
         if podman container exists "$container"; then
             podman stop --time=1 "$container" >/dev/null
             podman rm "$container" >/dev/null
@@ -121,9 +149,10 @@ stop() {
 start() {
     [[ ! -e "$directory/Withdrawn" ]] || fail 'Bridge consent was withdrawn; initialise a new profile'
     jq -e --argjson now "$(date +%s)" '.consent.expires | type == "number" and . == floor and . > $now and . <= $now+604800' "$control" >/dev/null || fail 'Bridge consent is expired or invalid'
-    for container in "$name" "${name}SourceGate" "${name}DestinationGate"; do
+    for container in "${containers[@]}"; do
         ! podman container exists "$container" || fail 'Bridge container exists; use Restart'
     done
+    bridge_address=$(jq -er '.bridgeAddress' "$control")
     for role in Source Destination; do
         field=${role,}
         gate_address=$(jq -er --arg field "${field}GateAddress" '.[$field]' "$control")
@@ -138,7 +167,23 @@ start() {
             stop; fail 'Bridge relay start failed'
         fi
     done
-    bridge_address=$(jq -er '.bridgeAddress' "$control")
+    for ((index=0; index<media_count; index++)); do
+        gate_address="${bridge_address%.*}.$((index+5))"
+        route_network=$(jq -er --argjson i "$index" '.consent.media[$i].network' "$control")
+        if [[ "$route_network" == "$(jq -er '.consent.source.network' "$control")" ]]; then
+            egress=$(jq -er '.sourceEgress' "$control")
+        elif [[ "$route_network" == "$(jq -er '.consent.destination.network' "$control")" ]]; then
+            egress=$(jq -er '.destinationEgress' "$control")
+        else stop; fail 'Media route is outside the federation'; fi
+        lifetime=$(consent_lifetime "$(jq -er '.consent.expires' "$control")") || { stop; fail 'Bridge consent expired during media startup'; }
+        if ! podman run -d --name "${name}MediaGate$index" "${common[@]}" --timeout="$lifetime" --memory=134217728 --memory-swap=134217728 \
+            --pids-limit=32 --cpu-period=100000 --cpu-quota=50000 --tmpfs=/State:rw,noexec,nosuid,nodev,size=8388608,mode=0700 \
+            --network="$network:ip=$gate_address" --network="$egress" \
+            --volume="$directory/MediaGate$index:/Config:ro,nosuid,nodev,noexec,Z" \
+            --entrypoint=/HyperNetGate "$image" /Config/Gate.json >/dev/null; then
+            stop; fail 'Bridge media relay start failed'
+        fi
+    done
     memory=$(jq -er '.consent.memoryBytes' "$control")
     pids=$(jq -er '.consent.pids' "$control")
     quota=$(jq -er '.consent.cpuQuota' "$control")
@@ -162,7 +207,7 @@ case "$action" in
         [[ $# == 2 ]] || fail 'Unexpected arguments'; load
         persisted=true
         printf 'Withdrawn\n' > "$directory/Withdrawn" || persisted=false
-        for container in "$name" "${name}SourceGate" "${name}DestinationGate"; do
+        for container in "${containers[@]}"; do
             if podman container exists "$container"; then podman kill --signal=KILL "$container" >/dev/null 2>&1 || true; fi
         done
         stop

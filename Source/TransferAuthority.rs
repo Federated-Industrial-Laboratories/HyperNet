@@ -136,7 +136,10 @@ pub fn apply(
             authority::require(state, &request.key, types::MEMBER | types::HOST, now)?
         }
         Command::TransferHostWithdraw { host_key, .. } => {
-            if *host_key != request.key || !state.transfers.hosts.contains_key(host_key) {
+            if *host_key != request.key
+                || !state.transfers.hosts.contains_key(host_key)
+                || state.media.hosts.contains_key(host_key)
+            {
                 return Err("TransferPermissionDenied");
             }
         }
@@ -173,6 +176,7 @@ pub fn apply(
                 || state.consents.contains_key(&request.key)
                 || state.bridge_consents.contains_key(&request.key)
                 || state.mail.hosts.contains_key(&request.key)
+                || state.media.hosts.contains_key(&request.key)
                 || state.ssh.services.contains_key(&request.key)
                 || certificate != Some(body.certificate_digest.as_str())
                 || body.authority_signer != hex::encode(key.verifying_key().as_bytes())

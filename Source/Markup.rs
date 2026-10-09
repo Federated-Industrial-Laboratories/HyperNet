@@ -4,8 +4,11 @@
 mod components;
 #[path = "FormSchema.rs"]
 pub mod forms;
+#[path = "MediaSchema.rs"]
+pub mod media;
 use components::{Action, Directive};
 pub use components::{Colour, ScrollDirection};
+pub use media::{Effect, Fit, Preset};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,6 +39,13 @@ pub enum TextKind {
 }
 #[derive(Clone, Debug, Serialize)]
 pub enum PageAction {
+    Reveal {
+        target: String,
+    },
+    Motion {
+        target: String,
+        running: bool,
+    },
     Submit {
         form: String,
     },
@@ -52,6 +62,12 @@ pub enum PageAction {
 }
 #[derive(Clone, Debug, Serialize)]
 pub enum Kind {
+    Image {
+        asset: String,
+        alt: String,
+        rows: u16,
+        fit: Fit,
+    },
     Form {
         form: String,
         label: String,
@@ -100,6 +116,7 @@ pub struct Node {
     pub key: usize,
     pub id: Option<String>,
     pub style: Style,
+    pub motion: Option<Effect>,
     pub kind: Kind,
     pub children: Vec<Node>,
 }
@@ -110,6 +127,7 @@ pub struct Document {
     pub links: Vec<Link>,
     pub nodes: Vec<Node>,
     pub forms: Vec<forms::Form>,
+    pub assets: Vec<media::Asset>,
 }
 
 fn forbidden(ch: char) -> bool {
@@ -214,6 +232,7 @@ fn directive(
             key,
             id: None,
             style: Style::default(),
+            motion: None,
             kind: Kind::Field {
                 form: form.into(),
                 field,
@@ -232,6 +251,7 @@ fn directive(
         key,
         id: None,
         style: Style::default(),
+        motion: None,
         kind: Kind::Separator,
         children: Vec::new(),
     };
@@ -310,6 +330,7 @@ fn directive(
             }
         }
         Directive::Panel {
+            motion,
             id,
             colour,
             label,
@@ -321,6 +342,7 @@ fn directive(
             }
             node.id = id;
             node.style.colour = colour;
+            node.motion = motion;
             Kind::Panel { label, padding }
         }
         Directive::ScrollBox {
@@ -338,11 +360,15 @@ fn directive(
             Kind::ScrollBox { label, rows }
         }
         Directive::Text {
+            id,
+            motion,
             colour,
             value,
             bold,
         } => {
             text(&value, 1024, false)?;
+            node.id = id;
+            node.motion = motion;
             node.style = Style { colour, bold };
             Kind::Text {
                 text: value,
@@ -360,6 +386,8 @@ fn directive(
             Kind::Spacer { rows }
         }
         Directive::Progress {
+            id,
+            motion,
             colour,
             label,
             value,
@@ -369,11 +397,34 @@ fn directive(
             if maximum == 0 || maximum > 1_000_000 || value > maximum {
                 return Err("InvalidProgressBound");
             }
+            node.id = id;
+            node.motion = motion;
             node.style.colour = colour;
             Kind::Progress {
                 label,
                 value,
                 maximum,
+            }
+        }
+        Directive::Image {
+            id,
+            asset,
+            alt,
+            rows,
+            fit,
+            motion,
+        } => {
+            text(&alt, 128, false)?;
+            if !namespace(&asset) || !(1..=40).contains(&rows) {
+                return Err("InvalidImageViewport");
+            }
+            node.id = Some(id);
+            node.motion = motion;
+            Kind::Image {
+                asset,
+                alt,
+                rows,
+                fit,
             }
         }
         Directive::Button {
@@ -386,6 +437,8 @@ fn directive(
             node.id = id;
             node.style.colour = colour;
             let action = match action {
+                Action::Reveal { target } => PageAction::Reveal { target },
+                Action::Motion { target, running } => PageAction::Motion { target, running },
                 Action::Navigate { target } => navigation(target, &label, links)?,
                 Action::Focus { target } => PageAction::Focus { target },
                 Action::Scroll { target, direction } => PageAction::Scroll { target, direction },
@@ -395,6 +448,20 @@ fn directive(
     };
     if node.id.as_ref().is_some_and(|id| !namespace(id)) {
         return Err("InvalidComponentId");
+    }
+    if let Some(effect) = &node.motion
+        && (!(1000..=10000).contains(&effect.duration_ms)
+            || !matches!(
+                (&node.kind, effect.preset),
+                (
+                    Kind::Text { .. },
+                    Preset::ColourPulse | Preset::TextFade | Preset::TextScroll
+                ) | (Kind::Panel { .. }, Preset::BorderEmphasis)
+                    | (Kind::Progress { .. }, Preset::ProgressSweep)
+                    | (Kind::Image { .. }, Preset::ImagePan | Preset::ImageFade)
+            ))
+    {
+        return Err("InvalidMotionPresetOrDuration");
     }
     Ok(node)
 }
@@ -421,7 +488,21 @@ fn append(node: Node, stack: &mut [Node], roots: &mut Vec<Node>) -> Result<(), &
 }
 fn plain(nodes: &[Node], links: &[Link], forms: &[forms::Form], output: &mut Vec<String>) {
     for node in nodes {
+        if let Some(effect) = node.motion {
+            output.push(format!(
+                "[ Effect {:?}: {} ms; explicit local activation ]",
+                effect.preset, effect.duration_ms
+            ));
+        }
         match &node.kind {
+            Kind::Image {
+                asset,
+                alt,
+                rows,
+                fit,
+            } => output.push(format!(
+                "[ Image {asset}: {alt}; {rows} rows, {fit:?}; hidden until revealed ]"
+            )),
             Kind::Form { form, label } => {
                 let schema = forms
                     .iter()
@@ -456,6 +537,12 @@ fn plain(nodes: &[Node], links: &[Link], forms: &[forms::Form], output: &mut Vec
                 maximum,
             } => output.push(format!("{label}: {value}/{maximum}")),
             Kind::Button { label, action } => match action {
+                PageAction::Reveal { target } => {
+                    output.push(format!("[ {label} ] Reveal image {target}"))
+                }
+                PageAction::Motion { target, running } => {
+                    output.push(format!("[ {label} ] Motion {target}: {running}"))
+                }
                 PageAction::Submit { form } => {
                     output.push(format!("[ {label} ] Review form {form} before sending"))
                 }
@@ -491,6 +578,12 @@ pub fn parse(body: &str) -> Result<Document, &'static str> {
     let mut links = Vec::new();
     let mut ids = BTreeMap::new();
     let mut references = BTreeSet::new();
+    let mut images = BTreeSet::new();
+    let mut effects = BTreeSet::new();
+    let mut media_references = BTreeSet::new();
+    let mut reveal_references = BTreeSet::new();
+    let mut motion_references = BTreeSet::new();
+    let mut assets = Vec::new();
     let mut count = 0;
     let mut controls = 0;
     let mut forms: Vec<forms::Form> = Vec::new();
@@ -534,6 +627,16 @@ pub fn parse(body: &str) -> Result<Document, &'static str> {
             append(node, &mut stack, &mut roots)?;
             continue;
         }
+        if let Some(attributes) = line.strip_prefix("@Asset ") {
+            if !stack.is_empty() {
+                return Err("MediaDeclarationInContainer");
+            }
+            let asset = serde_json::from_value(components::strict_json(attributes)?)
+                .map_err(|_| "InvalidMediaManifest")?;
+            assets.push(asset);
+            media::validate_assets(&assets)?;
+            continue;
+        }
         count += 1;
         if count > MAX_NODES || stack.len() >= MAX_DEPTH {
             return Err("PageStructureLimit");
@@ -551,6 +654,7 @@ pub fn parse(body: &str) -> Result<Document, &'static str> {
                 key: count - 1,
                 id: None,
                 style: Style::default(),
+                motion: None,
                 kind: Kind::Button {
                     label: label.into(),
                     action: navigation(address.into(), label, &mut links)?,
@@ -562,6 +666,7 @@ pub fn parse(body: &str) -> Result<Document, &'static str> {
                 key: count - 1,
                 id: None,
                 style: Style::default(),
+                motion: None,
                 kind: Kind::Spacer { rows: 1 },
                 children: Vec::new(),
             }
@@ -582,6 +687,7 @@ pub fn parse(body: &str) -> Result<Document, &'static str> {
             Node {
                 key: count - 1,
                 id: None,
+                motion: None,
                 style: Style {
                     colour: None,
                     bold: matches!(kind, TextKind::Heading2 | TextKind::Heading3),
@@ -615,6 +721,26 @@ pub fn parse(body: &str) -> Result<Document, &'static str> {
         {
             return Err("DuplicateComponentId");
         }
+        if let Kind::Image { asset, .. } = &node.kind {
+            media_references.insert(asset.clone());
+            images.insert(node.id.clone().ok_or("MissingImageId")?);
+        }
+        if node.motion.is_some()
+            && let Some(id) = &node.id
+        {
+            effects.insert(id.clone());
+        }
+        if let Kind::Button { action, .. } = &node.kind {
+            match action {
+                PageAction::Reveal { target } => {
+                    reveal_references.insert(target.clone());
+                }
+                PageAction::Motion { target, .. } => {
+                    motion_references.insert(target.clone());
+                }
+                _ => {}
+            }
+        }
         if matches!(
             node.kind,
             Kind::ScrollBox { .. } | Kind::Button { .. } | Kind::Field { .. }
@@ -646,7 +772,27 @@ pub fn parse(body: &str) -> Result<Document, &'static str> {
     if references.iter().any(|id| ids.get(id) != Some(&true)) {
         return Err("UnknownScrollBox");
     }
+    let asset_ids: BTreeSet<_> = assets.iter().map(|asset| asset.id.clone()).collect();
+    if media_references != asset_ids {
+        return Err("UnknownOrUnusedMediaAsset");
+    }
+    if !reveal_references.is_subset(&images) || !motion_references.is_subset(&effects) {
+        return Err("UnknownMediaOrMotionTarget");
+    }
     let mut lines = vec![format!("# {title}")];
+    for asset in &assets {
+        lines.push(format!(
+            "[ Asset {}: {}; {}x{}; {} bytes; SHA256 {}; copies {}; hosts {} ]",
+            asset.id,
+            asset.profile,
+            asset.width,
+            asset.height,
+            asset.bytes,
+            asset.digest,
+            asset.copies,
+            asset.hosts.join(",")
+        ));
+    }
     plain(&roots, &links, &forms, &mut lines);
     Ok(Document {
         title: title.into(),
@@ -654,6 +800,7 @@ pub fn parse(body: &str) -> Result<Document, &'static str> {
         links,
         nodes: roots,
         forms,
+        assets,
     })
 }
 pub fn validate(body: &str) -> Result<(), &'static str> {

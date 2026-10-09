@@ -104,7 +104,7 @@ python3 Tools/Upgrade.py --kind Authority \
   --profile /Private/AuthorityProfile \
   --installation /Private/HyperNetUpdated \
   --public-key /Trust/Publisher.pub \
-  --expected-image sha256:PreviousImageDigest --state-schema 8
+  --expected-image sha256:PreviousImageDigest --state-schema 9
 ```
 
 Kinds are Authority, Host, Bridge, MailStore and TransferStore. The operation holds
@@ -118,7 +118,7 @@ automatically allocated private container address is not a stable service addres
 
 `--state-schema` is the operator's inspected value, not independent proof of the
 quorum's current schema. The authority checks the real quorum state again at
-startup and refuses incompatible state. The current package requires schema8.
+startup and refuses incompatible state. The current package requires schema9.
 There is no legacy schema acceptance or migration. Use a fresh development
 installation when replacing an incompatible prerelease contract. The switch
 operation can change an image only within the current schema. Never restore old

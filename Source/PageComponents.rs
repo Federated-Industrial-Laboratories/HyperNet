@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Typed attributes for the finite terminal component grammar.
+use super::media::{Effect, Fit};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -42,6 +43,13 @@ pub enum Action {
     Scroll {
         target: String,
         direction: ScrollDirection,
+    },
+    Reveal {
+        target: String,
+    },
+    Motion {
+        target: String,
+        running: bool,
     },
 }
 fn one() -> u8 {
@@ -86,6 +94,7 @@ pub enum Directive {
         gap: u8,
     },
     Panel {
+        motion: Option<Effect>,
         id: Option<String>,
         colour: Option<Colour>,
         label: String,
@@ -99,6 +108,8 @@ pub enum Directive {
         rows: u16,
     },
     Text {
+        id: Option<String>,
+        motion: Option<Effect>,
         colour: Option<Colour>,
         value: String,
         #[serde(default)]
@@ -111,10 +122,21 @@ pub enum Directive {
         rows: u16,
     },
     Progress {
+        id: Option<String>,
+        motion: Option<Effect>,
         colour: Option<Colour>,
         label: String,
         value: u32,
         maximum: u32,
+    },
+    Image {
+        id: String,
+        asset: String,
+        alt: String,
+        rows: u16,
+        #[serde(default)]
+        fit: Fit,
+        motion: Option<Effect>,
     },
     Button {
         id: Option<String>,

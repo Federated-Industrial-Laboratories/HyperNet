@@ -1,7 +1,7 @@
 [
   {
     "name": "Blocks",
-    "body": "HyperNetPage/2\n# Board\n## News\n: Welcome, caf\u00e9 \u4e16\u754c.\n- First item\n> A quotation\n| printf example\n=> https://example.com/ Reference\n\n### Details\n: Text remains text.\n",
+    "body": "HyperNetPage/2\n# Board\n## News\n: Welcome, café 世界.\n- First item\n> A quotation\n| printf example\n=> https://example.com/ Reference\n\n### Details\n: Text remains text.\n",
     "valid": true
   },
   {
@@ -16,7 +16,7 @@
   },
   {
     "name": "Combining",
-    "body": "HyperNetPage/2\n# Board\n: cafe\u0301\n",
+    "body": "HyperNetPage/2\n# Board\n: café\n",
     "valid": true
   },
   {
@@ -26,7 +26,7 @@
   },
   {
     "name": "RetiredProfile",
-    "body": "HyperNetPage/1\n# Board\n## News\n: Welcome, caf\u00e9 \u4e16\u754c.\n- First item\n> A quotation\n| printf example\n=> https://example.com/ Reference\n\n### Details\n: Text remains text.\n",
+    "body": "HyperNetPage/1\n# Board\n## News\n: Welcome, café 世界.\n- First item\n> A quotation\n| printf example\n=> https://example.com/ Reference\n\n### Details\n: Text remains text.\n",
     "valid": false
   },
   {
@@ -76,12 +76,12 @@
   },
   {
     "name": "CarriageReturn",
-    "body": "HyperNetPage/2\r\n# Board\r\n## News\r\n: Welcome, caf\u00e9 \u4e16\u754c.\r\n- First item\r\n> A quotation\r\n| printf example\r\n=> https://example.com/ Reference\r\n\r\n### Details\r\n: Text remains text.\r\n",
+    "body": "HyperNetPage/2\r\n# Board\r\n## News\r\n: Welcome, café 世界.\r\n- First item\r\n> A quotation\r\n| printf example\r\n=> https://example.com/ Reference\r\n\r\n### Details\r\n: Text remains text.\r\n",
     "valid": false
   },
   {
     "name": "MissingFinalNewline",
-    "body": "HyperNetPage/2\n# Board\n## News\n: Welcome, caf\u00e9 \u4e16\u754c.\n- First item\n> A quotation\n| printf example\n=> https://example.com/ Reference\n\n### Details\n: Text remains text.",
+    "body": "HyperNetPage/2\n# Board\n## News\n: Welcome, café 世界.\n- First item\n> A quotation\n| printf example\n=> https://example.com/ Reference\n\n### Details\n: Text remains text.",
     "valid": false
   },
   {
@@ -111,37 +111,37 @@
   },
   {
     "name": "C1",
-    "body": "HyperNetPage/2\n# Board\n: Before\u009bAfter\n",
+    "body": "HyperNetPage/2\n# Board\n: BeforeAfter\n",
     "valid": false
   },
   {
     "name": "Bidi",
-    "body": "HyperNetPage/2\n# Board\n: Before\u202eAfter\n",
+    "body": "HyperNetPage/2\n# Board\n: Before‮After\n",
     "valid": false
   },
   {
     "name": "Isolate",
-    "body": "HyperNetPage/2\n# Board\n: Before\u2066After\n",
+    "body": "HyperNetPage/2\n# Board\n: Before⁦After\n",
     "valid": false
   },
   {
     "name": "Bom",
-    "body": "HyperNetPage/2\n# Board\n: Before\ufeffAfter\n",
+    "body": "HyperNetPage/2\n# Board\n: Before﻿After\n",
     "valid": false
   },
   {
     "name": "LineSeparator",
-    "body": "HyperNetPage/2\n# Board\n: Before\u2028After\n",
+    "body": "HyperNetPage/2\n# Board\n: Before After\n",
     "valid": false
   },
   {
     "name": "Noncharacter",
-    "body": "HyperNetPage/2\n# Board\n: Before\uffffAfter\n",
+    "body": "HyperNetPage/2\n# Board\n: Before￿After\n",
     "valid": false
   },
   {
     "name": "Tag",
-    "body": "HyperNetPage/2\n# Board\n: Before\udb40\udc67After\n",
+    "body": "HyperNetPage/2\n# Board\n: Before󠁧After\n",
     "valid": false
   },
   {
@@ -402,6 +402,91 @@
   {
     "name": "FormTooMany",
     "body": "HyperNetPage/2\n# Form\n@Form {\"id\":\"Form0\",\"label\":\"Form0\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Submit {\"label\":\"Review message\"}\n@End\n@Form {\"id\":\"Form1\",\"label\":\"Form1\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Submit {\"label\":\"Review message\"}\n@End\n@Form {\"id\":\"Form2\",\"label\":\"Form2\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Submit {\"label\":\"Review message\"}\n@End\n@Form {\"id\":\"Form3\",\"label\":\"Form3\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Submit {\"label\":\"Review message\"}\n@End\n@Form {\"id\":\"Form4\",\"label\":\"Form4\",\"profile\":\"HyperNetFormMail/1\",\"recipient\":\"0101010101010101010101010101010101010101010101010101010101010101\",\"owner\":\"0202020202020202020202020202020202020202020202020202020202020202\"}\n@Field {\"id\":\"Message\",\"label\":\"Message\",\"kind\":\"Text\",\"maxBytes\":2048,\"required\":true}\n@Submit {\"label\":\"Review message\"}\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BoundMediaManifest",
+    "body": "HyperNetPage/2\n# Media\n@Asset {\"id\":\"Icon\",\"profile\":\"HyperNetRaster/1\",\"width\":1,\"height\":1,\"bytes\":3,\"digest\":\"7fa54a42524916a1648ec76ce75d295024840b7a3a4f4bbaf3e43155d0014767\",\"hosts\":[\"0101010101010101010101010101010101010101010101010101010101010101\"],\"copies\":1}\n@Image {\"id\":\"Picture\",\"asset\":\"Icon\",\"alt\":\"Red square\",\"rows\":3}\n@Button {\"label\":\"Reveal\",\"action\":{\"kind\":\"Reveal\",\"target\":\"Picture\"}}\n",
+    "valid": true
+  },
+  {
+    "name": "VectorManifest",
+    "body": "HyperNetPage/2\n# Media\n@Asset {\"id\":\"Icon\",\"profile\":\"HyperNetVector/1\",\"width\":1,\"height\":1,\"bytes\":256,\"digest\":\"7fa54a42524916a1648ec76ce75d295024840b7a3a4f4bbaf3e43155d0014767\",\"hosts\":[\"0101010101010101010101010101010101010101010101010101010101010101\"],\"copies\":1}\n@Image {\"id\":\"Picture\",\"asset\":\"Icon\",\"alt\":\"Red square\",\"rows\":3}\n",
+    "valid": true
+  },
+  {
+    "name": "FiniteLocalMotion",
+    "body": "HyperNetPage/2\n# Media\n@Text {\"id\":\"Banner\",\"value\":\"Notice\",\"motion\":{\"preset\":\"ColourPulse\",\"durationMs\":2000}}\n@Button {\"label\":\"Pause\",\"action\":{\"kind\":\"Motion\",\"target\":\"Banner\",\"running\":false}}\n",
+    "valid": true
+  },
+  {
+    "name": "MotionWrongComponent",
+    "body": "HyperNetPage/2\n# Media\n@Text {\"value\":\"Notice\",\"motion\":{\"preset\":\"ImagePan\",\"durationMs\":2000}}\n",
+    "valid": false
+  },
+  {
+    "name": "MotionUnbounded",
+    "body": "HyperNetPage/2\n# Media\n@Text {\"value\":\"Notice\",\"motion\":{\"preset\":\"TextScroll\",\"durationMs\":10001}}\n",
+    "valid": false
+  },
+  {
+    "name": "MotionUnknownFrames",
+    "body": "HyperNetPage/2\n# Media\n@Text {\"value\":\"Notice\",\"motion\":{\"preset\":\"TextScroll\",\"durationMs\":2000,\"frames\":[]}}\n",
+    "valid": false
+  },
+  {
+    "name": "MediaMissingManifest",
+    "body": "HyperNetPage/2\n# Media\n@Image {\"id\":\"Picture\",\"asset\":\"Icon\",\"alt\":\"Red square\",\"rows\":3}\n",
+    "valid": false
+  },
+  {
+    "name": "MediaUnusedManifest",
+    "body": "HyperNetPage/2\n# Media\n@Asset {\"id\":\"Icon\",\"profile\":\"HyperNetRaster/1\",\"width\":1,\"height\":1,\"bytes\":3,\"digest\":\"7fa54a42524916a1648ec76ce75d295024840b7a3a4f4bbaf3e43155d0014767\",\"hosts\":[\"0101010101010101010101010101010101010101010101010101010101010101\"],\"copies\":1}\n",
+    "valid": false
+  },
+  {
+    "name": "MediaDuplicateManifest",
+    "body": "HyperNetPage/2\n# Media\n@Asset {\"id\":\"Icon\",\"profile\":\"HyperNetRaster/1\",\"width\":1,\"height\":1,\"bytes\":3,\"digest\":\"7fa54a42524916a1648ec76ce75d295024840b7a3a4f4bbaf3e43155d0014767\",\"hosts\":[\"0101010101010101010101010101010101010101010101010101010101010101\"],\"copies\":1}\n@Asset {\"id\":\"Icon\",\"profile\":\"HyperNetRaster/1\",\"width\":1,\"height\":1,\"bytes\":3,\"digest\":\"7fa54a42524916a1648ec76ce75d295024840b7a3a4f4bbaf3e43155d0014767\",\"hosts\":[\"0101010101010101010101010101010101010101010101010101010101010101\"],\"copies\":1}\n@Image {\"id\":\"Picture\",\"asset\":\"Icon\",\"alt\":\"Red square\",\"rows\":3}\n@Button {\"label\":\"Reveal\",\"action\":{\"kind\":\"Reveal\",\"target\":\"Picture\"}}\n",
+    "valid": false
+  },
+  {
+    "name": "MediaInvalidPixelLength",
+    "body": "HyperNetPage/2\n# Media\n@Asset {\"id\":\"Icon\",\"profile\":\"HyperNetRaster/1\",\"width\":1,\"height\":1,\"bytes\":4,\"digest\":\"7fa54a42524916a1648ec76ce75d295024840b7a3a4f4bbaf3e43155d0014767\",\"hosts\":[\"0101010101010101010101010101010101010101010101010101010101010101\"],\"copies\":1}\n@Image {\"id\":\"Picture\",\"asset\":\"Icon\",\"alt\":\"Red square\",\"rows\":3}\n",
+    "valid": false
+  },
+  {
+    "name": "MediaHostSubstitutionURL",
+    "body": "HyperNetPage/2\n# Media\n@Asset {\"id\":\"Icon\",\"profile\":\"HyperNetRaster/1\",\"width\":1,\"height\":1,\"bytes\":3,\"digest\":\"7fa54a42524916a1648ec76ce75d295024840b7a3a4f4bbaf3e43155d0014767\",\"hosts\":[\"https://example.com/\"],\"copies\":1}\n@Image {\"id\":\"Picture\",\"asset\":\"Icon\",\"alt\":\"Red square\",\"rows\":3}\n",
+    "valid": false
+  },
+  {
+    "name": "MediaDuplicateHosts",
+    "body": "HyperNetPage/2\n# Media\n@Asset {\"id\":\"Icon\",\"profile\":\"HyperNetRaster/1\",\"width\":1,\"height\":1,\"bytes\":3,\"digest\":\"7fa54a42524916a1648ec76ce75d295024840b7a3a4f4bbaf3e43155d0014767\",\"hosts\":[\"0101010101010101010101010101010101010101010101010101010101010101\",\"0101010101010101010101010101010101010101010101010101010101010101\"],\"copies\":1}\n@Image {\"id\":\"Picture\",\"asset\":\"Icon\",\"alt\":\"Red square\",\"rows\":3}\n",
+    "valid": false
+  },
+  {
+    "name": "MediaHostCopies",
+    "body": "HyperNetPage/2\n# Media\n@Asset {\"id\":\"Icon\",\"profile\":\"HyperNetRaster/1\",\"width\":1,\"height\":1,\"bytes\":3,\"digest\":\"7fa54a42524916a1648ec76ce75d295024840b7a3a4f4bbaf3e43155d0014767\",\"hosts\":[\"0101010101010101010101010101010101010101010101010101010101010101\"],\"copies\":2}\n@Image {\"id\":\"Picture\",\"asset\":\"Icon\",\"alt\":\"Red square\",\"rows\":3}\n",
+    "valid": false
+  },
+  {
+    "name": "MediaInvalidFallback",
+    "body": "HyperNetPage/2\n# Media\n@Asset {\"id\":\"Icon\",\"profile\":\"HyperNetRaster/1\",\"width\":1,\"height\":1,\"bytes\":3,\"digest\":\"7fa54a42524916a1648ec76ce75d295024840b7a3a4f4bbaf3e43155d0014767\",\"hosts\":[\"0101010101010101010101010101010101010101010101010101010101010101\"],\"copies\":1}\n@Image {\"id\":\"Picture\",\"asset\":\"Icon\",\"alt\":\"\\u001b[2J\",\"rows\":3}\n",
+    "valid": false
+  },
+  {
+    "name": "MediaContainerDeclaration",
+    "body": "HyperNetPage/2\n# Media\n@Panel {\"label\":\"Box\"}\n@Asset {\"id\":\"Icon\",\"profile\":\"HyperNetRaster/1\",\"width\":1,\"height\":1,\"bytes\":3,\"digest\":\"7fa54a42524916a1648ec76ce75d295024840b7a3a4f4bbaf3e43155d0014767\",\"hosts\":[\"0101010101010101010101010101010101010101010101010101010101010101\"],\"copies\":1}\n@Image {\"id\":\"Picture\",\"asset\":\"Icon\",\"alt\":\"Red square\",\"rows\":3}\n@Button {\"label\":\"Reveal\",\"action\":{\"kind\":\"Reveal\",\"target\":\"Picture\"}}\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "MediaUnknownReveal",
+    "body": "HyperNetPage/2\n# Media\n@Button {\"label\":\"Reveal\",\"action\":{\"kind\":\"Reveal\",\"target\":\"Absent\"}}\n",
+    "valid": false
+  },
+  {
+    "name": "MediaUnknownMotion",
+    "body": "HyperNetPage/2\n# Media\n@Button {\"label\":\"Animate\",\"action\":{\"kind\":\"Motion\",\"target\":\"Absent\",\"running\":true}}\n",
     "valid": false
   }
 ]

@@ -50,6 +50,8 @@ pub fn admit(state: &State, request: &VerifiedRequest) -> Result<(), Failure> {
                 | Command::PageInspect { .. }
                 | Command::PageReview { .. }
                 | Command::PageWithdraw { .. }
+                | Command::PageMediaReceipt { .. }
+                | Command::PageMediaHosts
         )
     {
         return Err("ApplicationPermissionDenied");
@@ -68,7 +70,10 @@ fn sorted(values: &[String], maximum: usize) -> bool {
     !values.is_empty() && values.len() <= maximum && values.windows(2).all(|pair| pair[0] < pair[1])
 }
 fn review_scope(record: &ApplicationRecord) -> bool {
-    record.permissions.iter().any(|p| p.starts_with("Review"))
+    record
+        .permissions
+        .iter()
+        .any(|p| p.starts_with("Review") || p == "MediaInspect")
 }
 pub fn current<'a>(
     state: &'a State,
@@ -238,11 +243,17 @@ pub fn apply(
             }
             if !sorted(namespaces, 8)
                 || namespaces.iter().any(|n| !host::valid_namespace(n))
-                || !sorted(permissions, 4)
+                || !sorted(permissions, 7)
                 || permissions.iter().any(|p| {
                     !matches!(
                         p.as_str(),
-                        "PagesRead" | "PagesSubmit" | "ReviewInspect" | "ReviewDecide"
+                        "PagesRead"
+                            | "PagesSubmit"
+                            | "ReviewInspect"
+                            | "ReviewDecide"
+                            | "MediaRead"
+                            | "MediaSubmit"
+                            | "MediaInspect"
                     )
                 })
             {
@@ -271,7 +282,10 @@ pub fn apply(
             } else if review_policy_digest.is_some() || review_mode.is_some() {
                 return Err("InvalidApplicationScope");
             }
-            if permissions.iter().any(|p| p.starts_with("Review")) {
+            if permissions
+                .iter()
+                .any(|p| p.starts_with("Review") || p == "MediaInspect")
+            {
                 authority::require(state, &request.key, MEMBER | ADMIN, now)?;
             }
             prune(state, now);

@@ -23,6 +23,18 @@ mod mail_transport;
 mod mail_types;
 #[path = "Markup.rs"]
 mod markup;
+#[path = "MediaAuthority.rs"]
+mod media_authority;
+#[path = "MediaDisk.rs"]
+mod media_disk;
+#[path = "MediaStore.rs"]
+mod media_store;
+#[path = "MediaTls.rs"]
+mod media_tls;
+#[path = "MediaTransport.rs"]
+mod media_transport;
+#[path = "MediaTypes.rs"]
+mod media_types;
 #[path = "PageAuthority.rs"]
 mod page_authority;
 #[path = "Policy.rs"]
@@ -95,6 +107,11 @@ enum Command {
     },
     /// Run a selected persistent mail store with exact signed host consent.
     MailStore {
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Run a consented static page media store.
+    PageMediaStore {
         #[arg(long)]
         config: PathBuf,
     },
@@ -183,6 +200,9 @@ fn run() -> Result<()> {
             if let Some(path) = &config.service_signing_key {
                 reads.push(path.clone());
             }
+            if let Some(path) = &config.page_media_signing_key {
+                reads.push(path.clone());
+            }
             let mut ports = Vec::new();
             for endpoint in &config.etcd_endpoints {
                 let url = reqwest::Url::parse(endpoint)?;
@@ -243,6 +263,19 @@ fn run() -> Result<()> {
             config.check_resources(&profile)?;
             println!("{}", serde_json::to_string(&profile)?);
             runtime()?.block_on(mail_transport::serve(config))?;
+        }
+        Command::PageMediaStore { config: path } => {
+            let config = media_store::Config::load(&path)?;
+            let profile = confinement::enter_mail(
+                &config.state_file,
+                &[config.listen.port()],
+                &[config.relay_address.port()],
+                config.consent.state_bytes,
+            )?;
+            confinement::mail_canaries(&config.state_file)?;
+            config.check_resources(&profile)?;
+            println!("{}", serde_json::to_string(&profile)?);
+            runtime()?.block_on(media_transport::serve(config))?;
         }
         Command::TransferStore { config: path } => {
             let config = transfer_store::Config::load(&path)?;

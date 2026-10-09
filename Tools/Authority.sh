@@ -29,7 +29,7 @@ initialise() {
     for name in Authority.json AuthorityCertificate.pem AuthorityKey.pem HostingCa.pem VoterCa.pem BrokerCertificate.pem BrokerKey.pem; do
         [[ -f "$source/$name" && ! -L "$source/$name" ]] || fail 'Configuration contains a missing or symbolic file'
     done
-    for kind in Federation Mail Service; do
+    for kind in Federation Mail Service PageMedia; do
         field="${kind,}SigningKey"
         if [[ -n $(jq -r --arg field "$field" '.[$field] // empty' "$source/Authority.json") ]]; then
             [[ -f "$source/${kind}SigningKey.json" && ! -L "$source/${kind}SigningKey.json" ]] || fail 'Service requires its separate signing identity file'
@@ -51,13 +51,13 @@ initialise() {
     for name in AuthorityCertificate.pem AuthorityKey.pem HostingCa.pem VoterCa.pem BrokerCertificate.pem BrokerKey.pem; do
         install -m 0400 "$source/$name" "$directory/Config/$name"
     done
-    for kind in Federation Mail Service; do
+    for kind in Federation Mail Service PageMedia; do
         field="${kind,}SigningKey"
         if [[ -n $(jq -r --arg field "$field" '.[$field] // empty' "$source/Authority.json") ]]; then
             install -m 0400 "$source/${kind}SigningKey.json" "$directory/Config/${kind}SigningKey.json"
         fi
     done
-    jq '.stateDirectory="/State" | .certificate="/Config/AuthorityCertificate.pem" | .privateKey="/Config/AuthorityKey.pem" | .clientCa="/Config/HostingCa.pem" | .etcdCa="/Config/VoterCa.pem" | .etcdCertificate="/Config/BrokerCertificate.pem" | .etcdKey="/Config/BrokerKey.pem" | if .federationSigningKey != null then .federationSigningKey="/Config/FederationSigningKey.json" else . end | if .mailSigningKey != null then .mailSigningKey="/Config/MailSigningKey.json" else . end | if .serviceSigningKey != null then .serviceSigningKey="/Config/ServiceSigningKey.json" else . end' \
+    jq '.stateDirectory="/State" | .certificate="/Config/AuthorityCertificate.pem" | .privateKey="/Config/AuthorityKey.pem" | .clientCa="/Config/HostingCa.pem" | .etcdCa="/Config/VoterCa.pem" | .etcdCertificate="/Config/BrokerCertificate.pem" | .etcdKey="/Config/BrokerKey.pem" | if .federationSigningKey != null then .federationSigningKey="/Config/FederationSigningKey.json" else . end | if .mailSigningKey != null then .mailSigningKey="/Config/MailSigningKey.json" else . end | if .serviceSigningKey != null then .serviceSigningKey="/Config/ServiceSigningKey.json" else . end | if .pageMediaSigningKey != null then .pageMediaSigningKey="/Config/PageMediaSigningKey.json" else . end' \
         "$source/Authority.json" > "$directory/Config/Authority.json"
     chmod 0400 "$directory/Config/Authority.json"
     bash "$(dirname "$0")/Seccomp.sh" "$directory/Seccomp.json"

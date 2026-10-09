@@ -73,3 +73,15 @@ contacts, independent receiver acceptance, typed browser input, separate send
 confirmation, cancellation, partial delivery, restart, immutable retry and
 duplicate intake. The browser check uses a pseudoterminal and restores its
 attributes. Its fixtures are synthetic and are removed on exit.
+
+`Tests/MediaWorkflow.py` checks installed isolated PNG/SVG import, quarantine,
+resumable immutable chunks, store restart, required copies, moderator attestation,
+application disclosure scope, explicit reads and withdrawal. It uses two dedicated
+confined media hosts. The viewer has its own native terminal qualification.
+
+`Tests/MediaFederationWorkflow.py` checks exact media bytes across two independent
+networks and a consented bridge, destination placement and review, and source
+withdrawal. Supply `--media-address` for an existing private host-interface IPv4
+address reachable from both test egress networks. The fixture binds only that
+address on TCP ports 30553 and 30554; it makes no interface or firewall changes.
+Every store and relay is confined, and all fixture resources are removed on exit.

@@ -13,6 +13,7 @@ output_directory=$(realpath -m "$2")
 mkdir -p "$output_directory/RootFs/State" "$output_directory/RootFs/Config" "$output_directory/RootFs/etc" "$output_directory/RootFs/Documentation"
 : > "$output_directory/RootFs/State/MailState.bin"
 : > "$output_directory/RootFs/State/TransferState.bin"
+: > "$output_directory/RootFs/State/PageMediaState.bin"
 command -v dpkg-query >/dev/null || { printf 'This packager requires Debian-format library ownership records\n' >&2; exit 1; }
 printf 'Library\tBinaryPackage\tBinaryVersion\tSourcePackage\tSourceVersion\tSha256\n' > "$output_directory/RootFs/Documentation/SystemLibraries.tsv"
 : > "$output_directory/RootFs/Documentation/SystemLibraryNotices.txt"

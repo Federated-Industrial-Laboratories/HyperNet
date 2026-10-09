@@ -44,10 +44,16 @@ lexicographically sorted and drawn from:
 | `PagesSubmit` | `PageSubmit`, own `PageWithdraw` |
 | `ReviewInspect` | `PageQueue`, `PageInspect` |
 | `ReviewDecide` | `PageReview` with Approve or Reject |
+| `MediaRead` | Explicit media Fetch through approved native page references |
+| `MediaSubmit` | Native media reservation, upload, receipt and selected replication |
+| `MediaInspect` | Quarantine media Fetch and explicit inspection attestation |
 
 `ReviewDecide` requires `ReviewInspect`, a canonical 32-byte hexadecimal
 `reviewPolicyDigest` and `reviewMode` equal to `Manual` or `Automatic`. Otherwise
-both policy fields are null. Review permissions require an administrator owner.
+both policy fields are null. Review permissions and `MediaInspect` require an
+administrator owner. Any explicit media permission permits `PageMediaHosts` with
+results restricted to the grant namespaces. Page permissions alone disclose no
+media bytes. Media rights retain namespace and page-ID restrictions.
 
 A successful creation returns `result.application`:
 
@@ -82,7 +88,7 @@ create another grant or delegate their access. There is no update command.
 Create and revoke use ordinary exact-request transaction receipts. Retrying the
 same signed request returns its receipt only to the authorised caller; a reused
 request ID with different bytes returns `RequestConflict`. Read operations create
-no mutation receipt. Every successful application command preserves schema 8.
+no mutation receipt. Every successful application command preserves schema 9.
 
 ## Page integration
 

@@ -46,6 +46,7 @@ pub(crate) fn client(state: &State, key: &str, now: u64) -> Result<(), &'static 
         || state.bridge_consents.contains_key(key)
         || (state.mail.hosts.contains_key(key)
             || state.transfers.hosts.contains_key(key)
+            || state.media.hosts.contains_key(key)
             || state.ssh.services.contains_key(key))
         || member.grants & FEDERATION != 0
         || (member.grants & HOST != 0 && member.grants & ADMIN == 0)
@@ -667,6 +668,10 @@ pub fn apply(
                 deletes.push(quarantine_key(page_id, old.revision));
             }
             let version = expected_version.checked_add(1).ok_or("CapacityExceeded")?;
+            let assets = markup::parse(body)?.assets;
+            crate::media_authority::reserve(
+                state, request, now, version, page_id, namespace, digest, &assets,
+            )?;
             let page = state.pages.entry(page_id.clone()).or_insert(PageRecord {
                 version: 0,
                 author: request.key.clone(),
@@ -778,6 +783,20 @@ pub fn apply(
             let version = expected_version.checked_add(1).ok_or("CapacityExceeded")?;
             let publication = if decision == "Approve" {
                 signer_permission(state, author, "PagesSubmit", namespace, page_id, now)?;
+                let submitted: Envelope =
+                    decode_blob(blobs, &quarantine_key(page_id, pending.revision))?;
+                let submitted = protocol::verify_archived(&submitted, &state.network)?;
+                let Command::PageSubmit { body, .. } = &submitted.request.command else {
+                    return Err("InvalidPageProof");
+                };
+                crate::media_authority::approve(
+                    state,
+                    page_id,
+                    pending.revision,
+                    &markup::parse(body)?.assets,
+                    &request.key,
+                    now,
+                )?;
                 let submission = decode_blob(blobs, &quarantine_key(page_id, pending.revision))?;
                 let bundle = PageBundle {
                     submission,
@@ -814,6 +833,7 @@ pub fn apply(
                 }
                 puts.push((publication_key(&descriptor), bytes.clone()));
                 Some(PublishedPage {
+                    assets: markup::parse(body)?.assets,
                     descriptor,
                     bytes: bytes.len() as u64,
                 })

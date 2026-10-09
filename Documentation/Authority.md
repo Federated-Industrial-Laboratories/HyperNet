@@ -305,8 +305,8 @@ the service immune to denial of service. Deployment ingress and voter storage
 quotas remain necessary. Logs contain readiness and static operational failures,
 not invitation secrets or request bodies. There is no third-party telemetry.
 
-The request envelope uses version 1. The authority state uses exactly version 8;
-these identify different objects. New networks begin at state 8 and every state
+The request envelope uses version 1. The authority state uses exactly version 9;
+these identify different objects. New networks begin at state 9 and every state
 reader and writer retains that contract. All current feature fields are required,
 including empty maps. Retired state versions, missing fields and unknown versions
 are rejected without rewriting or deleting stored bytes. There is no migration,

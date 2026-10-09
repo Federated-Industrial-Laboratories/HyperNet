@@ -21,7 +21,7 @@ Components use `@Name {attributes}` on one line. Containers end with `@End` on
 its own line. Leading indentation is rejected. Component names, attributes,
 IDs and colour names are case-sensitive. Unknown fields, duplicate JSON keys at
 any depth, fractional numbers, invalid bounds and unresolved references fail.
-Explicit null is accepted only for optional ID and colour fields.
+Explicit null is accepted only for optional ID, colour and motion fields.
 
 At most 256 nodes, eight tree levels and 64 controls are allowed. Text lines,
 spacers and containers each count as one node; title and `@End` do not. Controls
@@ -39,16 +39,18 @@ optional `id` follows the ID rule above.
 | --- | --- | --- | --- |
 | Column | None | id, colour, weight=1 (1-8), padding=0 (0-4), gap=0 (0-4) | One or more |
 | Row | None | id, colour, minChildColumns=24 (12-120), gap=1 (0-4) | One through eight |
-| Panel | label | id, colour, padding=1 (0-4) | One or more |
+| Panel | label | id, colour, motion, padding=1 (0-4) | One or more |
 | ScrollBox | id, label, rows (2-40) | colour | One or more |
-| Text | value (nonempty, at most 1024 bytes) | colour, bold=false | None |
+| Text | value (nonempty, at most 1024 bytes) | id, colour, motion, bold=false | None |
 | Separator | None | colour | None |
 | Spacer | rows (1-8) | None | None |
-| Progress | label, value, maximum | colour | None |
+| Progress | label, value, maximum | id, colour, motion | None |
 | Button | label, action | id, colour | None |
 | Form | id, label, profile, recipient, owner | None | Direct Field and Submit children |
 | Field | id, label, kind and its limits | required=false | None |
 | Submit | label | None | None |
+| Asset | id, profile, width, height, bytes, digest, hosts, copies | None | Declaration outside containers |
+| Image | id, asset, alt, rows (1-40) | fit=Contain, motion | None |
 
 Progress numbers are integers: maximum is 1 through 1000000 and value is zero
 through maximum. A progress component displays supplied information; it neither
@@ -69,6 +71,8 @@ Buttons accept exactly one of these objects:
 {"kind":"Navigate","target":"https://example.com/"}
 {"kind":"Focus","target":"Guide"}
 {"kind":"Scroll","target":"Guide","direction":"End"}
+{"kind":"Reveal","target":"Picture"}
+{"kind":"Motion","target":"Banner","running":false}
 ```
 
 Focus and Scroll targets must identify a ScrollBox in the same document. Forward
@@ -86,9 +90,83 @@ or an explicitly authorised federation agreement and fresh verified content.
 The compact `=> TARGET LABEL` line creates a navigation button. Its label follows
 the same bounds. A display label never substitutes for the actual destination.
 
-Media, animation and executable handlers are not accepted by this profile's
-current implementation. Unknown syntax is rejected during submission and proof
-verification. It cannot be published as an inert placeholder for later actions.
+Reveal targets an Image ID; Motion targets a component with a declared effect.
+Unknown syntax and executable handlers are rejected during submission and proof
+verification. Neither action provides a URL or arbitrary command.
+
+## Static media and local motion
+
+An Asset declaration binds one exact static object. IDs follow the component ID
+syntax and are unique within the asset list. Every declared asset must appear in
+an Image; every Image must resolve its asset. Asset and component IDs have separate
+namespaces. At most eight assets and 4 MiB of canonical bytes are allowed per page.
+Each dimension is 1 through 1024, with at most 262144 pixels. `digest` is the exact
+bytes' SHA-256, encoded as 64 lowercase hexadecimal characters. `hosts` contains
+one through three distinct 64-character host keys, never addresses or URLs.
+`copies` is 1 through the host count; administrator policy can require more.
+
+`HyperNetRaster/1` contains exactly width * height * 3 bytes of row-major RGB8,
+left-to-right and top-to-bottom, without metadata, headers, padding or animation.
+`HyperNetVector/1` contains canonical geometry as specified below, at most 256 KiB.
+The same size, manifest, digest and geometry checks apply to imports, sealed
+storage, moderation and independent client reads.
+
+Image `alt` is required, nonempty visible text of at most 128 bytes. `rows` reserves
+a bounded viewport within normal page flow. `fit` is Contain or Cover. Images do
+not replace semantic text, controls, responsive layout or browser chrome. Clients
+start with alt text and fetch only after explicit reveal. Missing support, revoked
+access, unknown geometry or exhausted display budgets retain the labelled fallback.
+The publication binds all alt text, manifests, placement policy and effect settings.
+
+A `motion` object contains exactly `preset` and integer `durationMs` (1000-10000).
+Text permits ColourPulse, TextFade or TextScroll; Panel permits BorderEmphasis;
+Progress permits ProgressSweep; Image permits ImagePan or ImageFade. Defaults are
+static. An explicit local activation lasts at most ten seconds. Clients provide
+pause/reduced-motion controls, stop hidden effects, and limit active visible effects
+to eight. They paint at most ten text frames and two bitmap frames per second.
+ProgressSweep is decorative and does not change the reported numeric progress.
+
+The protocol sends static source, static assets and preset parameters. Viewers
+generate every effect frame locally. Effects cannot request frames, poll a service,
+fetch another asset, introduce scripts or supply an author-defined frame sequence.
+A graphical client may implement the same bounded presets in its own renderer.
+
+## Retained vector geometry
+
+`HyperNetVector/1` is strict canonical UTF-8 JSON. The top-level fields, in order,
+are `profile`, `width`, `height`, `background` and `paths`. Background is three
+RGB8 integers. Paths are in painting order, at most 512. Each path has `commands`,
+`fill`, `stroke` and `fillRule`, in that order. Fill is null or four RGBA8 integers.
+Stroke is null or `{ "colour": [R,G,B,A], "width": INTEGER }`. At least one paint
+must exist. FillRule is NonZero or EvenOdd. Stroke uses butt caps, miter joins and
+miter limit four. Later paths composite over earlier paths and the opaque background.
+
+Coordinates and stroke widths use 1024 integer units per pixel. Coordinate absolute
+values are at most 16777216; stroke width is 1 through 65536. The viewport clips all
+geometry. Width/height must match the asset manifest. These commands use a `kind`
+tag first, followed by the listed fields in order:
+
+| kind | Fields |
+| --- | --- |
+| Move | x, y |
+| Line | x, y |
+| Quad | x1, y1, x, y |
+| Cubic | x1, y1, x2, y2, x, y |
+| Close | None |
+
+A path begins with Move. Close ends the current contour; another command then
+requires Move. Each path has 1-2048 commands, and the object has at most 8192 total.
+Unknown/duplicate fields, fractions, resource references, expressions and strings
+in coordinates fail. Canonical encoding has no whitespace, omitted optional fields,
+trailing newline or alternative field order; null paint fields are explicit.
+
+SVG import converts the documented static subset into this representation inside
+a confined worker. Original XML, active content, resource references and animation
+are not published. The import report identifies removed content; unsupported visual
+features fail. Developers can render the typed geometry directly or export it as a
+minimal static SVG containing numeric paths and literal paints. No SVG engine or
+XML parser is required in HyperNet infrastructure. Logical page reflow, labels,
+focus and permissions remain HyperPage responsibilities in every viewer.
 
 ## Declarative forms
 
@@ -162,6 +240,8 @@ source bounds.
 Plain output includes all text, scrollbox contents, progress values, button labels
 and destinations in document order. Forms include their profile, recipient, owner,
 schema digest, every field type, limit, choice, required flag and submit label.
+Media includes every manifest, host/copy policy, alt label, fit and effect preset.
+Plain output emits no pixels, animation or network request.
 Output does not depend on which content initially
 fits the screen. Moderation must expose all of these values. A renderer may not
 discard unknown critical semantics and continue displaying an approved page.

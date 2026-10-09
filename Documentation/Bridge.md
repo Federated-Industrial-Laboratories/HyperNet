@@ -37,7 +37,7 @@ observe transferred plaintext in its process memory.
 Bridge consent is one exact document signed by both service identities. Its
 JSON object contains `payload`, `sourceSignature` and `destinationSignature`.
 The payload is unpadded base64url JSON. Both signatures cover
-`HyperNet/BridgeConsent/1`, a zero byte and the exact decoded payload bytes.
+`HyperNet/BridgeConsent/2`, a zero byte and the exact decoded payload bytes.
 Its profile is SHA-256 of the complete document file, including any final newline.
 Register that same file on both networks; do not reformat it afterward.
 
@@ -45,10 +45,16 @@ The payload is:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "service": "FederationPages",
   "agreementId": "ReplaceWithTreatyAgreementId",
   "treatyDigest": "ReplaceWithTypedTreatyDigest",
+  "mediaProfiles": [],
+  "mediaSourceHosts": [],
+  "mediaDestinationHosts": [],
+  "mediaMaxBytes": 0,
+  "mediaRequiredCopies": 0,
+  "media": [],
   "sourceNamespace": "Public",
   "destinationNamespace": "Guests",
   "source": {
@@ -101,6 +107,15 @@ memory, 96 PIDs, one and a half CPUs and 17 MiB tmpfs across all three container
 Logs are capped at 1 MiB per container. Image and private configuration storage
 are installation overhead outside these runtime quotas.
 
+Enabled media repeats the exact treaty's five media fields. Each `media` route
+contains `network`, `hostKey`, `endpoint`, `address`, `caDigest`,
+`certificateDigest` and `authoritySigner`, equal to the registered store consent.
+Provide `MediaCa0.pem` through `MediaCa5.pem` in consent-route order as needed.
+Each route adds a separately isolated relay with 128 MiB memory, 32 tasks, half a
+CPU and 8 MiB tmpfs. It permits four connections at 1 MiB/s and 128 KiB per
+connection direction. The helper generates runtime media route entries and pins
+their relay addresses. The bridge never receives unrestricted network egress.
+
 ## Sign and register
 
 Create separate Suite profiles for each bridge identity, including its network's
@@ -147,6 +162,7 @@ Prepare a private configuration directory with exactly these required files:
   "consentFile": "/Config/Consent.json",
   "treatyFile": "/Config/Treaty.json",
   "stateDirectory": "/State",
+  "media": [],
   "source": {
     "network": "ReplaceWithSourceNetwork",
     "endpoint": "https://source.example:8443/",

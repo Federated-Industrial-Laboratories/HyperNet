@@ -17,13 +17,13 @@ sys.dont_write_bytecode = True
 import Bundle
 
 PREFIXES = {'Authority': 'HyperNetAuthority', 'Host': 'HyperNet', 'Bridge': 'HyperNetBridge',
-            'MailStore': 'HyperNetMail', 'TransferStore': 'HyperNetTransfer'}
+            'MailStore': 'HyperNetMail', 'TransferStore': 'HyperNetTransfer', 'PageMediaStore': 'HyperNetPageMedia'}
 
 
 def compatible(metadata, current_schema):
-    Bundle.require(type(current_schema) is int and current_schema == 8,
-                   'The current authority schema must be eight')
-    Bundle.require(type(metadata.get('authoritySchema')) is int and metadata['authoritySchema'] == 8,
+    Bundle.require(type(current_schema) is int and current_schema == 9,
+                   'The current authority schema must be nine')
+    Bundle.require(type(metadata.get('authoritySchema')) is int and metadata['authoritySchema'] == 9,
                    'The selected image requires a different authority schema')
 
 
@@ -31,6 +31,7 @@ def stopped(name, kind):
     names = [name]
     if kind == 'Bridge':
         names += [name + 'SourceGate', name + 'DestinationGate']
+        names += [name + 'MediaGate' + str(index) for index in range(6)]
     elif kind != 'Authority':
         names.append(name + 'Gate')
     for name in names:
