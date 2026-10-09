@@ -11,3 +11,4 @@ for script in "$root"/Tools/*.sh; do
     bash -n "$script"
 done
 python3 -B "$root/Tests/Lifecycle.py"
+python3 -B "$root/Tests/Bundle.py"

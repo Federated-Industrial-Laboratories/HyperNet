@@ -213,7 +213,8 @@ scratch OCI image. It does not download a base image. It writes `ImageId.txt` an
 the derived `Seccomp.json` beside the container build input. The output directory
 must not already exist. Run this tool only on trusted build outputs: dependency
 inspection uses the platform's `ldd`. Local image IDs pin the exact installed
-image; signed distribution packages are a separate release capability. This
+image. [Offline packages](Packages.md) add independent signatures, installation
+and verification; signing a candidate is not a public release. This
 packager currently reads Debian/Ubuntu library ownership records and includes
 their notices, versions and source-package inventory. Read
 [LibraryLicences.md](../Packaging/LibraryLicences.md) before distributing an image.

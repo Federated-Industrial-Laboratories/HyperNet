@@ -97,8 +97,8 @@ start() {
         --memory=536870912 --memory-swap=536870912 --pids-limit=64 \
         --cpu-period=100000 --cpu-quota=100000 --log-driver=k8s-file --log-opt=max-size=1mb \
         --network="$network" --publish="$publication" \
-        --volume="$directory/Config:/Config:ro,nosuid,nodev,noexec" \
-        --volume="$state:/State:rw,nosuid,nodev,noexec" \
+        --volume="$directory/Config:/Config:ro,nosuid,nodev,noexec,Z" \
+        --volume="$state:/State:rw,nosuid,nodev,noexec,Z" \
         "$image" authority --config /Config/Authority.json >/dev/null
     printf 'Started %s\n' "$name"
 }
