@@ -21,11 +21,10 @@ PREFIXES = {'Authority': 'HyperNetAuthority', 'Host': 'HyperNet', 'Bridge': 'Hyp
 
 
 def compatible(metadata, current_schema):
-    Bundle.require(type(current_schema) is int and 1 <= current_schema <= 7, 'Unknown current authority schema')
-    Bundle.require(metadata['authoritySchemaMinimum'] == 1 and metadata['authoritySchemaMaximum'] == 7,
-                   'Unqualified image state compatibility profile')
-    Bundle.require(metadata['authoritySchemaMinimum'] <= current_schema <= metadata['authoritySchemaMaximum'],
-                   'The selected image cannot read the declared authority schema')
+    Bundle.require(type(current_schema) is int and current_schema == 8,
+                   'The current authority schema must be eight')
+    Bundle.require(type(metadata.get('authoritySchema')) is int and metadata['authoritySchema'] == 8,
+                   'The selected image requires a different authority schema')
 
 
 def stopped(name, kind):

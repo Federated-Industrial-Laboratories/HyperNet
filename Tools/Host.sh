@@ -39,11 +39,11 @@ initialise() {
     consent=$(printf '%s' "$payload" | base64 --decode)
     jq -e --argjson now "$(date +%s)" '
         (["authorityAddress","authorityEndpoint","cpuPeriod","cpuQuota","deviceKey","expires","grants","memoryBytes","network","pids","stateBytes","version"]) as $base |
-        ((.version == 1 and keys == $base) or
-         (.version == 2 and keys == (($base + ["services","namespaces","pageCacheBytes"]) | sort) and
-          .services == ["Pages"] and (.namespaces | type == "array" and length >= 1 and length <= 16 and
+        .version == 3 and keys == (($base + ["services","namespaces","pageCacheBytes","pageMediaCacheBytes"]) | sort) and
+        (.pageCacheBytes | type == "number" and . == floor) and .pageMediaCacheBytes == 0 and
+        ((.services == [] and .namespaces == [] and .pageCacheBytes == 0) or
+         (.services == ["Pages"] and (.namespaces | type == "array" and length >= 1 and length <= 16 and
               all(type == "string" and test("\\A[A-Za-z][A-Za-z0-9]{0,31}\\z")) and (unique | length) == length) and
-          (.pageCacheBytes | type == "number" and . == floor) and
           .pageCacheBytes >= 65536 and .pageCacheBytes <= .stateBytes-262144)) and
         .grants == 2 and ([.expires,.memoryBytes,.pids,.cpuPeriod,.cpuQuota,.stateBytes] | all(type == "number" and . == floor)) and
         .expires > $now and .expires <= $now+604800 and .memoryBytes >= 67108864 and .memoryBytes <= 8589934592 and

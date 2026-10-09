@@ -31,7 +31,7 @@ fn age_recipient(value: &str) -> bool {
 }
 
 pub fn check_state(state: &State, now: u64) -> Result<(), Failure> {
-    if !(1..=7).contains(&state.version) {
+    if state.version != crate::types::STATE_VERSION {
         return Err("UnsupportedState");
     }
     if state.high_water_time > now {
@@ -412,7 +412,7 @@ pub fn apply(
         }
         _ => return Err("UnsupportedCommand"),
     };
-    state.version = state.version.max(6);
+
     state.high_water_time = state.high_water_time.max(now);
     if !read {
         state.epoch = state.epoch.checked_add(1).ok_or("CapacityExceeded")?;

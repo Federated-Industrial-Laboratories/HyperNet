@@ -74,15 +74,5 @@ pub struct SshState {
     pub services: BTreeMap<String, ServiceRecord>,
     pub grants: BTreeMap<String, Grant>,
     pub key_history: BTreeSet<String>,
-    #[serde(default)]
     pub key_owners: BTreeMap<String, String>,
-}
-
-impl SshState {
-    pub fn is_empty(&self) -> bool {
-        self.services.is_empty()
-            && self.grants.is_empty()
-            && self.key_history.is_empty()
-            && self.key_owners.is_empty()
-    }
 }

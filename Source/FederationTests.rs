@@ -88,6 +88,45 @@ fn source_share_capacity_preserves_existing_refresh_after_excess_admission() {
     fixture.transfer(true).unwrap();
 }
 
+#[test]
+fn source_disclosure_requires_the_exact_treaty_page_profile() {
+    let mut fixture = Fixture::new();
+    fixture.descriptor.profile = "HyperNetPage/1".into();
+    fixture
+        .source
+        .pages
+        .get_mut(&fixture.descriptor.page_id)
+        .unwrap()
+        .published
+        .as_mut()
+        .unwrap()
+        .descriptor = fixture.descriptor.clone();
+    assert_eq!(
+        fixture.call(true, 3, fixture.share(true), 100).err(),
+        Some("PageVersionConflict")
+    );
+    fixture.source.federation_shares.insert(
+        object_key(&fixture.treaty.agreement_id, &fixture.descriptor.page_id),
+        FederationShareRecord {
+            descriptor_digest: descriptor_digest(&fixture.descriptor).unwrap(),
+            share_digest: hex::encode([55; 32]),
+            allowed: true,
+            generation: 1,
+            last_withdrawal_generation: 0,
+        },
+    );
+    assert_eq!(
+        exportable(
+            &fixture.source,
+            &fixture.treaty,
+            &fixture.descriptor.page_id,
+            100
+        )
+        .err(),
+        Some("AuthorShareRequired")
+    );
+}
+
 impl Fixture {
     fn new() -> Self {
         let treaty = FederationTreaty {
@@ -102,7 +141,7 @@ impl Fixture {
             source_namespace: "Public".into(),
             destination_namespace: "Imported".into(),
             service: "Pages".into(),
-            profile: "HyperNetPage/1".into(),
+            profile: crate::markup::PROFILE.into(),
             expires: 1000,
         };
         let mut source = State::initial(treaty.source_network.clone(), public(1), 100);
@@ -133,7 +172,7 @@ impl Fixture {
                 revoked: false,
             },
         );
-        let body = "HyperNetPage/1\n# Notice\n: Shared by its author.\n";
+        let body = "HyperNetPage/2\n# Notice\n: Shared by its author.\n";
         let page_id = hex::encode([42; 16]);
         let submission = request(
             &source.network,
@@ -144,7 +183,7 @@ impl Fixture {
                 expected_version: 0,
                 namespace: "Public".into(),
                 audience: "Members".into(),
-                profile: "HyperNetPage/1".into(),
+                profile: crate::markup::PROFILE.into(),
                 digest: hex::encode(Sha256::digest(body.as_bytes())),
                 body: body.into(),
             },
@@ -158,7 +197,7 @@ impl Fixture {
                 expected_version: 1,
                 revision: 1,
                 digest: hex::encode(Sha256::digest(body.as_bytes())),
-                profile: "HyperNetPage/1".into(),
+                profile: crate::markup::PROFILE.into(),
                 author: public(3),
                 namespace: "Public".into(),
                 audience: "Members".into(),
@@ -177,7 +216,7 @@ impl Fixture {
             reviewer: public(1),
             namespace: "Public".into(),
             audience: "Members".into(),
-            profile: "HyperNetPage/1".into(),
+            profile: crate::markup::PROFILE.into(),
             digest: hex::encode(Sha256::digest(body.as_bytes())),
             submission_digest: submission.digest,
             approval_digest: approval.digest,
@@ -427,7 +466,7 @@ fn bilateral_sharing_requires_author_opt_in_and_exact_local_review() {
     for _ in 0..70 {
         assert_eq!(fixture.transfer(false).unwrap()["version"], 2);
     }
-    assert_eq!(fixture.destination.version, 4);
+    assert_eq!(fixture.destination.version, crate::types::STATE_VERSION);
     fixture.call(true, 3, fixture.share(false), 100).unwrap();
     assert_eq!(fixture.transfer(false).err(), Some("AuthorShareRequired"));
     assert!(fixture.call(false, 4, fixture.read(), 105).is_err());

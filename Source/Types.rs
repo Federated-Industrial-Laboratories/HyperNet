@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 mod federation;
 pub use federation::*;
 
+pub const STATE_VERSION: u32 = 8;
+
 pub const MEMBER: u64 = 1;
 pub const HOST: u64 = 2;
 pub const ADMIN: u64 = 4;
@@ -203,8 +205,7 @@ pub enum Command {
         grants: u64,
         expires: u64,
         certificate: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        document: Option<String>,
+        document: String,
     },
     Withdraw,
     Heartbeat {
@@ -412,8 +413,7 @@ pub struct Consent {
     pub expires: u64,
     pub certificate: String,
     pub active: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub document: Option<String>,
+    pub document: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -508,6 +508,7 @@ pub struct Receipt {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct State {
+    #[serde(deserialize_with = "state_version")]
     pub version: u32,
     pub network: String,
     pub epoch: u64,
@@ -516,35 +517,30 @@ pub struct State {
     pub invitations: BTreeMap<String, Invitation>,
     pub consents: BTreeMap<String, Consent>,
     pub receipts: BTreeMap<String, Receipt>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub pages: BTreeMap<String, PageRecord>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub replica_tickets: BTreeMap<String, TicketRecord>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub federation_agreements: BTreeMap<String, FederationAgreement>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub bridge_consents: BTreeMap<String, Consent>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub federation_shares: BTreeMap<String, FederationShareRecord>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub federation_pages: BTreeMap<String, FederationPageRecord>,
-    #[serde(default)]
     pub mail: crate::mail_types::MailState,
-    #[serde(
-        default,
-        skip_serializing_if = "crate::transfer_types::TransferState::is_empty"
-    )]
     pub transfers: crate::transfer_types::TransferState,
-    #[serde(default, skip_serializing_if = "crate::ssh_types::SshState::is_empty")]
     pub ssh: crate::ssh_types::SshState,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub applications: BTreeMap<String, crate::application_authority::ApplicationRecord>,
+}
+
+fn state_version<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    let version = u32::deserialize(deserializer)?;
+    if version != STATE_VERSION {
+        return Err(serde::de::Error::custom("UnsupportedState"));
+    }
+    Ok(version)
 }
 
 impl State {
     pub fn initial(network: String, admin: String, now: u64) -> Self {
         Self {
-            version: 1,
+            version: STATE_VERSION,
             network,
             epoch: 1,
             high_water_time: now,

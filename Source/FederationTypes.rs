@@ -74,9 +74,7 @@ pub struct FederationShareRecord {
     pub descriptor_digest: String,
     pub share_digest: String,
     pub allowed: bool,
-    #[serde(default)]
     pub generation: u64,
-    #[serde(default)]
     pub last_withdrawal_generation: u64,
 }
 

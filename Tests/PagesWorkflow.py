@@ -65,7 +65,7 @@ class PagesWorkflow(Workflow):
         specification={'grants':2,'expires':expiry,'memoryBytes':268435456,'pids':64,
             'cpuQuota':100000,'cpuPeriod':100000,'stateBytes':16777216,
             'authorityEndpoint':'https://authority.example:8443','authorityAddress':self.broker_address+':8443',
-            'services':['Pages'],'namespaces':['News'],'pageCacheBytes':65536}
+            'services':['Pages'],'namespaces':['News'],'pageCacheBytes':65536,'pageMediaCacheBytes':0}
         self.write(self.source/'Specification.json',specification)
         consent=self.call('Member','host-consent','--spec',self.source/'Specification.json',
                           '--output',self.source/'Consent.json')
@@ -74,8 +74,8 @@ class PagesWorkflow(Workflow):
         fingerprint=hashlib.sha256(der).hexdigest()
         self.call('Member','consent','--profile',self.profile,'--grants','2',
             '--expires',str(expiry),'--certificate',fingerprint,good=False)
-        # A hash without the document creates only heartbeat consent, never Pages access.
-        self.check('profile hash alone cannot grant Pages service',not self.api('Member',
+        # A profile hash without its signed document is not valid hosting consent.
+        self.check('profile hash alone cannot register hosting consent',not self.api('Member',
             {'type':'PageSync','profile':self.profile,'knownInventory':None,'fetch':None},hosting=True)['ok'])
         self.call('Member','consent','--profile',self.profile,'--grants','2','--expires',str(expiry),
                   '--certificate',fingerprint,'--document',self.source/'Consent.json')
@@ -134,7 +134,7 @@ else: paths[0].write_bytes(b'Untrusted cache replacement\\n')
             assert marker in output, 'authenticated terminal navigation did not reach expected page'
         try:
             expect(b'HyperNet Pages | Outside')
-            os.write(master,b'\r'); expect(b'HyperNet Pages | Welcome')
+            os.write(master,b'\t\r'); expect(b'HyperNet Pages | Welcome')
             os.write(master,b'r'); expect(b'HyperNet Pages | Welcome')
             os.write(master,b'b'); expect(b'HyperNet Pages | Outside')
             os.write(master,b'q'); process.wait(timeout=5)
@@ -148,16 +148,36 @@ else: paths[0].write_bytes(b'Untrusted cache replacement\\n')
         author=self.client('Author'); reader=self.client('Reader')
         self.admit('Author',author,1); self.admit('Reader',reader,1); self.admit('Member',self.member,3)
         page=secrets.token_hex(16)
-        original='HyperNetPage/1\n# Welcome\n: Approved original.\n'
+        def component_page(message):
+            return ('HyperNetPage/2\n# Welcome\n'
+                '@Panel {"label":"News","colour":"Cyan"}\n'
+                '@Row {"minChildColumns":24}\n'
+                '@Column {"weight":2}\n'
+                '@Text '+json.dumps({'value':message,'bold':True})+'\n'
+                '@Progress {"label":"Published","value":1,"maximum":1}\n'
+                '@End\n'
+                '@ScrollBox {"id":"Details","label":"Details","rows":2}\n'
+                ': First detail.\n: Second detail.\n: Complete offscreen detail.\n'
+                '@End\n@End\n'
+                '@Button {"label":"Read details","action":{"kind":"Focus","target":"Details"}}\n'
+                '@End\n')
+        original=component_page('Approved original.')
         first=self.submit(page,original)
         self.check('submission enters quarantine at version one',first['version']==1)
         self.check('quarantined page cannot be discovered',not self.call('Reader','pages','list')['result']['entries'])
         self.check('quarantined page cannot be read',self.read(page,good=False).returncode!=0)
         self.check('ordinary member cannot inspect another author draft',not self.api('Reader',{'type':'PageInspect','pageId':page})['ok'])
         bad={'type':'PageSubmit','pageId':secrets.token_hex(16),'expectedVersion':0,'namespace':'News',
-             'audience':'Members','profile':'HyperNetPage/1','body':'HyperNetPage/1\n# Bad\n: \u001b]52;bad\u0007\n'}
+             'audience':'Members','profile':'HyperNetPage/2','body':'HyperNetPage/2\n# Bad\n: \u001b]52;bad\u0007\n'}
         bad['digest']=hashlib.sha256(bad['body'].encode()).hexdigest()
         self.check('authority rejects terminal controls in signed markup',not self.api('Author',bad)['ok'])
+        for label, profile, body in [
+            ('retired page profile', 'HyperNetPage/1', 'HyperNetPage/1\n# Retired\n: Text.\n'),
+            ('header and profile mismatch', 'HyperNetPage/2', 'HyperNetPage/1\n# Retired\n: Text.\n'),
+            ('unimplemented form component', 'HyperNetPage/2', 'HyperNetPage/2\n# Form\n@Form {}\n')]:
+            bad.update(pageId=secrets.token_hex(16), profile=profile, body=body,
+                       digest=hashlib.sha256(body.encode()).hexdigest())
+            self.check('authority rejects '+label, not self.api('Author',bad)['ok'])
         record=self.inspect(page)
         value=json.loads(record.read_text())
         pending=value['inspection']['pending']
@@ -168,9 +188,11 @@ else: paths[0].write_bytes(b'Untrusted cache replacement\\n')
         changed=dict(command,digest='00'*32)
         self.check('approval cannot substitute a different source hash',not self.api('Administrator',changed)['ok'])
         self.review(record)
-        self.check('independent reader verifies approved original','Approved original.' in self.read(page).stdout)
+        rendered=self.read(page).stdout
+        self.check('independent reader verifies approved component page',
+            all(text in rendered for text in ['Approved original.','Published','Complete offscreen detail.','Read details']))
         self.check('old review record cannot approve twice',self.review(record,good=False).returncode!=0)
-        replacement='HyperNetPage/1\n# Welcome\n: Approved replacement.\n'
+        replacement=component_page('Approved replacement.')
         self.submit(page,replacement,2)
         self.check('pending replacement leaves current publication readable','Approved original.' in self.read(page).stdout)
         stale=self.inspect(page)
@@ -182,7 +204,7 @@ else: paths[0].write_bytes(b'Untrusted cache replacement\\n')
         self.check('concurrent review has exactly one committed decision',sum(r.returncode==0 for r in decisions)==1)
         self.check('new publication replaces previous bytes','Approved latest.' in self.read(page).stdout)
         other=secrets.token_hex(16)
-        self.submit(other,f'HyperNetPage/1\n# Outside\n: Another namespace.\n=> hypernet://{self.network}/{author}/News/{page} Welcome page\n',namespace='Other')
+        self.submit(other,f'HyperNetPage/2\n# Outside\n: Another namespace.\n=> hypernet://{self.network}/{author}/News/{page} Welcome page\n',namespace='Other')
         self.review(self.inspect(other))
         self.navigate(other)
         self.start_pages_host()
@@ -206,7 +228,7 @@ else: paths[0].write_bytes(b'Untrusted cache replacement\\n')
         self.wait_cache(1)
         self.check('fresh volatile host cache recovers replica reads','Approved latest.' in self.read(page,replica=True).stdout)
         rejected=secrets.token_hex(16)
-        self.submit(rejected,'HyperNetPage/1\n# Rejected\n: Never published.\n')
+        self.submit(rejected,'HyperNetPage/2\n# Rejected\n: Never published.\n')
         self.review(self.inspect(rejected),'reject')
         self.check('rejected submission remains unreadable',self.read(rejected,good=False).returncode!=0)
         self.call('Author','pages','withdraw','--page-id',page,'--expected-version','5')

@@ -14,7 +14,7 @@ const MAX_SUBMISSION: usize = 48 * 1024;
 const MAX_APPROVAL: usize = 4 * 1024;
 const MAX_QUARANTINE: u64 = 4 * 1024 * 1024;
 const MAX_PUBLISHED: u64 = 8 * 1024 * 1024;
-const PROFILE: &str = "HyperNetPage/1";
+use crate::markup::PROFILE;
 
 pub struct Change {
     pub reply: Reply,
@@ -73,7 +73,7 @@ fn host_scope(
     {
         return Err("ConsentRequired");
     }
-    let document = registered.document.as_ref().ok_or("PagesConsentRequired")?;
+    let document = &registered.document;
     let bytes = URL_SAFE_NO_PAD
         .decode(document)
         .map_err(|_| "InvalidConsent")?;
@@ -82,11 +82,7 @@ fn host_scope(
     }
     let consent =
         host::verify_consent(&bytes, &state.network, key, now).map_err(|_| "InvalidConsent")?;
-    if consent.version != 2
-        || !consent
-            .services
-            .as_ref()
-            .is_some_and(|services| services.len() == 1 && services[0] == "Pages")
+    if !consent.pages_enabled()
         || consent.grants != registered.grants
         || consent.expires != registered.expires
     {
@@ -96,10 +92,7 @@ fn host_scope(
 }
 
 fn scope_contains(scope: &host::Consent, namespace: &str) -> bool {
-    scope
-        .namespaces
-        .as_ref()
-        .is_some_and(|namespaces| namespaces.iter().any(|entry| entry == namespace))
+    scope.namespaces.iter().any(|entry| entry == namespace)
 }
 
 pub(crate) fn published<'a>(
@@ -248,7 +241,7 @@ pub fn preflight(
     certificate: Option<&str>,
     now: u64,
 ) -> Result<(), &'static str> {
-    if !(1..=7).contains(&state.version) {
+    if state.version != crate::types::STATE_VERSION {
         return Err("UnsupportedState");
     }
     if state.high_water_time > now.saturating_add(2) {
@@ -511,7 +504,7 @@ fn validate_content(
     if body.len() > 16 * 1024 {
         return Err("PageTooLarge");
     }
-    markup::validate(body)?;
+    markup::validate_profile(profile, body)?;
     if hex::encode(Sha256::digest(body.as_bytes())) != digest {
         return Err("PageDigestMismatch");
     }
@@ -1044,7 +1037,7 @@ pub fn apply(
     if policy_changed {
         state.epoch = state.epoch.checked_add(1).ok_or("CapacityExceeded")?;
     }
-    state.version = state.version.max(2);
+
     state.high_water_time = state.high_water_time.max(now);
     let reply = Reply::success(state.epoch, result);
     encoded(&reply, 256 * 1024)?;
@@ -1176,10 +1169,31 @@ mod tests {
     }
 
     #[test]
+    fn signed_profile_and_exact_source_must_use_the_current_contract() {
+        let body = format!("{PROFILE}\n# Exact bytes\n: Keep this text.\n");
+        let digest = hex::encode(Sha256::digest(body.as_bytes()));
+        let id = hex::encode([22; 16]);
+        assert!(validate_content(&id, "Public", "Members", PROFILE, &digest, &body).is_ok());
+        assert!(
+            validate_content(&id, "Public", "Members", "HyperNetPage/1", &digest, &body).is_err()
+        );
+        let retired = body.replacen(PROFILE, "HyperNetPage/1", 1);
+        let retired_digest = hex::encode(Sha256::digest(retired.as_bytes()));
+        assert!(
+            validate_content(&id, "Public", "Members", PROFILE, &retired_digest, &retired).is_err()
+        );
+        let changed = body.replace("this text", "other text");
+        assert_eq!(
+            validate_content(&id, "Public", "Members", PROFILE, &digest, &changed).err(),
+            Some("PageDigestMismatch")
+        );
+    }
+
+    #[test]
     fn quarantine_publication_proofs_and_withdrawal_are_distinct() {
         let (mut state, mut blobs) = initial();
         let page_id = hex::encode([7; 16]);
-        let body = "HyperNetPage/1\n# Notice\n: Reviewed text.\n";
+        let body = "HyperNetPage/2\n# Notice\n: Reviewed text.\n";
         let submission = submit(&state, 1, 7, 0, body);
         perform(&mut state, &mut blobs, &submission).unwrap();
         let list = request(
@@ -1232,7 +1246,7 @@ mod tests {
             6,
             7,
             2,
-            "HyperNetPage/1\n# Notice\n: Pending change.\n",
+            "HyperNetPage/2\n# Notice\n: Pending change.\n",
         );
         perform(&mut state, &mut blobs, &replacement).unwrap();
         assert_eq!(
@@ -1266,10 +1280,10 @@ mod tests {
     fn per_author_queue_limits_and_service_identity_cannot_be_bypassed() {
         let (mut state, mut blobs) = initial();
         for id in 1..=4 {
-            let submission = submit(&state, id, id, 0, "HyperNetPage/1\n# Notice\n: Pending.\n");
+            let submission = submit(&state, id, id, 0, "HyperNetPage/2\n# Notice\n: Pending.\n");
             perform(&mut state, &mut blobs, &submission).unwrap();
         }
-        let excess = submit(&state, 5, 5, 0, "HyperNetPage/1\n# Notice\n: Pending.\n");
+        let excess = submit(&state, 5, 5, 0, "HyperNetPage/2\n# Notice\n: Pending.\n");
         assert_eq!(
             perform(&mut state, &mut blobs, &excess).err(),
             Some("PageQuotaExceeded")
@@ -1282,7 +1296,7 @@ mod tests {
                 expires: 1000,
                 certificate: hex::encode([2; 32]),
                 active: false,
-                document: None,
+                document: String::new(),
             },
         );
         let list = request(

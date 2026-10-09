@@ -24,7 +24,7 @@ The measured profile is 256 MiB memory, 32 PIDs, one CPU and 8 MiB of temporary
 state. Missing requirements or failed enforcement stop qualification. This probe
 is a necessary platform check, not a protocol security audit or a complete network
 deployment test. Real installation, authenticated operation, stop/restart,
-compatible upgrade and recovery must also pass before a platform is advertised.
+current-contract replacement and recovery must also pass before a platform is advertised.
 
 Dedicated configuration and state mounts use private SELinux relabelling (`:Z`)
 on supporting runtimes. Keep SELinux enforcing during qualification. Each mount
@@ -36,34 +36,15 @@ protocol composition, key lifecycle and confinement, with the published supporte
 profile matrix. Private qualification packages and earlier Internet-path checks
 are not a public release or universal Linux support claim.
 
-## Measured native profiles
+## Qualification records
 
-Version 0.7.0 has the following native x86_64 evidence. Each row passed signed
-installation and the actual confinement probe. Authenticated Pages coverage
-includes three TLS authority voters, invitation redemption, quarantine and manual
-approval, consented replication, replica restart and revocation after authority
-restart. The Ubuntu 24.04 run also exercised a real 0.6.0 to 0.7.0 upgrade and
-compatible rollback while retaining approved content, revoked membership,
-consent, resource policy and monotonic authority floors.
+Each qualification report must identify the exact runtime, image and native host.
+Evidence for an earlier executable does not qualify a rewritten contract. Record
+signed installation, authenticated Pages operation, current-schema restart and
+recovery, confinement and withdrawal for each advertised platform.
 
-| Distribution | Native kernel | Podman | Landlock ABI | Additional enforcement |
-| --- | --- | --- | --- | --- |
-| Ubuntu 24.04 x86_64 | 7.0.0-34-generic | 4.9.3 | 8 | seccomp and cgroup v2 |
-| Ubuntu 26.04 x86_64 | 7.0.0-38-generic | 5.7.0 | 8 | seccomp and cgroup v2 |
-| Debian 13 x86_64 | 6.12.111+deb13-amd64 | 5.4.2 | 6 | seccomp and cgroup v2 |
-| Fedora 44 x86_64 | 6.19.10-300.fc44.x86_64 | 5.8.1 | 7 | SELinux enforcing, seccomp and cgroup v2 |
-
-These results describe the listed kernels and configured prerequisites. They do
-not qualify a distribution's older default kernel or every service on each
-platform. Rootless networking also requires the selected runtime's maintained
-network helper, such as pasta or slirp4netns, and its DNS helper when enabled.
-Install those distribution packages before operating networked profiles. Missing
-network prerequisites do not justify host networking or weaker confinement.
-
-The adjacent client has its own independent native package matrix. Full mail,
-transfer, SSH, federation and adapter workflows retain their separately recorded
-qualification scope; the table above does not expand that scope. General Core
-bundles exclude custom SSH command overlays. Native AArch64, other distribution
-families, Windows and macOS remain unqualified. No public release, production
-Internet deployment, power-loss recovery guarantee or external security
-certification follows from this private qualification.
+The current target families are Ubuntu, Debian and Fedora on native x86_64 with
+the required kernel and rootless runtime capabilities. Native AArch64 remains
+pending. Core qualification does not establish Suite graphics support or native
+Windows/macOS support. A public release additionally requires its own complete
+platform and security assessment.

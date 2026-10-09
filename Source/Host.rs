@@ -63,12 +63,16 @@ pub struct Consent {
     pub state_bytes: u64,
     pub authority_endpoint: String,
     pub authority_address: SocketAddr,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub services: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub namespaces: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub page_cache_bytes: Option<u64>,
+    pub services: Vec<String>,
+    pub namespaces: Vec<String>,
+    pub page_cache_bytes: u64,
+    pub page_media_cache_bytes: u64,
+}
+
+impl Consent {
+    pub fn pages_enabled(&self) -> bool {
+        self.services.len() == 1 && self.services[0] == "Pages"
+    }
 }
 
 pub struct HostConfig {
@@ -129,11 +133,8 @@ pub fn verify_consent(
     let payload = URL_SAFE_NO_PAD.decode(signed.payload)?;
     ensure!(payload.len() <= 8192, "consent payload is too large");
     let consent: Consent = serde_json::from_slice(&payload)?;
-    let mut message = match consent.version {
-        1 => b"HyperNet/Consent/1\0".to_vec(),
-        2 => b"HyperNet/Consent/2\0".to_vec(),
-        _ => anyhow::bail!("unsupported consent version"),
-    };
+    ensure!(consent.version == 3, "unsupported consent version");
+    let mut message = b"HyperNet/Consent/3\0".to_vec();
     message.extend_from_slice(&payload);
     let signature = ed25519_dalek::Signature::from_bytes(&fixed_hex::<64>(&signed.signature)?);
     VerifyingKey::from_bytes(&public)?.verify_strict(&message, &signature)?;
@@ -155,45 +156,36 @@ pub fn verify_consent(
             && (1024 * 1024..=256 * 1024 * 1024).contains(&consent.state_bytes),
         "invalid resource consent"
     );
-    match consent.version {
-        1 => {
-            let fields: serde_json::Value = serde_json::from_slice(&payload)?;
+    ensure!(
+        consent.page_media_cache_bytes == 0,
+        "page media caching is not supported"
+    );
+    if consent.services.is_empty() {
+        ensure!(
+            consent.namespaces.is_empty() && consent.page_cache_bytes == 0,
+            "heartbeat consent cannot allocate Pages resources"
+        );
+    } else {
+        ensure!(
+            consent.pages_enabled(),
+            "consent must name exactly the Pages service"
+        );
+        ensure!(
+            !consent.namespaces.is_empty() && consent.namespaces.len() <= 16,
+            "invalid namespace count"
+        );
+        let mut unique = std::collections::BTreeSet::new();
+        for namespace in &consent.namespaces {
             ensure!(
-                fields.get("services").is_none()
-                    && fields.get("namespaces").is_none()
-                    && fields.get("pageCacheBytes").is_none(),
-                "consent version one cannot enable services"
+                valid_namespace(namespace) && unique.insert(namespace),
+                "invalid or duplicate namespace"
             );
         }
-        2 => {
-            ensure!(
-                consent.services.as_deref() == Some(&[String::from("Pages")]),
-                "Pages consent must name exactly the Pages service"
-            );
-            let namespaces = consent
-                .namespaces
-                .as_ref()
-                .context("Pages namespaces are required")?;
-            ensure!(
-                !namespaces.is_empty() && namespaces.len() <= 16,
-                "invalid namespace count"
-            );
-            let mut unique = std::collections::BTreeSet::new();
-            for namespace in namespaces {
-                ensure!(
-                    valid_namespace(namespace) && unique.insert(namespace),
-                    "invalid or duplicate namespace"
-                );
-            }
-            let bytes = consent
-                .page_cache_bytes
-                .context("Pages cache quota is required")?;
-            ensure!(
-                bytes >= 65536 && bytes <= consent.state_bytes - CONTROL_RESERVE,
-                "invalid Pages cache quota"
-            );
-        }
-        _ => unreachable!(),
+        ensure!(
+            consent.page_cache_bytes >= 65536
+                && consent.page_cache_bytes <= consent.state_bytes - CONTROL_RESERVE,
+            "invalid Pages cache quota"
+        );
     }
     let endpoint = reqwest::Url::parse(&consent.authority_endpoint)?;
     let host = endpoint.host_str().context("authority host is required")?;
@@ -492,18 +484,14 @@ mod tests {
 
     fn payload(version: u32) -> Value {
         let key = SigningKey::from_bytes(&[17; 32]);
-        let mut payload = json!({
+        let payload = json!({
             "version":version,"network":hex::encode([18;32]),
             "deviceKey":hex::encode(key.verifying_key().as_bytes()),"grants":2,"expires":200,
             "memoryBytes":67108864,"pids":32,"cpuQuota":10000,"cpuPeriod":100000,
             "stateBytes":1048576,"authorityEndpoint":"https://authority.example:8443",
-            "authorityAddress":"192.0.2.20:8443"
+            "authorityAddress":"192.0.2.20:8443",
+            "services":["Pages"],"namespaces":["Public","Manual"],"pageCacheBytes":65536,"pageMediaCacheBytes":0
         });
-        if version == 2 {
-            payload["services"] = json!(["Pages"]);
-            payload["namespaces"] = json!(["Public", "Manual"]);
-            payload["pageCacheBytes"] = json!(65536);
-        }
         payload
     }
 
@@ -528,29 +516,49 @@ mod tests {
     }
 
     #[test]
-    fn pages_need_a_new_versioned_signature_and_explicit_scope() {
-        let mut old = payload(1);
-        assert!(accepts(&old, 1));
-        for value in [json!(["Pages"]), Value::Null] {
-            old["services"] = value;
-            assert!(!accepts(&old, 1));
+    fn current_consent_requires_explicit_services_and_rejects_retired_versions() {
+        for version in [1, 2, 4] {
+            assert!(!accepts(&payload(version), version));
         }
-        let current = payload(2);
-        assert!(accepts(&current, 2));
-        assert!(!accepts(&current, 1));
-        for field in ["services", "namespaces", "pageCacheBytes"] {
+        let current = payload(3);
+        assert!(accepts(&current, 3));
+        assert!(!accepts(&current, 2));
+        for field in [
+            "services",
+            "namespaces",
+            "pageCacheBytes",
+            "pageMediaCacheBytes",
+        ] {
             let mut absent = current.clone();
             absent.as_object_mut().unwrap().remove(field);
-            assert!(!accepts(&absent, 2));
+            assert!(!accepts(&absent, 3));
+            absent[field] = Value::Null;
+            assert!(!accepts(&absent, 3));
         }
-        let mut extra = current;
-        extra["services"] = json!(["Pages", "Shell"]);
-        assert!(!accepts(&extra, 2));
+        for services in [
+            json!(["Pages", "Shell"]),
+            json!(["Pages", "Pages"]),
+            json!(["Other"]),
+        ] {
+            let mut extra = current.clone();
+            extra["services"] = services;
+            assert!(!accepts(&extra, 3));
+        }
+        let mut heartbeat = current.clone();
+        heartbeat["services"] = json!([]);
+        assert!(!accepts(&heartbeat, 3));
+        heartbeat["namespaces"] = json!([]);
+        heartbeat["pageCacheBytes"] = json!(0);
+        assert!(accepts(&heartbeat, 3));
+        for mut consent in [current, heartbeat] {
+            consent["pageMediaCacheBytes"] = json!(1);
+            assert!(!accepts(&consent, 3));
+        }
     }
 
     #[test]
     fn pages_consent_cannot_escape_namespaces_or_storage_reserve() {
-        let original = payload(2);
+        let original = payload(3);
         for namespaces in [
             json!([]),
             json!(["Public", "Public"]),
@@ -564,15 +572,15 @@ mod tests {
         ] {
             let mut consent = original.clone();
             consent["namespaces"] = namespaces;
-            assert!(!accepts(&consent, 2));
+            assert!(!accepts(&consent, 3));
         }
         for quota in [0, 65535, 1048576 - 262144 + 1, u64::MAX] {
             let mut consent = original.clone();
             consent["pageCacheBytes"] = json!(quota);
-            assert!(!accepts(&consent, 2));
+            assert!(!accepts(&consent, 3));
         }
         let mut consent = original;
         consent["pageCacheBytes"] = json!(1048576 - 262144);
-        assert!(accepts(&consent, 2));
+        assert!(accepts(&consent, 3));
     }
 }

@@ -45,10 +45,10 @@ class Packages(unittest.TestCase):
             'Documentation/ThirdPartyNotices.txt', 'Documentation/SystemLibraries.tsv',
             'Documentation/SystemLibraryNotices.txt', 'Images/HyperNetOci.tar')}
         self.payload['ImageId.txt'] = (self.image + '\n').encode()
-        self.manifest = {'format': 1, 'product': 'HyperNet', 'version': '0.7.0',
+        self.manifest = {'format': 1, 'product': 'HyperNet', 'version': '0.7.5',
                          'architecture': Bundle.architecture(), 'metadata': {
                              'imageId': self.image, 'imageArchive': 'Images/HyperNetOci.tar',
-                             'authoritySchemaMinimum': 1, 'authoritySchemaMaximum': 7,
+                             'authoritySchema': 8,
                              'binaries': {'HyperNet': '2' * 64, 'HyperNetGate': '3' * 64},
                              'prerequisites': ['Synthetic package contract fixture']},
                          'files': [{'path': name, 'mode': 0o700 if name.startswith('Tools/') else 0o600,
@@ -133,7 +133,7 @@ class Packages(unittest.TestCase):
                 self.verify(self.archive(manifest))
         for maximum in (6, 99):
             manifest = copy.deepcopy(self.manifest)
-            manifest['metadata']['authoritySchemaMaximum'] = maximum
+            manifest['metadata']['authoritySchema'] = maximum
             with self.assertRaises(ValueError):
                 self.verify(self.archive(manifest))
         manifest = copy.deepcopy(self.manifest)
@@ -144,7 +144,7 @@ class Packages(unittest.TestCase):
     def test_install_is_no_clobber_and_remove_refuses_modified_or_extra_files(self):
         args = self.archive()
         self.installed(args)
-        self.assertEqual(Bundle.installed_manifest(args)[0]['version'], '0.7.0')
+        self.assertEqual(Bundle.installed_manifest(args)[0]['version'], '0.7.5')
         with self.assertRaises(ValueError):
             self.installed(args)
         managed = args.prefix / 'ReadMe.md'
@@ -192,14 +192,14 @@ class Packages(unittest.TestCase):
 
     def test_upgrade_keeps_schema_and_stopped_container_boundaries(self):
         metadata = self.manifest['metadata']
-        Upgrade.compatible(metadata, 7)
-        for schema in (0, 8, 99):
+        Upgrade.compatible(metadata, 8)
+        for schema in (0, 7, 9, 99):
             with self.assertRaises(ValueError):
                 Upgrade.compatible(metadata, schema)
         for maximum in (6, 99):
-            changed = dict(metadata, authoritySchemaMaximum=maximum)
+            changed = dict(metadata, authoritySchema=maximum)
             with self.assertRaises(ValueError):
-                Upgrade.compatible(changed, 7)
+                Upgrade.compatible(changed, 8)
         with patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)):
             with self.assertRaises(ValueError):
                 Upgrade.stopped('HyperNetFixture', 'Authority')
@@ -234,7 +234,7 @@ class Packages(unittest.TestCase):
         (state / 'Canary').write_bytes(b'Unchanged persistent state')
         args = argparse.Namespace(kind='Authority', profile=profile, installation=self.directory / 'Installed',
                                   public_key=Path(str(self.key) + '.pub'), ssh_keygen='/usr/bin/ssh-keygen',
-                                  state_schema=7, expected_image=old_image)
+                                  state_schema=8, expected_image=old_image)
         with patch.object(Bundle, 'installed_manifest', return_value=(self.manifest, {}, set())), \
                 patch.object(Bundle, 'image_matches'), patch.object(Upgrade, 'stopped') as stopped:
             result = Upgrade.switch(args)

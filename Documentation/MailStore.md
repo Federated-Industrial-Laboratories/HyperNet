@@ -11,10 +11,9 @@ Withdrawal or expiry of one service role does not erase this history.
 
 Generate a separate authority mail signing identity in a private
 `MailSigningKey.json` file and add `mailSigningKey` to `Authority.json` before
-initialising the broker. For an existing network, first upgrade every authority
-broker to 0.4.0 or a qualified compatible release before enabling mail: even a
-successful MailHosts directory query commits schema 5, which 0.3.1 cannot read.
-See the [authority migration rules](Authority.md). Then stop each broker,
+initialising the broker. Every broker must use the current authority state-8
+contract; other state versions are refused without migration. To enable the
+service on a current network, stop each broker,
 provision its separate signing file and update its confined configuration before
 restarting. Never
 replace a signer silently: existing host consents pin it. `Tools/Authority.sh`

@@ -31,13 +31,13 @@ python3 Tools/Bundle.py Create \
 Create accepts trusted build outputs only. It inspects the local image without
 starting it, verifies its architecture and compares its actual binaries with the
 supplied build files. Package version identifies the actual HyperNet runtime;
-the currently known state-compatible runtime versions are 0.6.0 and 0.7.0.
+the current runtime is 0.7.5. Other runtime contracts are rejected.
 The helper generates no signing identity. Select and protect the operator's own
 offline signing key; no signing secret enters the package.
 
 The detached signature covers the entire exact archive under SSHSIG namespace
 `HyperNetBundle1`. Manifest format 1 identifies product, runtime version, native
-architecture, immutable image ID, binary hashes, state-schema bounds and every
+architecture, immutable image ID, binary hashes, the exact authority schema and every
 payload file's SHA-256, size and mode. Archives are uncompressed USTAR, at most
 512 MiB, with at most 512 payload files and at most 256 MiB per file. Archives
 contain only one initial manifest and explicitly inventoried regular files.
@@ -104,12 +104,12 @@ python3 Tools/Upgrade.py --kind Authority \
   --profile /Private/AuthorityProfile \
   --installation /Private/HyperNetUpdated \
   --public-key /Trust/Publisher.pub \
-  --expected-image sha256:PreviousImageDigest --state-schema 7
+  --expected-image sha256:PreviousImageDigest --state-schema 8
 ```
 
 Kinds are Authority, Host, Bridge, MailStore and TransferStore. The operation holds
 the same lifecycle lock as their launchers, checks the expected old image and
-signed compatibility bounds, and changes only `Control.json.image`. It does not
+signed authority schema, and changes only `Control.json.image`. It does not
 start a service or modify resources, endpoints, credentials, consent, withdrawal
 markers, durable state or floors. Run Start explicitly and confirm real readiness
 with an authenticated operation before directing clients to the new process.
@@ -118,11 +118,11 @@ automatically allocated private container address is not a stable service addres
 
 `--state-schema` is the operator's inspected value, not independent proof of the
 quorum's current schema. The authority checks the real quorum state again at
-startup and refuses incompatible state. Version 0.7.0 retains authority schema 7;
-this package profile permits schemas 1 through 7. Unknown or incompatible schema
-claims fail closed. A rollback uses the same stopped-profile operation and a
-verified compatible prior installation. Never roll back state, grants, voter
-snapshots or private revision floors to make an old executable start.
+startup and refuses incompatible state. The current package requires schema8.
+There is no legacy schema acceptance or migration. Use a fresh development
+installation when replacing an incompatible prerelease contract. The switch
+operation can change an image only within the current schema. Never restore old
+state, grants, voter snapshots or revision floors to make an old executable start.
 
 SSH profiles cannot use image switching: their signed consent binds the exact
 image and fixed command. Package the new SSH service image and obtain fresh

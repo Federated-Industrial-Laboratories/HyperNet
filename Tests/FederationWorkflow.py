@@ -52,7 +52,7 @@ class FederationWorkflow:
             sourceAuthorityKey=s.signer, destinationAuthorityKey=d.signer,
             sourceBridgeKey=s.bridge, destinationBridgeKey=d.bridge,
             sourceNamespace='News', destinationNamespace='PartnerNews',
-            service='Pages', profile='HyperNetPage/1', expires=int(time.time())+1800)
+            service='Pages', profile='HyperNetPage/2', expires=int(time.time())+1800)
         self.configuration = s.root/'BridgeConfiguration'
         self.configuration.mkdir(mode=0o700)
         self.treaty_path = self.configuration/'Treaty.json'
@@ -73,9 +73,15 @@ class FederationWorkflow:
         self.page = secrets.token_hex(16)
         local_author=d.client('Author'); d.admit('Author',local_author,1)
         self.local_page=secrets.token_hex(16)
-        d.submit(self.local_page,f'HyperNetPage/1\n# LocalGate\n=> hypernet://{s.network}/{self.author}/News/{self.page} Partner page\n')
+        d.submit(self.local_page,f'HyperNetPage/2\n# LocalGate\n=> hypernet://{s.network}/{self.author}/News/{self.page} Partner page\n')
         d.review(d.inspect(self.local_page))
-        s.submit(self.page,f'HyperNetPage/1\n# Partner\n: Original shared content.\n=> hypernet://{d.network}/{local_author}/News/{self.local_page} Local page\n')
+        s.submit(self.page, 'HyperNetPage/2\n# Partner\n'
+            '@Panel {"label":"Partner news","colour":"Green"}\n'
+            ': Original shared content.\n'
+            f'=> hypernet://{d.network}/{local_author}/News/{self.local_page} Local page\n'
+            '@ScrollBox {"id":"Details","label":"Details","rows":2}\n'
+            ': First detail.\n: Second detail.\n: Complete foreign detail.\n'
+            '@End\n@End\n')
         s.review(s.inspect(self.page))
         self.start()
 
@@ -195,9 +201,9 @@ class FederationWorkflow:
             assert marker in output, 'cross-network terminal navigation did not reach '+title.decode()
         try:
             expect(b'LocalGate')
-            os.write(master,b'\r'); expect(b'Partner')
+            os.write(master,b'\t\r'); expect(b'Partner')
             os.write(master,b'r'); expect(b'Partner')
-            os.write(master,b'\r'); expect(b'LocalGate')
+            os.write(master,b'\t\r'); expect(b'LocalGate')
             os.write(master,b'b'); expect(b'Partner')
             os.write(master,b'b'); expect(b'LocalGate')
             os.write(master,b'q'); process.wait(timeout=5)
@@ -221,7 +227,8 @@ class FederationWorkflow:
         self.review()
         result=self.wait_read('Original shared content.')
         self.check('independent destination reader verifies origin and local approval',
-            s.network in result.stdout and 'PartnerNews' in result.stdout)
+            s.network in result.stdout and 'PartnerNews' in result.stdout
+            and 'Partner news' in result.stdout and 'Complete foreign detail.' in result.stdout)
         self.navigate()
         inspection=json.loads(s.run('podman','inspect',self.control['name']).stdout)[0]
         self.check('bridge has one internal network no published port and bounded memory',
@@ -236,7 +243,7 @@ class FederationWorkflow:
         self.share(withdraw=True); time.sleep(6)
         self.check('source author withdrawal stops destination reads within lease bound',self.read(good=False).returncode!=0)
         self.share(); self.wait_read('Original shared content.')
-        s.submit(self.page,'HyperNetPage/1\n# Partner\n: Changed shared content.\n',version=2)
+        s.submit(self.page,'HyperNetPage/2\n# Partner\n@Panel {"label":"Updated news"}\n: Changed shared content.\n@End\n',version=2)
         s.review(s.inspect(self.page)); time.sleep(6)
         self.check('new native publication does not inherit old author sharing',self.read(good=False).returncode!=0)
         self.share(); self.wait_pending()
