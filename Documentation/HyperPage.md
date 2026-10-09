@@ -21,7 +21,7 @@ Components use `@Name {attributes}` on one line. Containers end with `@End` on
 its own line. Leading indentation is rejected. Component names, attributes,
 IDs and colour names are case-sensitive. Unknown fields, duplicate JSON keys at
 any depth, fractional numbers, invalid bounds and unresolved references fail.
-Explicit null is accepted only for optional ID, colour and motion fields.
+Explicit null is accepted only for optional ID, colour, border and motion fields.
 
 At most 256 nodes, eight tree levels and 64 controls are allowed. Text lines,
 spacers and containers each count as one node; title and `@End` do not. Controls
@@ -39,8 +39,8 @@ optional `id` follows the ID rule above.
 | --- | --- | --- | --- |
 | Column | None | id, colour, weight=1 (1-8), padding=0 (0-4), gap=0 (0-4) | One or more |
 | Row | None | id, colour, minChildColumns=24 (12-120), gap=1 (0-4) | One through eight |
-| Panel | label | id, colour, motion, padding=1 (0-4) | One or more |
-| ScrollBox | id, label, rows (2-40) | colour | One or more |
+| Panel | label | id, colour, border, motion, padding=1 (0-4) | One or more |
+| ScrollBox | id, label, rows (2-40) | colour, border | One or more |
 | Text | value (nonempty, at most 1024 bytes) | id, colour, motion, bold=false | None |
 | Separator | None | colour | None |
 | Spacer | rows (1-8) | None | None |
@@ -62,6 +62,39 @@ BrightBlack, BrightRed, BrightGreen, BrightYellow, BrightBlue, BrightMagenta,
 BrightCyan and BrightWhite. Names select logical terminal colours. They cannot
 modify the terminal palette or supply escape sequences. Themes determine actual
 colour values. Readers may disable colour or override presentation.
+
+### Border styles
+
+Panel and ScrollBox accept an optional `border`: Light, Heavy, Double, Rounded
+or Ascii. An omitted or null border inherits the enclosing border style through
+intervening containers. The top-level default is Light. A nested explicit style
+applies within that container without changing siblings. Separator uses its
+enclosing style and has no border attribute.
+
+| Style | Horizontal / vertical | Corners, clockwise from top left | Left / right / top / bottom / crossing junctions |
+| --- | --- | --- | --- |
+| Light | `─` / `│` | `┌ ┐ ┘ └` | `├ ┤ ┬ ┴ ┼` |
+| Heavy | `━` / `┃` | `┏ ┓ ┛ ┗` | `┣ ┫ ┳ ┻ ╋` |
+| Double | `═` / `║` | `╔ ╗ ╝ ╚` | `╠ ╣ ╦ ╩ ╬` |
+| Rounded | `─` / `│` | `╭ ╮ ╯ ╰` | `├ ┤ ┬ ┴ ┼` |
+| Ascii | `-` / `\|` | `+ + + +` | `+ + + + +` |
+
+These finite styles select terminal box-drawing characters. Authors cannot supply
+arbitrary glyph maps, terminal commands or executable style expressions. Separators
+that span a Panel or ScrollBox's content width extend through that container's
+own padding and join its sides. Separators in narrower or padded child containers
+remain inset and clipped. Current horizontal separators use left/right junctions;
+the glyph families do not introduce a grid layout. A reader may force ASCII
+presentation for every style. Border choice does not change layout bounds or
+motion permissions. Rendering preserves the exact signed source bytes.
+
+```text
+@Panel {"label":"Opening hours","border":"Rounded"}
+: Monday through Friday
+@Separator {}
+: 09:00 to 17:00
+@End
+```
 
 ## Actions and references
 

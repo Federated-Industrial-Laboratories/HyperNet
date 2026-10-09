@@ -4,6 +4,29 @@ use super::media::{Effect, Fit};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(try_from = "String")]
+pub enum BorderStyle {
+    #[default]
+    Light,
+    Heavy,
+    Double,
+    Rounded,
+    Ascii,
+}
+impl TryFrom<String> for BorderStyle {
+    type Error = &'static str;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        match value.as_str() {
+            "Light" => Ok(Self::Light),
+            "Heavy" => Ok(Self::Heavy),
+            "Double" => Ok(Self::Double),
+            "Rounded" => Ok(Self::Rounded),
+            "Ascii" => Ok(Self::Ascii),
+            _ => Err("InvalidBorderStyle"),
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub enum Colour {
     #[default]
     Default,
@@ -97,6 +120,7 @@ pub enum Directive {
         motion: Option<Effect>,
         id: Option<String>,
         colour: Option<Colour>,
+        border: Option<BorderStyle>,
         label: String,
         #[serde(default = "one")]
         padding: u8,
@@ -104,6 +128,7 @@ pub enum Directive {
     ScrollBox {
         id: String,
         colour: Option<Colour>,
+        border: Option<BorderStyle>,
         label: String,
         rows: u16,
     },

@@ -488,5 +488,175 @@
     "name": "MediaUnknownMotion",
     "body": "HyperNetPage/2\n# Media\n@Button {\"label\":\"Animate\",\"action\":{\"kind\":\"Motion\",\"target\":\"Absent\",\"running\":true}}\n",
     "valid": false
+  },
+  {
+    "name": "BorderLight",
+    "body": "HyperNetPage/2\n# Borders\n@Panel {\"label\":\"Outer\",\"border\":\"Light\"}\n@ScrollBox {\"id\":\"Guide\",\"label\":\"Guide\",\"rows\":3,\"border\":\"Light\"}\n: Text\n@Separator {}\n@End\n@End\n",
+    "valid": true
+  },
+  {
+    "name": "BorderHeavy",
+    "body": "HyperNetPage/2\n# Borders\n@Panel {\"label\":\"Outer\",\"border\":\"Heavy\"}\n@ScrollBox {\"id\":\"Guide\",\"label\":\"Guide\",\"rows\":3,\"border\":\"Heavy\"}\n: Text\n@Separator {}\n@End\n@End\n",
+    "valid": true
+  },
+  {
+    "name": "BorderDouble",
+    "body": "HyperNetPage/2\n# Borders\n@Panel {\"label\":\"Outer\",\"border\":\"Double\"}\n@ScrollBox {\"id\":\"Guide\",\"label\":\"Guide\",\"rows\":3,\"border\":\"Double\"}\n: Text\n@Separator {}\n@End\n@End\n",
+    "valid": true
+  },
+  {
+    "name": "BorderRounded",
+    "body": "HyperNetPage/2\n# Borders\n@Panel {\"label\":\"Outer\",\"border\":\"Rounded\"}\n@ScrollBox {\"id\":\"Guide\",\"label\":\"Guide\",\"rows\":3,\"border\":\"Rounded\"}\n: Text\n@Separator {}\n@End\n@End\n",
+    "valid": true
+  },
+  {
+    "name": "BorderAscii",
+    "body": "HyperNetPage/2\n# Borders\n@Panel {\"label\":\"Outer\",\"border\":\"Ascii\"}\n@ScrollBox {\"id\":\"Guide\",\"label\":\"Guide\",\"rows\":3,\"border\":\"Ascii\"}\n: Text\n@Separator {}\n@End\n@End\n",
+    "valid": true
+  },
+  {
+    "name": "BorderInheritance",
+    "body": "HyperNetPage/2\n# Borders\n@Panel {\"label\":\"Outer\",\"border\":\"Double\"}\n@Panel {\"label\":\"Inherited\"}\n@ScrollBox {\"id\":\"Guide\",\"label\":\"Guide\",\"rows\":3,\"border\":null}\n: Text\n@Separator {}\n@End\n@End\n@End\n",
+    "valid": true
+  },
+  {
+    "name": "BorderDefault",
+    "body": "HyperNetPage/2\n# Borders\n@Panel {\"label\":\"Default\",\"border\":null}\n: Text\n@End\n@ScrollBox {\"id\":\"Guide\",\"label\":\"Guide\",\"rows\":3}\n: Text\n@End\n",
+    "valid": true
+  },
+  {
+    "name": "BorderPanelUnknown",
+    "body": "HyperNetPage/2\n# Borders\n@Panel {\"label\":\"Border\",\"border\":\"Dashed\"}\n: Text\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BorderPanelLowercase",
+    "body": "HyperNetPage/2\n# Borders\n@Panel {\"label\":\"Border\",\"border\":\"light\"}\n: Text\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BorderPanelNumber",
+    "body": "HyperNetPage/2\n# Borders\n@Panel {\"label\":\"Border\",\"border\":1}\n: Text\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BorderPanelBoolean",
+    "body": "HyperNetPage/2\n# Borders\n@Panel {\"label\":\"Border\",\"border\":true}\n: Text\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BorderPanelObject",
+    "body": "HyperNetPage/2\n# Borders\n@Panel {\"label\":\"Border\",\"border\":{}}\n: Text\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BorderPanelArray",
+    "body": "HyperNetPage/2\n# Borders\n@Panel {\"label\":\"Border\",\"border\":[]}\n: Text\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BorderScrollBoxUnknown",
+    "body": "HyperNetPage/2\n# Borders\n@ScrollBox {\"id\":\"Guide\",\"label\":\"Guide\",\"rows\":3,\"border\":\"Dashed\"}\n: Text\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BorderScrollBoxLowercase",
+    "body": "HyperNetPage/2\n# Borders\n@ScrollBox {\"id\":\"Guide\",\"label\":\"Guide\",\"rows\":3,\"border\":\"light\"}\n: Text\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BorderScrollBoxNumber",
+    "body": "HyperNetPage/2\n# Borders\n@ScrollBox {\"id\":\"Guide\",\"label\":\"Guide\",\"rows\":3,\"border\":1}\n: Text\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BorderScrollBoxBoolean",
+    "body": "HyperNetPage/2\n# Borders\n@ScrollBox {\"id\":\"Guide\",\"label\":\"Guide\",\"rows\":3,\"border\":true}\n: Text\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BorderScrollBoxObject",
+    "body": "HyperNetPage/2\n# Borders\n@ScrollBox {\"id\":\"Guide\",\"label\":\"Guide\",\"rows\":3,\"border\":{}}\n: Text\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BorderScrollBoxArray",
+    "body": "HyperNetPage/2\n# Borders\n@ScrollBox {\"id\":\"Guide\",\"label\":\"Guide\",\"rows\":3,\"border\":[]}\n: Text\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BorderUnexpectedText",
+    "body": "HyperNetPage/2\n# Borders\n@Text {\"value\":\"Text\",\"border\":\"Light\"}\n",
+    "valid": false
+  },
+  {
+    "name": "BorderUnexpectedSeparator",
+    "body": "HyperNetPage/2\n# Borders\n@Separator {\"border\":\"Light\"}\n",
+    "valid": false
+  },
+  {
+    "name": "BorderUnexpectedColumn",
+    "body": "HyperNetPage/2\n# Borders\n@Column {\"border\":\"Light\"}\n: Text\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BorderUnexpectedRow",
+    "body": "HyperNetPage/2\n# Borders\n@Row {\"border\":\"Light\"}\n: Text\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BorderDuplicateNull",
+    "body": "HyperNetPage/2\n# Borders\n@Panel {\"label\":\"Box\",\"border\":null,\"border\":null}\n: Text\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BorderPanelObjectLight",
+    "body": "HyperNetPage/2\n# Borders\n@Panel {\"label\":\"Border\",\"border\":{\"Light\":null}}\n: Text\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BorderPanelObjectHeavy",
+    "body": "HyperNetPage/2\n# Borders\n@Panel {\"label\":\"Border\",\"border\":{\"Heavy\":null}}\n: Text\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BorderPanelObjectDouble",
+    "body": "HyperNetPage/2\n# Borders\n@Panel {\"label\":\"Border\",\"border\":{\"Double\":null}}\n: Text\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BorderPanelObjectRounded",
+    "body": "HyperNetPage/2\n# Borders\n@Panel {\"label\":\"Border\",\"border\":{\"Rounded\":null}}\n: Text\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BorderPanelObjectAscii",
+    "body": "HyperNetPage/2\n# Borders\n@Panel {\"label\":\"Border\",\"border\":{\"Ascii\":null}}\n: Text\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BorderScrollBoxObjectLight",
+    "body": "HyperNetPage/2\n# Borders\n@ScrollBox {\"id\":\"Guide\",\"label\":\"Guide\",\"rows\":3,\"border\":{\"Light\":null}}\n: Text\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BorderScrollBoxObjectHeavy",
+    "body": "HyperNetPage/2\n# Borders\n@ScrollBox {\"id\":\"Guide\",\"label\":\"Guide\",\"rows\":3,\"border\":{\"Heavy\":null}}\n: Text\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BorderScrollBoxObjectDouble",
+    "body": "HyperNetPage/2\n# Borders\n@ScrollBox {\"id\":\"Guide\",\"label\":\"Guide\",\"rows\":3,\"border\":{\"Double\":null}}\n: Text\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BorderScrollBoxObjectRounded",
+    "body": "HyperNetPage/2\n# Borders\n@ScrollBox {\"id\":\"Guide\",\"label\":\"Guide\",\"rows\":3,\"border\":{\"Rounded\":null}}\n: Text\n@End\n",
+    "valid": false
+  },
+  {
+    "name": "BorderScrollBoxObjectAscii",
+    "body": "HyperNetPage/2\n# Borders\n@ScrollBox {\"id\":\"Guide\",\"label\":\"Guide\",\"rows\":3,\"border\":{\"Ascii\":null}}\n: Text\n@End\n",
+    "valid": false
   }
 ]

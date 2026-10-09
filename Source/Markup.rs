@@ -7,7 +7,7 @@ pub mod forms;
 #[path = "MediaSchema.rs"]
 pub mod media;
 use components::{Action, Directive};
-pub use components::{Colour, ScrollDirection};
+pub use components::{BorderStyle, Colour, ScrollDirection};
 pub use media::{Effect, Fit, Preset};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -27,6 +27,7 @@ pub struct Link {
 pub struct Style {
     pub colour: Option<Colour>,
     pub bold: bool,
+    pub border: Option<BorderStyle>,
 }
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 pub enum TextKind {
@@ -333,6 +334,7 @@ fn directive(
             motion,
             id,
             colour,
+            border,
             label,
             padding,
         } => {
@@ -342,12 +344,14 @@ fn directive(
             }
             node.id = id;
             node.style.colour = colour;
+            node.style.border = border;
             node.motion = motion;
             Kind::Panel { label, padding }
         }
         Directive::ScrollBox {
             id,
             colour,
+            border,
             label,
             rows,
         } => {
@@ -357,6 +361,7 @@ fn directive(
             }
             node.id = Some(id);
             node.style.colour = colour;
+            node.style.border = border;
             Kind::ScrollBox { label, rows }
         }
         Directive::Text {
@@ -369,7 +374,11 @@ fn directive(
             text(&value, 1024, false)?;
             node.id = id;
             node.motion = motion;
-            node.style = Style { colour, bold };
+            node.style = Style {
+                colour,
+                bold,
+                ..Style::default()
+            };
             Kind::Text {
                 text: value,
                 kind: TextKind::Paragraph,
@@ -689,8 +698,8 @@ pub fn parse(body: &str) -> Result<Document, &'static str> {
                 id: None,
                 motion: None,
                 style: Style {
-                    colour: None,
                     bold: matches!(kind, TextKind::Heading2 | TextKind::Heading3),
+                    ..Style::default()
                 },
                 kind: Kind::Text {
                     text: value.into(),
@@ -827,6 +836,47 @@ mod tests {
                 case["name"]
             );
         }
+    }
+    #[test]
+    fn border_styles_retain_explicit_selection_and_inheritance() {
+        for (name, expected) in [
+            ("Light", BorderStyle::Light),
+            ("Heavy", BorderStyle::Heavy),
+            ("Double", BorderStyle::Double),
+            ("Rounded", BorderStyle::Rounded),
+            ("Ascii", BorderStyle::Ascii),
+        ] {
+            let body = format!(
+                "{PROFILE}\n# Borders\n@Panel {{\"label\":\"Outer\",\"border\":\"{name}\"}}\n@ScrollBox {{\"id\":\"Guide\",\"label\":\"Guide\",\"rows\":3,\"border\":\"{name}\"}}\n: Text\n@End\n@End\n"
+            );
+            let document = parse(&body).unwrap();
+            let panel = &document.nodes[0];
+            assert_eq!(panel.style.border, Some(expected));
+            assert_eq!(panel.children[0].style.border, Some(expected));
+            assert_eq!(panel.children[0].children[0].style.border, None);
+            assert_eq!(
+                serde_json::to_value(panel.style).unwrap(),
+                serde_json::json!({"colour": null, "bold": false, "border": name})
+            );
+        }
+        let document = parse(concat!(
+            "HyperNetPage/2\n# Borders\n",
+            "@Panel {\"label\":\"Outer\",\"border\":\"Double\"}\n",
+            "@Panel {\"label\":\"Inherited\"}\n",
+            "@ScrollBox {\"id\":\"Guide\",\"label\":\"Guide\",\"rows\":3,\"border\":null}\n",
+            "@Separator {}\n@Text {\"value\":\"Text\"}\n@End\n@End\n@End\n"
+        ))
+        .unwrap();
+        let inherited = &document.nodes[0].children[0];
+        assert_eq!(inherited.style.border, None);
+        assert_eq!(inherited.children[0].style.border, None);
+        for node in &inherited.children[0].children {
+            assert_eq!(node.style.border, None);
+        }
+        assert_eq!(
+            serde_json::to_string(&Style::default()).unwrap(),
+            "{\"colour\":null,\"bold\":false,\"border\":null}"
+        );
     }
     #[test]
     fn bounds_and_profile_are_enforced() {
