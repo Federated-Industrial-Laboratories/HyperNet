@@ -16,7 +16,7 @@ fn bundle(page_id: [u8; 16]) -> Object {
         digest: [82; 32],
     };
     let parameters =
-        objects::Author::parameters(page_id, "Books", &source, &grant, None, 600000).unwrap();
+        objects::Author::parameters(page_id, "Books", body, &grant, None, 600000).unwrap();
     let bytes = deployment::signed(
         &deployment::key(5),
         "PageAuthorStatement",
@@ -106,6 +106,7 @@ fn page_cache_recovers_torn_successor_and_preserves_pending_bundle_within_physic
         maximum_asset_bytes: crate::authority_objects::PAGE_BUNDLE_BYTES.min(physical as usize)
             as u64,
         retention_ms: 98000,
+        content: None,
         envelope: vec![],
     };
     profile.envelope =
@@ -244,6 +245,7 @@ fn bridge_pending_extent_recovers_torn_bank_without_exceeding_physical_consent()
         state_bytes: physical,
         maximum_asset_bytes: 1024,
         retention_ms: 10000,
+        content: None,
         envelope: vec![],
     };
     assert!(Disk::open(&path, &page, 2000).is_err());

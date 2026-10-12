@@ -38,6 +38,7 @@ pub fn maximum_duration_ms(request: &SignedRequest) -> u64 {
                     | federation::Command::Export { .. }
                     | federation::Command::Import { .. }
                     | federation::Command::MediaAuthorise { .. }
+                    | federation::Command::ContentAuthorise { .. }
                     | federation::Command::MediaReceipt { .. }
             )
         )

@@ -124,7 +124,6 @@ impl Reference {
     pub fn class(&self) -> Class {
         self.class
     }
-    #[cfg(test)]
     pub fn content_sha256(&self) -> Digest {
         self.content
     }

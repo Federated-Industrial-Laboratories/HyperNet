@@ -7,7 +7,7 @@ use crate::{
 };
 use std::collections::BTreeSet;
 
-pub const MAXIMUM_PROVENANCE: usize = 4096;
+pub const MAXIMUM_PROVENANCE: usize = 16384;
 pub const MAXIMUM_LIFETIME_MS: u64 = 604800000;
 pub const REVIEW_LIFETIME_MS: u64 = 300000;
 // A ticket reserves the multi-operation delivery workflow; each proof remains short-lived.
@@ -15,8 +15,13 @@ pub const TICKET_LIFETIME_MS: u64 = 60_000;
 // A certified result has at most 64 exact version references.
 pub const MAXIMUM_CONTEXT_RECORDS: usize = 64;
 
+#[path = "AuthorityPageContent.rs"]
+pub mod content;
+#[path = "AuthorityContentPolicy.rs"]
+mod content_policy;
 #[path = "AuthorityPageObjects.rs"]
 pub mod objects;
+pub use content_policy::ContentPolicy;
 #[path = "AuthorityPageProfile.rs"]
 mod profile;
 pub use profile::{ApplicationPolicy, Host, HostProfile, PlacementPolicy};
@@ -126,3 +131,5 @@ fn identity(label: &str, fields: Vec<V>) -> Result<Digest> {
 #[cfg(test)]
 #[path = "AuthorityPageTests.rs"]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::complete_content;

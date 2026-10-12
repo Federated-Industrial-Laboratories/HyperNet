@@ -443,9 +443,12 @@ pub(super) fn evaluate(
                         domain.command,
                         crate::authority_domains::Command::Mail(
                             crate::authority_domains::mail::Command::Publish { .. }
+                        ) | crate::authority_domains::Command::SealedIdentity(
+                            crate::authority_domains::sealed_identity::Command::Root { .. }
+                                | crate::authority_domains::sealed_identity::Command::Device { .. }
                         )
                     ),
-                "only mailbox publication admits native mail requesters"
+                "native requester admission requires an owned identity operation"
             );
             added
         } else {

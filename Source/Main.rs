@@ -1,3 +1,7 @@
+#[path = "AuthorityContentDisk.rs"]
+mod authority_content_disk;
+#[path = "AuthorityContentService.rs"]
+mod authority_content_service;
 // SPDX-License-Identifier: MIT
 #[path = "AuthorityApplication.rs"]
 mod authority_application;
@@ -172,6 +176,8 @@ enum Command {
     AuthorityMediaService,
     #[command(hide = true)]
     AuthorityMediaExchange,
+    #[command(hide = true)]
+    AuthorityContentExchange,
     /// Run a consented Transfer service through its private local control socket.
     AuthorityTransferService,
     #[command(hide = true)]
@@ -232,6 +238,7 @@ fn run() -> Result<()> {
         Command::AuthorityPageService => runtime_service_entry::pages()?,
         Command::AuthorityMediaService => runtime_service_entry::media()?,
         Command::AuthorityMediaExchange => runtime_service_entry::exchange(2)?,
+        Command::AuthorityContentExchange => runtime_service_entry::exchange(1)?,
         Command::AuthorityTransferService => runtime_service_entry::transfers()?,
         Command::AuthorityTransferExchange => runtime_service_entry::exchange(4)?,
         Command::AuthorityMailService => runtime_service_entry::mail()?,

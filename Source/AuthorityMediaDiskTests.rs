@@ -28,6 +28,7 @@ impl Fixture {
             state_bytes: 1024 * 1024,
             maximum_asset_bytes: 128 * 1024,
             retention_ms: 100000,
+            content: None,
             envelope: vec![],
         };
         profile.envelope =

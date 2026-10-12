@@ -20,7 +20,7 @@ pub struct Setup {
     authority_directory: PathBuf,
     #[arg(long)]
     clock_directory: PathBuf,
-    /// Exact local role2 service controls exposed to a bridge as HOSTKEY=INSTALLED_DIRECTORY.
+    /// Exact local content or media service controls exposed to a bridge as HOSTKEY=INSTALLED_DIRECTORY.
     #[arg(long)]
     media_service: Vec<String>,
 }
@@ -194,13 +194,7 @@ pub fn run(args: Setup) -> Result<Value> {
         let directory = files::root(Path::new(path))?;
         let (media, _) = load(&directory)?;
         media.check_artifacts()?;
-        ensure!(
-            media.role()?.role == 2
-                && media.role()?.service_key == public
-                && media.manifest.network == manifest.network
-                && media.manifest.incarnation == manifest.incarnation,
-            "bridge media mount differs from installed role2 and own network"
-        );
+        store_route(&manifest, &media.manifest, public)?;
         ensure!(
             key == hex::encode(public)
                 && media_controls

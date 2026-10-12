@@ -70,7 +70,6 @@ pub fn response_inputs(intent: &Intent, value: &V) -> Result<Vec<Reference>> {
         );
         Ok((review, revision))
     };
-    let mut out = vec![];
     match command {
         Command::Inspect { page } => {
             let head = ledger(page)?;
@@ -88,10 +87,9 @@ pub fn response_inputs(intent: &Intent, value: &V) -> Result<Vec<Reference>> {
                     && revision.author.intent.revision == head.last_revision,
                 "Page inspection source differs"
             );
-            out.push(revision.author.source);
         }
         Command::Read { page } => {
-            out.extend(published(&ledger(page)?)?.0.bundle);
+            published(&ledger(page)?)?;
         }
         Command::Sync {
             host,
@@ -108,7 +106,7 @@ pub fn response_inputs(intent: &Intent, value: &V) -> Result<Vec<Reference>> {
                 head.namespace == namespace,
                 "Page inventory namespace differs"
             );
-            out.extend(published(&head)?.0.bundle);
+            published(&head)?;
         }
         Command::ReplicaResult { ticket } => {
             let current = records
@@ -135,12 +133,9 @@ pub fn response_inputs(intent: &Intent, value: &V) -> Result<Vec<Reference>> {
                     Some(&delivered) == review.bundle.as_ref(),
                     "Page replica result bundle differs"
                 );
-                out.push(delivered);
             }
         }
         _ => {}
     }
-    out.sort();
-    out.dedup();
-    Ok(out)
+    Ok(vec![])
 }

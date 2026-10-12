@@ -40,13 +40,15 @@ impl<'a> Client<'a> {
         let store = Store::open(
             Path::new("/State/Requester"),
             guard.bootstrap.descriptor().clone(),
-        )?;
+        )
+        .context("open Bridge requester floor")?;
         store.require_requester(config.profile.service)?;
         let disk = disk::Disk::open_bridge(
             Path::new("/State/BridgeState.bin"),
             &config.profile,
             guard.health()?.observe()?.wall_ms,
-        )?;
+        )
+        .context("open Bridge metadata and bundle cache")?;
         let out = Self {
             config,
             guard,
@@ -55,7 +57,8 @@ impl<'a> Client<'a> {
             session: Session::new()?,
             disk,
         };
-        out.check_cache()?;
+        out.check_cache()
+            .context("authenticate retained Bridge cache")?;
         Ok(out)
     }
     fn check_cache(&self) -> Result<()> {
@@ -104,6 +107,7 @@ impl<'a> Client<'a> {
                         | federation::Command::MediaGet { .. }
                         | federation::Command::MediaReceipt { .. }
                         | federation::Command::MediaAuthorise { .. }
+                        | federation::Command::ContentAuthorise { .. }
                 )
             ),
             "bridge retained an operation outside finite maintenance"
@@ -340,7 +344,8 @@ impl<'a> Client<'a> {
                         &wire::decode(&OperationResult::parse(bytes)?.value)?,
                     )
                 },
-            )?;
+            )
+            .context("obtain Bridge authority response and history")?;
             let (state, records) = {
                 let (s, r) = self.disk.context();
                 (s.clone(), r.to_vec())
@@ -392,7 +397,8 @@ impl<'a> Client<'a> {
                         return ActionValidation::new(vec![]);
                     }
                     let selected =
-                        result::verify(&self.guard.bootstrap, &state, &records, i, r, e, &objects)?;
+                        result::verify(&self.guard.bootstrap, &state, &records, i, r, e, &objects)
+                            .context("independently evaluate Bridge domain response")?;
                     let validation = ActionValidation::mutation(
                         selected.versions.clone(),
                         selected.updates.clone(),
@@ -400,8 +406,11 @@ impl<'a> Client<'a> {
                     candidate = Some(selected);
                     Ok(validation)
                 },
-            )?;
-            let verified = history.attach(&self.store, verified)?;
+            )
+            .context("verify Bridge authority response")?;
+            let verified = history
+                .attach(&self.store, verified)
+                .context("attach Bridge requester history")?;
             if verified.disposition() != Disposition::Permit {
                 let code = verified.code();
                 self.store.observe(verified)?;
@@ -472,7 +481,11 @@ impl<'a> Client<'a> {
     }
     pub fn recover(&mut self) -> Result<()> {
         if let Some(command) = self.pending()? {
-            if matches!(command, federation::Command::MediaAuthorise { .. }) {
+            if matches!(
+                command,
+                federation::Command::MediaAuthorise { .. }
+                    | federation::Command::ContentAuthorise { .. }
+            ) {
                 let payload = self.disk.bridge_payload()?.to_vec();
                 self.media(command, &payload)?;
             } else {
@@ -515,8 +528,10 @@ impl<'a> Client<'a> {
         }
         let signed = self.prepare(command.into())?;
         let request = page::MediaRequest::parse(&signed)?;
-        let page::Command::MediaAuthorise { host, .. } = request.command() else {
-            unreachable!()
+        let host = match request.command() {
+            page::Command::MediaAuthorise { host, .. }
+            | page::Command::Content(page::content::Command::Authorise { host, .. }) => host,
+            _ => unreachable!(),
         };
         let path = self
             .config
@@ -528,7 +543,7 @@ impl<'a> Client<'a> {
             wire::encode(&a(vec![
                 V::Uint(200),
                 V::Uint(1),
-                V::Text("MediaExchange".into()),
+                V::Text(request.exchange_tag().into()),
                 b(&signed),
                 b(payload),
                 V::Bool(reconcile),

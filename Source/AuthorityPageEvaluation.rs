@@ -48,7 +48,7 @@ fn result_view(
     sorted(&mut versions).map_err(|_| Capacity)?;
     let governance = dependencies
         .iter()
-        .filter(|r| r.kind < 132)
+        .filter(|r| r.kind < 132 && !c.selected.contains_key(&r.index()))
         .map(|r| Ok(b(c.governance.record_bytes(r.kind, r.id)?)))
         .collect::<Result<Vec<_>>>()?;
     let value = a(vec![
@@ -94,13 +94,13 @@ fn page_item<T>(
     Ok(true)
 }
 
-fn grant(operation: &Operation) -> Result<&VersionRef> {
+pub(super) fn grant(operation: &Operation) -> Result<&VersionRef> {
     operation
         .grant
         .as_ref()
         .context("explicit Page capability missing")
 }
-fn add(
+pub(super) fn add(
     next: &mut State,
     changes: &mut BTreeSet<(u64, Digest)>,
     kind: u64,
@@ -136,6 +136,16 @@ pub fn expected_recipient(
     intent: &Intent,
 ) -> Result<Key> {
     match command {
+        Command::Content(content::Command::Authorise { host, .. }) => {
+            let record = state.record(147, host.id)?;
+            ensure!(record.reference == *host, "content host version differs");
+            let configured = Host::parse(&record.payload, state.network, state.incarnation)?;
+            ensure!(
+                !configured.withdrawn && configured.profile.content.is_some(),
+                "content host has no current durable consent"
+            );
+            Ok(configured.profile.service)
+        }
         Command::MediaAuthorise { host, .. } => {
             let record = state.record(143, host.id)?;
             ensure!(record.reference == *host, "media host version differs");
@@ -183,6 +193,15 @@ pub fn evaluate(
     let mut continuation = None;
     let result = (|| -> Result<()> {
         match command {
+            Command::Content(command) => content::evaluate(
+                &mut c,
+                operation,
+                command,
+                intent,
+                &mut next,
+                &mut changed,
+                replay,
+            )?,
             Command::Context {
                 action,
                 scope_kind,
@@ -472,14 +491,19 @@ pub fn evaluate(
                 }
             }
             Command::Submit { author } => {
-                c.host_readable()?;
+                crate::authority_domains::publication_modes::permitted(
+                    &mut c,
+                    &author.namespace,
+                    Some(author.intent.resource),
+                    0,
+                )?;
                 ensure!(
                     intent.requester == author.intent.requester
                         && grant(operation)? == &author.grant
                         && author.expires_ms > at.saturating_add(1250),
                     "Page submission differs from exact author statement"
                 );
-                let revision = Revision::from_source(author.clone(), inputs.get(&author.source)?)?;
+                let revision = Revision::from_author(author.clone())?;
                 let policy = c.principal(
                     intent.requester,
                     &author.grant,
@@ -728,8 +752,8 @@ pub fn evaluate(
                     Some(*page),
                     revision.author.source.len() as u64,
                 )?;
-                revision.verify_source(inputs.get(&revision.author.source)?)?;
                 c.media_metadata(&pending, &revision)?;
+                content::select_placement(&mut c, &pending, &revision, false)?;
             }
             Command::Review { review, bundle } => {
                 ensure!(
@@ -764,19 +788,9 @@ pub fn evaluate(
                             == review.policy.map(|p| Some((review.mode, p))),
                     "Page review mode differs from current native consent"
                 );
-                revision.verify_source(inputs.get(&revision.author.source)?)?;
-                if let Some(reference) = bundle {
-                    let object = objects::Bundle::parse(
-                        inputs.get(reference)?,
-                        state.network,
-                        state.incarnation,
-                    )?;
-                    ensure!(
-                        object.author.bytes == revision.author.bytes
-                            && object.review.bytes == review.bytes,
-                        "approved Page bundle differs from reviewed provenance"
-                    );
+                if bundle.is_some() {
                     c.media_complete(&review.revision, &revision, review)?;
+                    content::select_placement(&mut c, &review.revision, &revision, true)?;
                 }
                 c.expires = c.expires.min(review.expires_ms);
                 let decision = Review {
@@ -879,21 +893,7 @@ pub fn evaluate(
                     Some(*page),
                     revision.author.source.len() as u64,
                 )?;
-                let object = objects::Bundle::parse(
-                    inputs.get(
-                        review
-                            .bundle
-                            .as_ref()
-                            .context("approved Page bundle absent")?,
-                    )?,
-                    state.network,
-                    state.incarnation,
-                )?;
-                ensure!(
-                    object.review.bytes == review.statement.bytes
-                        && object.author.bytes == revision.author.bytes,
-                    "served Page bundle differs"
-                );
+                content::select_placement(&mut c, &review.statement.revision, &revision, false)?;
             }
             _ => evaluate_serving(
                 &mut c,

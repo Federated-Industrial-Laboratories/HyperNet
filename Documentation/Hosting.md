@@ -32,6 +32,9 @@ mind. State admission checks available space and each engine enforces its own
 bounds; this is not a whole-host filesystem quota. Containers share the host
 kernel and do not provide the isolation of separate physical machines.
 
+Role1 hosts may reserve a separate [durable content partition](DurableContent.md).
+Its placement and physical reservation rules apply in addition to runtime limits.
+
 ## Local control
 
 Preview the complete profile before consenting. Start the foreground supervisor

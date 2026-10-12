@@ -90,162 +90,66 @@ fn request(
 }
 
 #[test]
-fn committed_page_requires_exact_inputs_and_certified_read_selects_approved_bundle() {
+fn committed_page_retains_signed_metadata_without_plaintext_sidecars() {
     let f = tests::Fixture::with_actions(1000, vec![0, 2, 3]);
-    let grant = f.expected.iter().find(|r| r.kind == 102).unwrap();
-    let body = b"HyperNetPage/2\n# Bookshop\n: Approved opening hours.\n";
-    let source = Reference::for_bytes(Class::PageSource, body).unwrap();
-    let statement =
-        objects::Author::parameters([71; 16], "Books", &source, grant, None, 700000).unwrap();
-    let author = crate::authority_deployment_tests::signed(
-        &f.requester,
-        "PageAuthorStatement",
-        page::page_id(&[71; 16]).unwrap(),
-        1,
-        wire::decode(&statement).unwrap(),
-        vec![],
-    );
-    let author = objects::Author::parse(&author, [20; 32], [21; 32]).unwrap();
-    let submit_inputs = inputs(&[(Class::PageSource, body)]);
-    let submit = request(
-        &f,
-        &f.initial,
-        1,
-        Command::Submit {
-            author: author.clone(),
-        },
-        &submit_inputs,
-    );
+    let (submit, metadata) = submission(&f, &f.initial);
     let committed = f.committed(&submit, 3500, 5000, 1);
-    assert_eq!(
-        f.app.command_inputs(&committed.command).unwrap(),
-        vec![source.clone()]
-    );
+    assert!(f.app.command_inputs(&committed.command).unwrap().is_empty());
+    assert!(metadata.is_empty());
+    f.app
+        .validate(&f.initial, &committed.command, 5000, &metadata)
+        .unwrap();
+    let unexpected = inputs(&[(
+        Class::PageSource,
+        b"HyperNetPage/2\n# Unexpected\n: Bytes.\n",
+    )]);
     assert!(
         f.app
-            .validate(&f.initial, &committed.command, 5000, &Resolved::default())
+            .validate(&f.initial, &committed.command, 5000, &unexpected)
             .is_err()
     );
-    f.app
-        .validate(&f.initial, &committed.command, 5000, &submit_inputs)
-        .unwrap();
-    let submitted = f
-        .app
-        .execute(&f.initial, &committed, &submit_inputs)
-        .unwrap();
-    assert_eq!(
-        crate::authority_proof::OperationResult::parse(tests::result_bytes(&submitted))
+    let submitted = f.app.execute(&f.initial, &committed, &metadata).unwrap();
+    assert_eq!(code(&submitted), 0);
+    assert!(f.app.retained_inputs(&submitted.state).unwrap().is_empty());
+    assert!(
+        f.app
+            .result_inputs(&committed.command, tests::result_bytes(&submitted))
             .unwrap()
-            .code,
-        0
-    );
-    assert_eq!(
-        f.app.retained_inputs(&submitted.state).unwrap(),
-        vec![source.clone()]
+            .is_empty()
     );
     let state = State::parse(&f.app.config, &submitted.state).unwrap();
-    let revision = state
+    let record = state
         .domains
-        .record(141, page::revision_id(author.intent.resource, 1).unwrap())
+        .records
+        .values()
+        .find(|r| r.reference.kind == 141)
         .unwrap();
-    let statement = objects::Reviewer::parameters(
-        &revision.reference,
-        &source,
-        author.intent.requester,
-        author.intent.digest,
-        grant,
-        None,
-        true,
-        0,
-        None,
-        10000,
+    let revision = page::Revision::parse(
+        &record.payload,
+        state.domains.network,
+        state.domains.incarnation,
     )
     .unwrap();
-    let review = crate::authority_deployment_tests::signed(
-        &f.requester,
-        "PageReviewStatement",
-        author.intent.resource,
-        1,
-        wire::decode(&statement).unwrap(),
-        vec![],
-    );
-    let review = objects::Reviewer::parse(&review, [20; 32], [21; 32]).unwrap();
-    let bundle = objects::Bundle::encode(body, &author.bytes, &review.bytes).unwrap();
-    let bundle_ref = Reference::for_bytes(Class::PageBundle, &bundle).unwrap();
-    let review_inputs = inputs(&[(Class::PageSource, body), (Class::PageBundle, &bundle)]);
-    let approve = request(
-        &f,
-        &submitted.state,
-        2,
-        Command::Review {
-            review,
-            bundle: Some(bundle_ref.clone()),
-        },
-        &review_inputs,
-    );
-    let committed = f.committed(&approve, 3500, 5000, 2);
-    assert_eq!(
-        f.app.command_inputs(&committed.command).unwrap(),
-        vec![bundle_ref.clone()]
-    );
-    assert_eq!(
-        f.app
-            .required_inputs(&submitted.state, &committed.command)
-            .unwrap(),
-        review_inputs.references()
-    );
-    let approved = f
-        .app
-        .execute(&submitted.state, &committed, &review_inputs)
+    revision
+        .verify_source(b"HyperNetPage/2\n# Concurrent bookshop\n: Current permission.\n")
         .unwrap();
-    assert_eq!(
-        crate::authority_proof::OperationResult::parse(tests::result_bytes(&approved))
-            .unwrap()
-            .code,
-        0
-    );
-    assert_eq!(
-        f.app.retained_inputs(&approved.state).unwrap(),
-        review_inputs.references()
-    );
-    let read_inputs = inputs(&[(Class::PageBundle, &bundle)]);
-    let read = request(
-        &f,
-        &approved.state,
-        3,
-        Command::Read { page: [71; 16] },
-        &read_inputs,
-    );
-    let committed = f.committed(&read, 3500, 5000, 3);
-    assert!(f.app.command_inputs(&committed.command).unwrap().is_empty());
     assert!(
-        f.app
-            .execute(&approved.state, &committed, &Resolved::default())
+        revision
+            .verify_source(b"HyperNetPage/2\n# Unexpected\n: Bytes.\n")
             .is_err()
     );
-    let read = f
-        .app
-        .execute(&approved.state, &committed, &read_inputs)
-        .unwrap();
-    assert_eq!(
-        f.app
-            .result_inputs(&committed.command, tests::result_bytes(&read))
-            .unwrap(),
-        vec![bundle_ref]
-    );
-    f.app.validate_checkpoint(&read.state, 3).unwrap();
+    f.app.validate_checkpoint(&submitted.state, 1).unwrap();
 }
 
 fn submission(f: &tests::Fixture, prior: &[u8]) -> (Vec<u8>, Resolved) {
     let body = b"HyperNetPage/2\n# Concurrent bookshop\n: Current permission.\n";
-    let source = Reference::for_bytes(Class::PageSource, body).unwrap();
     let grant = f
         .expected
         .iter()
         .find(|r| r.kind == 102 && r.id == f.grant)
         .unwrap();
     let statement =
-        objects::Author::parameters([71; 16], "Books", &source, grant, None, 700000).unwrap();
+        objects::Author::parameters([71; 16], "Books", body, grant, None, 700000).unwrap();
     let author = crate::authority_deployment_tests::signed(
         &f.requester,
         "PageAuthorStatement",
@@ -255,7 +159,7 @@ fn submission(f: &tests::Fixture, prior: &[u8]) -> (Vec<u8>, Resolved) {
         vec![],
     );
     let author = objects::Author::parse(&author, [20; 32], [21; 32]).unwrap();
-    let objects = inputs(&[(Class::PageSource, body)]);
+    let objects = Resolved::default();
     (
         request(f, prior, 1, Command::Submit { author }, &objects),
         objects,

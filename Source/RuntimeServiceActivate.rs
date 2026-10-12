@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 // A dedicated recipient retains activation claims before a confined service can start.
 use crate::{
-    authority_challenge::{MAXIMUM_DURATION_MS, Session},
+    authority_challenge::{ClockHealth, MAXIMUM_DURATION_MS, Session},
     authority_files as files, authority_floor, authority_local_transport as transport,
-    authority_proof::{Challenge, Disposition, Restrictions},
+    authority_proof::{Challenge, Disposition, Restrictions, Scope},
     authority_recipient::{ClaimState, Store},
     authority_runtime_activation::{Receipt, Request},
     runtime_service_authorization::Guard,
@@ -100,6 +100,64 @@ fn record(store: &Store, marker: &[u8], prior: Option<ClaimState>) -> Result<()>
     }
     Ok(())
 }
+struct Attempt<T> {
+    challenge: Vec<u8>,
+    ordered: Vec<u8>,
+    deadline: u64,
+    reply: T,
+}
+fn exchange_fresh<T>(
+    scope: &Scope,
+    signed: &[u8],
+    key: &SigningKey,
+    session: &mut Session,
+    clock: &mut impl FnMut() -> Result<ClockHealth>,
+    exchange: &mut impl FnMut(&[u8], u64) -> Result<T>,
+) -> Result<Attempt<T>> {
+    let deadline = clock()?
+        .observe()?
+        .boot_ms
+        .checked_add(MAXIMUM_DURATION_MS)
+        .context("activation deadline overflow")?;
+    loop {
+        let health = clock()?;
+        let duration = deadline
+            .checked_sub(health.observe()?.boot_ms)
+            .filter(|remaining| *remaining > 0)
+            .context("original activation deadline expired")?;
+        let mut nonce = [0; 32];
+        OsRng.try_fill_bytes(&mut nonce)?;
+        ensure!(nonce != [0; 32], "activation nonce generation failed");
+        let challenge = session.issue(signed, key, nonce, duration, health)?;
+        let parsed = Challenge::from_signed(&challenge)?;
+        let ordered = wire::encode(&V::Array(vec![
+            V::Uint(22),
+            V::Uint(1),
+            scope.value(),
+            V::Bytes(signed.to_vec()),
+            V::Bytes(challenge.clone()),
+            V::Uint(parsed.expires_at_ms),
+        ]))?;
+        match exchange(&ordered, deadline) {
+            Ok(reply) => {
+                return Ok(Attempt {
+                    challenge,
+                    ordered,
+                    deadline,
+                    reply,
+                });
+            }
+            Err(error) => {
+                session.discard(&challenge)?;
+                // An overtaken target supplies no permission. A fresh challenge asks for
+                // current evaluation of the same intent; the original deadline still bounds it.
+                if !error.is::<transport::HistoryOvertaken>() {
+                    return Err(error);
+                }
+            }
+        }
+    }
+}
 pub fn activate(guard: &Guard) -> Result<Active> {
     guard.check()?;
     let key = signer(guard)?;
@@ -119,7 +177,8 @@ pub fn activate(guard: &Guard) -> Result<Active> {
         Path::new(RECIPIENT),
         guard.bootstrap.descriptor().clone(),
         guard.key(),
-    )?;
+    )
+    .context("open activation recipient floor")?;
     ensure!(
         !store.epoch_sealed() && store.descriptor().canonical() == requester_descriptor,
         "Service requester and recipient must finish the same epoch activation before startup"
@@ -136,48 +195,58 @@ pub fn activate(guard: &Guard) -> Result<Active> {
         guard.generation,
     )?;
     let mut session = Session::new()?;
-    let mut nonce = [0; 32];
-    OsRng.try_fill_bytes(&mut nonce)?;
-    ensure!(nonce != [0; 32], "activation nonce generation failed");
-    let health = guard.health()?;
-    let now = health.observe()?;
-    let challenge = session.issue(request.signed(), &key, nonce, MAXIMUM_DURATION_MS, health)?;
-    let parsed = Challenge::from_signed(&challenge)?;
-    let ordered = wire::encode(&V::Array(vec![
-        V::Uint(22),
-        V::Uint(1),
-        store.descriptor().scope().value(),
-        V::Bytes(request.signed().to_vec()),
-        V::Bytes(challenge.clone()),
-        V::Uint(parsed.expires_at_ms),
-    ]))?;
-    let mut clock = || {
+    let mut health = || {
         guard.check()?;
         guard.health()
     };
-    let (reply, evidence) = transport::exchange(
-        store.descriptor(),
-        &ordered,
-        now.boot_ms
-            .checked_add(MAXIMUM_DURATION_MS)
-            .context("activation deadline overflow")?,
-        Path::new("/Authority/Control.sock"),
-        store.prefix(),
-        store.tree_head(),
-        &mut clock,
-    )?;
-    let verify = || {
-        request.verify(
-            &guard.bootstrap,
-            store.descriptor(),
-            &challenge,
-            &ordered,
-            &reply.result,
-            &reply.certificate,
-            &evidence.nodes,
-        )
+    let Attempt {
+        challenge,
+        ordered,
+        deadline,
+        reply: (reply, evidence),
+    } = exchange_fresh(
+        store.descriptor().scope(),
+        request.signed(),
+        &key,
+        &mut session,
+        &mut health,
+        &mut |ordered, deadline| {
+            transport::exchange(
+                store.descriptor(),
+                ordered,
+                deadline,
+                Path::new("/Authority/Control.sock"),
+                store.prefix(),
+                store.tree_head(),
+                &mut || {
+                    guard.check()?;
+                    guard.health()
+                },
+            )
+        },
+    )
+    .context("obtain activation authority response and history")?;
+    let mut clock = || {
+        transport::remaining(deadline)?;
+        guard.check()?;
+        guard.health()
     };
-    let result = evidence.attach_recipient(&store, verify()?)?;
+    let verify = || {
+        request
+            .verify(
+                &guard.bootstrap,
+                store.descriptor(),
+                &challenge,
+                &ordered,
+                &reply.result,
+                &reply.certificate,
+                &evidence.nodes,
+            )
+            .context("verify activation authority response")
+    };
+    let result = evidence
+        .attach_recipient(&store, verify()?)
+        .context("attach activation recipient history")?;
     if result.disposition() != Disposition::Permit {
         let code = result.code();
         store.observe(result)?;
@@ -240,7 +309,9 @@ pub fn activate(guard: &Guard) -> Result<Active> {
         &key,
         clock()?.observe()?.wall_ms,
     )?;
-    receipt.verify(&guard.bootstrap, active.store.descriptor())?;
+    receipt
+        .verify(&guard.bootstrap, active.store.descriptor())
+        .context("verify completed activation receipt")?;
     // This report acknowledges an activation claim. It does not report service readiness or renew permission.
     files::atomic_at(
         active.store.profile_directory(),
@@ -251,3 +322,7 @@ pub fn activate(guard: &Guard) -> Result<Active> {
     active.check(guard)?;
     Ok(active)
 }
+
+#[cfg(test)]
+#[path = "RuntimeServiceActivateTests.rs"]
+mod tests;

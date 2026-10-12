@@ -550,15 +550,6 @@ impl<'a> Client<'a> {
                 "Page quorum selected another local host profile"
             );
             transport::remaining(deadline)?;
-            if let DomainCommand::Page(page::Command::ReplicaDeliver { bundle, .. }) =
-                &operation.command
-            {
-                ensure!(
-                    self.disk
-                        .live(bundle, self.guard.health()?.observe()?.wall_ms),
-                    "Page delivery exceeds retained host lifetime"
-                );
-            }
             self.store
                 .accept(verified, &mut self.session, self.guard.health()?, 0)?
                 .perform(
@@ -592,12 +583,6 @@ impl<'a> Client<'a> {
             self.session.discard(&challenge)?;
         }
         outcome
-    }
-    pub fn cached(&self, reference: &crate::authority_objects::Reference) -> bool {
-        self.guard
-            .health()
-            .and_then(|h| h.observe())
-            .is_ok_and(|now| self.disk.live(reference, now.wall_ms))
     }
 }
 

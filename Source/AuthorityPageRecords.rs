@@ -46,7 +46,7 @@ pub struct Form {
     pub schema: Digest,
 }
 impl Form {
-    fn parse(value: &V) -> Result<Self> {
+    pub(super) fn parse(value: &V) -> Result<Self> {
         let f = value.array(4)?;
         Ok(Self {
             id: namespace(&f[0])?,
@@ -88,6 +88,15 @@ impl Revision {
         };
         markup::media::validate_assets(&out.assets).map_err(anyhow::Error::msg)?;
         ensure!(
+            out.author.metadata.value()
+                == objects::SourceMetadata {
+                    assets: out.assets.clone(),
+                    forms: out.forms.clone()
+                }
+                .value(),
+            "Page revision metadata differs from signed author declaration"
+        );
+        ensure!(
             out.forms
                 .iter()
                 .map(|f| &f.id)
@@ -98,34 +107,21 @@ impl Revision {
         );
         Ok(out)
     }
-    pub fn from_source(author: objects::Author, bytes: &[u8]) -> Result<Self> {
-        author.source.verify(bytes)?;
-        let document = markup::parse(std::str::from_utf8(bytes)?).map_err(anyhow::Error::msg)?;
-        let native = |text: &str| -> Result<Digest> {
-            let bytes = hex::decode(text)?;
-            ensure!(
-                hex::encode(&bytes) == text,
-                "noncanonical native Page digest"
-            );
-            id(&V::Bytes(bytes))
-        };
-        let forms = document
-            .forms
-            .into_iter()
-            .map(|f| {
-                Ok(Form {
-                    id: f.id,
-                    recipient: native(&f.recipient)?,
-                    owner: native(&f.owner)?,
-                    schema: native(&f.schema_digest)?,
-                })
-            })
-            .collect::<Result<_>>()?;
+    pub fn from_author(author: objects::Author) -> Result<Self> {
+        let metadata = objects::SourceMetadata::parse(&author.metadata.value())?;
         Ok(Self {
             author,
-            assets: document.assets,
-            forms,
+            assets: metadata.assets,
+            forms: metadata.forms,
         })
+    }
+    pub fn from_source(author: objects::Author, bytes: &[u8]) -> Result<Self> {
+        author.source.verify(bytes)?;
+        ensure!(
+            objects::SourceMetadata::from_source(bytes)?.value() == author.metadata.value(),
+            "Page source differs from signed metadata"
+        );
+        Self::from_author(author)
     }
     pub fn identity(&self) -> Result<Digest> {
         revision_id(self.author.intent.resource, self.author.intent.revision)
@@ -455,6 +451,9 @@ pub fn validate_record(
     lookup: Digest,
     generation: u64,
 ) -> Result<()> {
+    if matches!(kind, 159..=161) {
+        return content::validate_record(kind, value, n, i, lookup, generation);
+    }
     let correct = match kind {
         140 => {
             let p = Ledger::parse(value)?;
@@ -657,22 +656,6 @@ fn validate_records(state: &State, partial: bool) -> Result<()> {
     }
     Ok(())
 }
-pub fn retained_inputs(state: &State) -> Result<Vec<Reference>> {
-    let mut refs = vec![];
-    for record in state.records.values() {
-        match record.reference.kind {
-            141 => refs.push(
-                Revision::parse(&record.payload, state.network, state.incarnation)?
-                    .author
-                    .source,
-            ),
-            142 => refs
-                .extend(Review::parse(&record.payload, state.network, state.incarnation)?.bundle),
-            146 => refs.extend(Ticket::parse(&record.payload)?.delivered),
-            _ => {}
-        }
-    }
-    refs.sort();
-    refs.dedup();
-    Ok(refs)
+pub fn retained_inputs(_state: &State) -> Result<Vec<Reference>> {
+    Ok(vec![])
 }

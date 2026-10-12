@@ -241,6 +241,15 @@ pub struct CertifiedReply {
     pub result: Vec<u8>,
 }
 
+#[derive(Debug)]
+pub struct HistoryOvertaken;
+impl std::fmt::Display for HistoryOvertaken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("certified checkpoint overtook the requested history target")
+    }
+}
+impl std::error::Error for HistoryOvertaken {}
+
 pub struct HistoryEvidence {
     pub nodes: Vec<Vec<u8>>,
     history: Option<(Vec<u8>, Vec<u8>)>,
@@ -352,6 +361,20 @@ impl HistoryEvidence {
     }
     pub fn checkpoint_reply(prefix: &Prefix, target: &[u8], bytes: &[u8]) -> Result<Self> {
         let value = wire::decode(bytes)?;
+        if value.list(10)?.first() == Some(&V::Uint(42)) {
+            let f = record(&value, 42, 10)?;
+            ensure!(
+                proof::Scope::parse(&f[2])? == *prefix.scope()
+                    && f[3].uint()? == 2
+                    && f[4].uint()? == 5,
+                "checkpoint history query refused"
+            );
+            for field in &f[5..9] {
+                field.null()?;
+            }
+            f[9].array(0)?;
+            return Err(HistoryOvertaken.into());
+        }
         let f = record(&value, 54, 7)?;
         ensure!(
             proof::Scope::parse(&f[2])? == *prefix.scope()
@@ -593,6 +616,53 @@ pub(crate) fn send_frame(
 mod tests {
     use super::*;
     use std::time::Duration;
+    #[test]
+    fn overtaken_history_requires_exact_unavailable_reply() {
+        let fixture = crate::authority_proof::tests::Fixture::new(10000);
+        let prefix = fixture.descriptor.genesis().unwrap();
+        let fields = vec![
+            V::Uint(42),
+            V::Uint(1),
+            prefix.scope().value(),
+            V::Uint(2),
+            V::Uint(5),
+            V::Null,
+            V::Null,
+            V::Null,
+            V::Null,
+            a(vec![]),
+        ];
+        let classify = |fields: Vec<V>| {
+            HistoryEvidence::checkpoint_reply(
+                &prefix,
+                &fixture.ancestry[0],
+                &wire::encode(&a(fields)).unwrap(),
+            )
+            .err()
+            .expect("unavailable history must never become proof")
+        };
+        assert!(classify(fields.clone()).is::<HistoryOvertaken>());
+        for (index, value) in [
+            (0, V::Uint(41)),
+            (1, V::Uint(2)),
+            (2, a(vec![])),
+            (3, V::Uint(1)),
+            (4, V::Uint(1)),
+            (4, V::Uint(2)),
+            (5, b(&[1; 32])),
+            (6, b(&[])),
+            (7, b(&[])),
+            (8, b(&[])),
+            (9, a(vec![V::Null])),
+        ] {
+            let mut changed = fields.clone();
+            changed[index] = value;
+            assert!(!classify(changed).is::<HistoryOvertaken>());
+        }
+        let mut extra = fields;
+        extra.push(V::Null);
+        assert!(!classify(extra).is::<HistoryOvertaken>());
+    }
     #[test]
     fn output_sidecars_are_finite_and_absent_from_nonpermits() {
         use crate::authority_objects::{Class, Object, Reference, Resolved};

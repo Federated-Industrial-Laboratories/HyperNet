@@ -197,6 +197,10 @@ fn handle(
         "invalid local media exchange"
     );
     let request = Request::parse(f[3].bytes()?)?;
+    ensure!(
+        !request.is_content(),
+        "media exchange cannot execute content actions"
+    );
     let payload = f[4].bytes()?;
     ensure!(payload.len() <= 32768, "media chunk exceeds its bound");
     match request.command() {
@@ -365,6 +369,10 @@ pub fn exchange_packet(packet: &[u8]) -> Result<Vec<u8>> {
         "invalid media exchange packet"
     );
     let request = Request::parse(fields[3].bytes()?)?;
+    ensure!(
+        !request.is_content(),
+        "media exchange cannot execute content actions"
+    );
     let duration =
         authority_challenge::maximum_duration_ms(&SignedRequest::Intent(request.intent().clone()));
     ensure!(

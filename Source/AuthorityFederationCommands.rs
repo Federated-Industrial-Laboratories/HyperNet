@@ -23,6 +23,13 @@ pub enum Command {
         page: [u8; 16],
         action: u64,
     },
+    ContentAuthorise {
+        placement: VersionRef,
+        host: VersionRef,
+        offset: u64,
+        bytes: u64,
+        proof: ForeignProof,
+    },
     MediaGet {
         asset: VersionRef,
         proof: ForeignProof,
@@ -196,6 +203,28 @@ impl Command {
                     agreement: id(&f[1])?,
                     page: f[2].fixed()?,
                     action,
+                }
+            }
+            "FederationContentAuthorise" => {
+                exact(7)?;
+                ensure!(
+                    f[3].uint()? == 1,
+                    "foreign content permits only explicit source reads"
+                );
+                let offset = f[4].uint()?;
+                let bytes = f[5].uint()?;
+                ensure!(
+                    bytes > 0 && bytes <= 32768 && offset.checked_add(bytes).is_some(),
+                    "foreign content range differs"
+                );
+                let proof = ForeignProof::parse(f[6].bytes()?)?;
+                proof.require_action("FederationAdmission")?;
+                Self::ContentAuthorise {
+                    placement: exact_ref(&f[1], 159)?,
+                    host: exact_ref(&f[2], 147)?,
+                    offset,
+                    bytes,
+                    proof,
                 }
             }
             "FederationMediaGet" => {
@@ -517,6 +546,7 @@ impl Command {
             Self::SourceContext { .. } => "FederationSourceContext",
             Self::InventoryContext { .. } => "FederationInventoryContext",
             Self::PageContext { .. } => "FederationPageContext",
+            Self::ContentAuthorise { .. } => "FederationContentAuthorise",
             Self::MediaGet { .. } => "FederationMediaGet",
             Self::MediaAuthorise { .. } => "FederationMediaAuthorise",
             Self::MediaReceipt { .. } => "FederationMediaReceipt",
@@ -566,6 +596,20 @@ impl Command {
                 page,
                 action,
             } => vec![b(agreement), b(page), V::Uint(*action)],
+            Self::ContentAuthorise {
+                placement,
+                host,
+                offset,
+                bytes,
+                proof,
+            } => vec![
+                reference(placement),
+                reference(host),
+                V::Uint(1),
+                V::Uint(*offset),
+                V::Uint(*bytes),
+                b(&proof.bytes),
+            ],
             Self::MediaGet { asset, proof } => vec![reference(asset), b(&proof.bytes)],
             Self::MediaAuthorise {
                 asset,
@@ -697,6 +741,7 @@ impl Command {
                 vec![b(agreement), b(page), V::Uint(*action)],
             )
             .expect("fixed Page context identity"),
+            Self::ContentAuthorise { placement, .. } => placement.id,
             Self::MediaGet { asset, .. }
             | Self::MediaAuthorise { asset, .. }
             | Self::MediaInspect { asset, .. } => asset.id,
@@ -735,7 +780,8 @@ impl Command {
     pub fn mutation(&self) -> bool {
         matches!(
             self,
-            Self::MediaGet { .. }
+            Self::ContentAuthorise { .. }
+                | Self::MediaGet { .. }
                 | Self::MediaAuthorise { .. }
                 | Self::MediaReceipt { .. }
                 | Self::MediaInspect { .. }
@@ -760,6 +806,20 @@ impl Command {
     }
     pub fn media_command(&self) -> Option<page::Command> {
         match self {
+            Self::ContentAuthorise {
+                placement,
+                host,
+                offset,
+                bytes,
+                ..
+            } => Some(page::Command::Content(page::content::Command::Authorise {
+                placement: placement.clone(),
+                host: host.clone(),
+                effect: page::content::Effect::Read,
+                offset: *offset,
+                bytes: *bytes,
+                digest: None,
+            })),
             Self::MediaAuthorise {
                 asset,
                 host,
@@ -781,7 +841,8 @@ impl Command {
     }
     pub fn foreign_proof(&self) -> Option<&ForeignProof> {
         match self {
-            Self::MediaGet { proof, .. }
+            Self::ContentAuthorise { proof, .. }
+            | Self::MediaGet { proof, .. }
             | Self::MediaAuthorise { proof, .. }
             | Self::MediaReceipt { proof, .. }
             | Self::MediaInspect { proof, .. } => Some(proof),
@@ -789,34 +850,17 @@ impl Command {
         }
     }
     pub fn command_inputs(&self) -> Vec<Reference> {
-        match self {
-            Self::Import { bundle, .. } => vec![bundle.clone()],
-            _ => vec![],
-        }
+        vec![]
     }
     pub fn required_inputs(&self, _state: &State) -> Result<Vec<Reference>> {
-        Ok(self.command_inputs())
-    }
-    pub fn returns_bundle(&self) -> bool {
-        matches!(
-            self,
-            Self::Export {
-                include_bundle: true,
-                ..
-            } | Self::Inspect { .. }
-                | Self::Read { .. }
-        )
-    }
-    pub fn selected_page(&self) -> Option<Digest> {
-        match self {
-            Self::Inspect { page, .. } | Self::Read { page, .. } => Some(*page),
-            _ => None,
-        }
+        Ok(vec![])
     }
     pub fn mutation_indices(&self, state: &State) -> Result<BTreeSet<(u64, Digest)>> {
         let mut out = BTreeSet::new();
         match self {
-            Self::MediaGet { proof, .. } | Self::MediaAuthorise { proof, .. } => {
+            Self::ContentAuthorise { proof, .. }
+            | Self::MediaGet { proof, .. }
+            | Self::MediaAuthorise { proof, .. } => {
                 out.insert(proof.floor.index());
             }
             Self::MediaReceipt { receipt, proof } => {

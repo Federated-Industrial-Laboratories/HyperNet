@@ -8,7 +8,7 @@ pub(super) fn evaluate_serving(
     operation: &Operation,
     command: &Command,
     intent: &Intent,
-    inputs: &Resolved,
+    _inputs: &Resolved,
     next: &mut State,
     changed: &mut BTreeSet<(u64, Digest)>,
     continuation: &mut Option<Digest>,
@@ -36,21 +36,11 @@ pub(super) fn evaluate_serving(
                     revision.author.namespace == *namespace,
                     "Page host fetch namespace differs"
                 );
-                let reference = review.bundle.as_ref().context("Page bundle absent")?;
                 ensure!(
-                    reference.len() as u64 <= configured.profile.maximum_asset_bytes,
-                    "Page bundle exceeds host consent"
+                    revision.author.source.len() as u64 <= configured.profile.maximum_asset_bytes,
+                    "Page source exceeds host consent"
                 );
-                let object = objects::Bundle::parse(
-                    inputs.get(reference)?,
-                    state.network,
-                    state.incarnation,
-                )?;
-                ensure!(
-                    object.author.bytes == revision.author.bytes
-                        && object.review.bytes == review.statement.bytes,
-                    "Page host bundle differs"
-                );
+                content::select_placement(c, &review.statement.revision, &revision, false)?;
             } else {
                 let mut last = None;
                 for record in state.records.values().filter(|r| r.reference.kind == 140) {
@@ -117,7 +107,7 @@ pub(super) fn evaluate_serving(
             }
         }
         Command::ReplicaContext { page, host } => {
-            let (_, _, _, revision) = c.publication(*page)?;
+            let (_, _, review, revision) = c.publication(*page)?;
             c.principal(
                 intent.requester,
                 grant(operation)?,
@@ -128,6 +118,7 @@ pub(super) fn evaluate_serving(
                 revision.author.source.len() as u64,
             )?;
             c.host(host, Some(&revision.author.namespace), true)?;
+            content::select_replica(c, &review.statement.revision, &revision, host)?;
             let slot = ticket_id(intent.requester, host.id)?;
             if state.records.contains_key(&(146, slot)) {
                 c.select(146, slot)?;
@@ -138,7 +129,7 @@ pub(super) fn evaluate_serving(
             host,
             expires_ms,
         } => {
-            let (_, ledger, _, revision) = c.publication(*page)?;
+            let (_, ledger, review, revision) = c.publication(*page)?;
             c.principal(
                 intent.requester,
                 grant(operation)?,
@@ -154,6 +145,12 @@ pub(super) fn evaluate_serving(
                 None
             };
             let destination = c.host(host, Some(&revision.author.namespace), true)?;
+            let acknowledged =
+                content::select_replica(c, &review.statement.revision, &revision, host)?;
+            ensure!(
+                acknowledged,
+                "requested replica host has not acknowledged this exact content"
+            );
             ensure!(
                 *expires_ms > at.saturating_add(1250)
                     && *expires_ms <= at.saturating_add(TICKET_LIFETIME_MS)
@@ -167,7 +164,7 @@ pub(super) fn evaluate_serving(
                 application,
                 host: host.clone(),
                 expires_ms: *expires_ms,
-                delivered: None,
+                delivered: acknowledged.then(|| review.bundle.clone()).flatten(),
                 creation: intent.digest,
             };
             let id = ticket.identity()?;
@@ -250,12 +247,9 @@ pub(super) fn evaluate_serving(
                     && review.bundle.as_ref() == Some(bundle),
                 "Page replica delivery differs from exact host and publication"
             );
-            let object =
-                objects::Bundle::parse(inputs.get(bundle)?, state.network, state.incarnation)?;
             ensure!(
-                object.author.bytes == revision.author.bytes
-                    && object.review.bytes == review.statement.bytes,
-                "Page replica bytes differ from exact approved content"
+                content::select_replica(c, &review.statement.revision, &revision, &value.host)?,
+                "Page replica lacks a durable acknowledgement from its exact selected host"
             );
             if replay {
                 ensure!(
@@ -263,7 +257,10 @@ pub(super) fn evaluate_serving(
                     "Page replica completion differs"
                 );
             } else {
-                ensure!(value.delivered.is_none(), "Page replica already delivered");
+                ensure!(
+                    value.delivered.as_ref().is_none_or(|old| old == bundle),
+                    "Page replica acknowledgement differs"
+                );
                 value.delivered = Some(bundle.clone());
                 add(next, changed, 146, ticket.id, value.value())?;
             }
@@ -282,18 +279,7 @@ pub(super) fn evaluate_serving(
                 value.reader == intent.requester && operation.grant.is_none(),
                 "Page replica result belongs to another reader"
             );
-            if let Some(reference) = value.delivered {
-                let object = objects::Bundle::parse(
-                    inputs.get(&reference)?,
-                    state.network,
-                    state.incarnation,
-                )?;
-                ensure!(
-                    object.author.bytes == revision.author.bytes
-                        && object.review.bytes == review.statement.bytes,
-                    "Page delivered result differs"
-                );
-            }
+            content::select_placement(c, &review.statement.revision, &revision, false)?;
         }
         Command::MediaGet { asset } => {
             let (value, revision, ledger) = c.asset(asset, true)?;

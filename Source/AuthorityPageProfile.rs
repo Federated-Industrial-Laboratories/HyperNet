@@ -13,9 +13,23 @@ pub struct HostProfile {
     pub state_bytes: u64,
     pub maximum_asset_bytes: u64,
     pub retention_ms: u64,
+    pub content: Option<ContentPolicy>,
     pub envelope: Vec<u8>,
 }
 impl HostProfile {
+    pub fn cache_bytes(&self) -> Result<u64> {
+        if self.content.is_none() {
+            return Ok(self.state_bytes);
+        }
+        self.state_bytes
+            .checked_sub(
+                self.content
+                    .as_ref()
+                    .map_or(Ok(0), ContentPolicy::admission_bytes)?,
+            )
+            .filter(|n| *n >= 8192)
+            .context("Page metadata cache has no reserved capacity")
+    }
     #[cfg(test)]
     pub fn payload(&self) -> Result<Vec<u8>> {
         wire::encode(&a(vec![
@@ -30,6 +44,7 @@ impl HostProfile {
             V::Uint(self.state_bytes),
             V::Uint(self.maximum_asset_bytes),
             V::Uint(self.retention_ms),
+            self.content.as_ref().map_or(V::Null, ContentPolicy::value),
         ]))
     }
     pub fn parse(envelope: &[u8], n: Digest, i: Digest) -> Result<Self> {
@@ -39,7 +54,7 @@ impl HostProfile {
         );
         let (bytes, signatures) = wire::envelope(envelope, 1)?;
         let value = wire::decode(&bytes)?;
-        let f = value.array(11)?;
+        let f = value.array(12)?;
         ensure!(
             f[0].uint()? == 200 && f[1].uint()? == 1 && f[2].text()? == "AuthorityPageHostProfile",
             "Page host profile tag differs"
@@ -53,6 +68,11 @@ impl HostProfile {
             state_bytes: f[8].uint()?,
             maximum_asset_bytes: f[9].uint()?,
             retention_ms: f[10].uint()?,
+            content: if f[11] == V::Null {
+                None
+            } else {
+                Some(ContentPolicy::parse(&f[11])?)
+            },
             envelope: envelope.to_vec(),
         };
         let role = p
@@ -82,14 +102,34 @@ impl HostProfile {
                 && p.maximum_asset_bytes <= p.state_bytes
                 && p.maximum_asset_bytes
                     <= if p.role == 1 {
-                        crate::authority_objects::PAGE_BUNDLE_BYTES as u64
+                        if p.content.is_some() {
+                            8 * 1024 * 1024
+                        } else {
+                            crate::authority_objects::PAGE_BUNDLE_BYTES as u64
+                        }
                     } else {
                         markup::media::MAX_PAGE_BYTES
                     }
                 && (1..=MAXIMUM_LIFETIME_MS).contains(&p.retention_ms),
             "Page host profile exceeds exact operator consent"
         );
-        serialized_bank_bytes(p.state_bytes)?;
+        serialized_bank_bytes(p.cache_bytes()?)?;
+        if let Some(content) = &p.content {
+            ensure!(
+                !content.opaque
+                    || (p.manifest.consent_policy.allow_opaque
+                        && content.reviewers.iter().all(|key| p
+                            .manifest
+                            .consent_policy
+                            .reviewer_roots
+                            .contains(key))),
+                "opaque content exceeds signed deployment consent or trusted reviewers"
+            );
+            ensure!(
+                p.role == 1 && p.maximum_asset_bytes <= content.staging_bytes,
+                "content storage requires a Page host and a complete staging reservation"
+            );
+        }
         if p.role == 2 {
             media_storage_budget(p.state_bytes)?;
         }

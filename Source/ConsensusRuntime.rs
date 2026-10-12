@@ -1092,13 +1092,18 @@ impl Driver {
                 } else {
                     Some(input[4].fixed::<32>()?)
                 };
-                self.engine.history_reply(
+                match self.engine.history_reply(
                     input[0].uint()?,
                     input[1].fixed::<32>()?,
                     input[2].fixed::<32>()?,
                     input[3].uint()?,
                     prior,
-                )
+                ) {
+                    Err(error) if error.is::<super::checkpoint::HistoryOvertaken>() => {
+                        self.reply(2, 5, None, None)
+                    }
+                    reply => reply,
+                }
             }
             5 => {
                 wire::decode(a[4].bytes()?)?.array(0)?;

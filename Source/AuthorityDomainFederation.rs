@@ -155,65 +155,11 @@ pub fn validate_state(state: &State, partial: bool) -> Result<()> {
     }
     Ok(())
 }
-pub fn retained_inputs(state: &State) -> Result<Vec<Reference>> {
-    let mut out = vec![];
-    for record in state.records.values().filter(|r| r.reference.kind == 155) {
-        out.push(ForeignRevision::parse(&record.payload)?.bundle);
-    }
-    out.sort();
-    out.dedup();
-    Ok(out)
+pub fn retained_inputs(_state: &State) -> Result<Vec<Reference>> {
+    Ok(vec![])
 }
-pub fn response_inputs(intent: &Intent, value: &V) -> Result<Vec<Reference>> {
-    let Operation {
-        command: super::Command::Federation(command),
-        ..
-    } = Operation::parse(intent)?
-    else {
-        return Ok(vec![]);
-    };
-    if !command.returns_bundle() {
-        return Ok(vec![]);
-    }
-    let f = value.array(5)?;
-    ensure!(
-        f[0].uint()? == 201 && f[1].uint()? == 1 && f[2].text()? == "AuthorityDomain",
-        "invalid federation result"
-    );
-    let body = f[4].array(4)?;
-    ensure!(
-        body[0].text()? == command.name(),
-        "federation result action differs"
-    );
-    let mut refs = vec![];
-    for bytes in body[1].list(MAXIMUM_CONTEXT_RECORDS)? {
-        let r = Record::parse(bytes.bytes()?, intent.network, intent.incarnation)?;
-        if r.reference.kind == 155 {
-            let revision = ForeignRevision::parse(&r.payload)?;
-            ensure!(
-                command.selected_page() == Some(revision.page),
-                "federation output names another page"
-            );
-            refs.push(revision.bundle);
-        } else if r.reference.kind == 142
-            && matches!(
-                command,
-                Command::Export {
-                    include_bundle: true,
-                    ..
-                }
-            )
-        {
-            let review = page::Review::parse(&r.payload, intent.network, intent.incarnation)?;
-            if let Some(bundle) = review.bundle {
-                refs.push(bundle)
-            }
-        }
-    }
-    refs.sort();
-    refs.dedup();
-    ensure!(refs.len() == 1, "federation output bundle is not exact");
-    Ok(refs)
+pub fn response_inputs(_intent: &Intent, _value: &V) -> Result<Vec<Reference>> {
+    Ok(vec![])
 }
 
 #[cfg(test)]

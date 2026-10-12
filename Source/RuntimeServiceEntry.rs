@@ -13,7 +13,7 @@ use std::{
 };
 pub fn exchange(expected_role: u64) -> Result<()> {
     ensure!(
-        matches!(expected_role, 2..=4 | 7) && role()? == expected_role,
+        matches!(expected_role, 1..=4 | 7) && role()? == expected_role,
         "packet exchange requires its own installed service role"
     );
     store_confinement()?;
@@ -28,6 +28,8 @@ pub fn exchange(expected_role: u64) -> Result<()> {
     );
     let reply = if expected_role == 7 {
         bridge::exchange_packet(&input)?
+    } else if expected_role == 1 {
+        crate::authority_content_service::exchange_packet(&input)?
     } else if expected_role == 2 {
         media_store::exchange_packet(&input)?
     } else if expected_role == 3 {
@@ -102,8 +104,11 @@ pub fn bridge() -> Result<()> {
     let config = bridge::Config::load(Path::new("/Config/ServiceConfig.json"))?;
     let profile = config.confinement()?;
     config.resources(&profile)?;
-    let mut active = activation::activate(&guard)?;
-    crate::runtime()?.block_on(bridge::run(config, &guard, &mut active))
+    let mut active = activation::activate(&guard)
+        .map_err(|error| anyhow::anyhow!("Bridge startup activation failed: {error:#}"))?;
+    crate::runtime()?
+        .block_on(bridge::run(config, &guard, &mut active))
+        .map_err(|error| anyhow::anyhow!("Bridge startup or serving failed: {error:#}"))
 }
 pub fn bridge_requester(fence: bool) -> Result<()> {
     ensure!(
