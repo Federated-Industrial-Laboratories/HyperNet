@@ -1,8 +1,9 @@
 # HyperNet 0.8.0 policy, identity and lifecycle contract
 
-This defines the HyperNet 0.8.0 replacement policy contract. The 0.7.5
-executables do not implement these workflows. Cryptographic, persistence,
-routing and installed-runtime qualification remain required. Semantic obligations
+This defines the HyperNet replacement policy contract. The runtime implements
+ordered capability, deployment, recipient and publication decisions. The installed
+commands document their supported operations and explicit limitations. This
+contract does not itself establish cryptographic, platform or routing qualification. Semantic obligations
 are in [PolicyVectors.json](PolicyVectors.json); canonical signature bytes are
 specified by [WireContract.md](WireContract.md).
 
@@ -368,11 +369,15 @@ Record bodies and authorisation:
 | 121 RecipientAcceptance | `[operation, contact, previousRoot, acceptedRoot, recoveryDeclaration, trustContext]` | That contact's own authenticated trust store authority |
 | 122 DevicePossession | `[operation, bindingDigest, enrolmentEndpoint, challengeDigest, expiresMs]` | Candidate signing key after recovering the fresh encrypted challenge with candidate encryption key |
 | 123 DeviceChallenge | `[operation, bindingDigest, enrolmentEndpoint, nonce, expiresMs]` | Fresh single-use challenge issued by the authenticated enrolment endpoint |
+| 158 RecipientRevocation | `[target, signerKey, expectedSnapshot]` | Current recipient root or its bound device for recipient-owned revocation; explicit network admission authority for admission withdrawal |
 
 Member/device/publication/audience/contact/endpoint are IDs. Root, binding,
 audience and policy references are VersionRef, except explicit names ending
-Digest. RecipientAcceptance's previousRoot and acceptedRoot are VersionRef;
-recoveryDeclaration is Digest. RecipientRecovery's priorRoot and replacementRoot
+Digest. RecipientAcceptance's acceptedRoot is VersionRef. previousRoot is VersionRef|null;
+recoveryDeclaration is Digest|null. A null previousRoot requires a null recovery
+declaration and denotes independently authenticated first contact. Continuous
+root succession has a previousRoot and no recovery declaration. Custody recovery
+has both references. A nonzero trustContext is always required. RecipientRecovery's priorRoot and replacementRoot
 are VersionRef; acceptedRecoveryPolicy is Digest. Root record's
 recoveryPolicyDigest is the accepted recipient-specific custody policy Digest,
 separate from network recovery. Roots is a sorted list of record Digests, devices a sorted list of
@@ -389,6 +394,22 @@ publicAudience is boolean. `validFromState` is Point. ReplacementRoot is the
 exact digest-bound proposed root record, not a display name. RecipientRecovery's
 acceptedRecoveryPolicy is Digest. `trustContext` is the digest of the exact
 user-visible binding accepted independently of the directory response.
+
+Persistent recipient records retain their signed envelope. Their VersionRef digest
+identifies the canonical record payload, while the committed state also binds the
+exact signer evidence. These bodies use their stated field order, not the general
+eight-field domain wrapper. Root/device signatures must survive directory storage.
+Revocation158 is immutable and indexed by the exact target record digest. Key-role
+reservations survive revocation; reused keys cannot create a new active binding.
+
+The recipient custody preimage is
+`[200,1,"RecipientCustody",network,incarnation,member,threshold,[[principal,key],...]]`.
+Supported custody profiles are one owner-controlled key or two of three distinct
+keys. The accepted root pins its exact digest. Custody signatures authorise only
+that recipient identity's recovery, never network recovery or automatic disclosure.
+A replacement root signs its own binding and satisfies the accepted continuity
+or custody rule. Each existing contact still applies its independently accepted
+policy and exact predecessor before accepting a replacement.
 
 Key possession first completes and root-signs DeviceBinding. Kind 123 then binds
 that immutable binding digest and a fresh random 32-byte nonce. Encrypt its exact
@@ -474,6 +495,45 @@ reported. Switching Sealed to HostReadable requires exact author disclosure and
 fresh review before plaintext leaves authorised endpoints. Public sealed content
 is refused in the initial profile: public anonymous audiences cannot form the
 bounded authenticated device roster this profile requires.
+
+### Sealed publication records and content admission
+
+The private author declaration is a signed envelope over
+`[200,1,"SealedPageAuthor",network,incarnation,object,policy104,grant102,
+revision,audience110,publisher,pageSha256,assetDigests,expiresMs]`.
+It travels only inside the encrypted reviewer submission and final container.
+Readers verify its signature, exact author policy, source and assets together
+with the reviewer's inner approval. Neither authority replicas nor opaque hosts
+receive this plaintext declaration, source, media metadata or inner approval.
+
+Records159-164 use the domain record wrapper. Record159 is an immutable content
+placement;160 contains signed complete-copy receipts;161 is an irreversible
+placement tombstone. Record162 binds outer113, policy104, author and reviewer
+capabilities, namespace, placement159, publication status and an optional exact
+superseded outer113 reference. This predecessor remains available after commit
+so retry verification includes the old withdrawal and tombstone. Record163 retains
+the object's revision/encryption floors and exact pending/published references.
+Status0 is staged,1 published and2 withdrawn. Publication commit requires the
+chosen number of current complete-copy receipts and declared failure domains.
+A receipt is a host's signed storage claim; only a successful digest-checked read
+establishes current retrievability.
+
+Record164 is `[namespace, modes, administrator, grant102]`. Namespace policy
+requires AdministerPolicy and can only narrow network modes. Network, namespace
+and object modes intersect at admission and every live content operation.
+Mode0 is HostReadable and mode1 is Sealed. A sealed-only namespace rejects a
+host-readable native submission or foreign import before content staging.
+
+`SealedPublicationPrepare` returns the exact policy, allowed recipient bindings,
+admissions and revocations, frozen roster and host/deployment consent required
+by the current reviewer. Its scope is the selected object. It does not grant
+access to unrelated recipients. Every selected root requires current membership
+or current descriptor-root admission. Roster decisions retain those exact
+versions and cannot outlive that admission. An inactive selected member refuses
+the entire audience; the system does not silently remove a publisher's recipient.
+Finalisation, staging and commit recheck these conditions. Finalisation uses fresh
+encryption; retries of one staged operation retain its exact outer and ciphertext
+bytes. A changed roster requires another finalisation and encryption generation.
 
 ## Recovery governance and explicit successor acceptance
 

@@ -225,8 +225,10 @@ pub async fn run(config: Config, guard: &Guard, active: &mut Active) -> Result<(
         guard.role == 7 && config.profile.manifest == guard.manifest,
         "bridge activation differs"
     );
-    let network = tls::Transport::load(&config)?;
-    let client = client::Shared::new(client::Client::open(&config, guard, active)?);
+    let network = tls::Transport::load(&config).context("load Bridge TLS transport")?;
+    let client = client::Shared::new(
+        client::Client::open(&config, guard, active).context("open retained Bridge client")?,
+    );
     workflow::run(&config, guard, active, &network, &client).await
 }
 pub fn exchange_packet(packet: &[u8]) -> Result<Vec<u8>> {

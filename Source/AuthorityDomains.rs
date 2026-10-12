@@ -14,8 +14,14 @@ pub mod federation;
 pub mod mail;
 #[path = "AuthorityDomainPage.rs"]
 pub mod page;
+#[path = "AuthorityPublicationModes.rs"]
+pub mod publication_modes;
 #[path = "AuthorityDomainResult.rs"]
 pub mod result;
+#[path = "AuthoritySealedIdentity.rs"]
+pub mod sealed_identity;
+#[path = "AuthoritySealedPublication.rs"]
+pub mod sealed_publication;
 #[path = "AuthorityDomainSsh.rs"]
 pub mod ssh;
 #[path = "AuthorityDomainTransfer.rs"]
@@ -38,7 +44,7 @@ pub(crate) fn id(value: &V) -> Result<Digest> {
 /// Domain references extend governance only with explicitly implemented record kinds.
 pub fn version(value: &V) -> Result<VersionRef> {
     let fields = value.array(4)?;
-    if !matches!(fields[0].uint()?, 132..=157) {
+    if !matches!(fields[0].uint()?, 104 | 107..=111 | 113 | 132..=164) {
         return governance_version(value);
     }
     let reference = VersionRef {
@@ -95,6 +101,19 @@ pub struct Record {
 impl Record {
     pub fn parse(bytes: &[u8], network: Digest, incarnation: Digest) -> Result<Self> {
         let value = wire::decode(bytes)?;
+        if value
+            .list(32)?
+            .first()
+            .is_some_and(|v| v.uint().ok() == Some(0))
+        {
+            let (payload, _) = wire::envelope(bytes, 4)?;
+            let kind = wire::decode(&payload)?.list(32)?[0].uint()?;
+            return if matches!(kind, 104 | 113) {
+                sealed_publication::signed_record(bytes, network, incarnation)
+            } else {
+                sealed_identity::signed_record(bytes, network, incarnation)
+            };
+        }
         let f = value.array(8)?;
         let kind = f[0].uint()?;
         ensure!(
@@ -126,6 +145,11 @@ impl Record {
             150..=157 => {
                 federation::validate_record(kind, &f[7], network, incarnation, lookup, generation)?
             }
+            164 => publication_modes::validate(&f[7], lookup)?,
+            162..=163 => sealed_publication::validate_record(kind, &f[7], lookup)?,
+            159..=161 => {
+                page::validate_record(kind, &f[7], network, incarnation, lookup, generation)?
+            }
             _ => anyhow::bail!("unsupported domain record kind"),
         }
         Ok(Self {
@@ -141,6 +165,10 @@ impl Record {
         })
     }
     pub fn next(state: &State, kind: u64, id: Digest, payload: V) -> Result<Self> {
+        ensure!(
+            !sealed_identity::persistent_kind(kind) && !matches!(kind, 104 | 113),
+            "recipient records require their retained signed envelope"
+        );
         let previous = state.records.get(&(kind, id));
         let generation = previous.map_or(Ok(1), |r| {
             r.reference
@@ -211,10 +239,20 @@ impl State {
         for item in f[6].list(MAXIMUM_KEYS)? {
             let f = item.array(3)?;
             let class = f[0].uint()?;
-            let public = key(&f[1])?;
-            let owner = key(&f[2])?;
+            let public = if class == sealed_identity::ENCRYPTION_KEY {
+                id(&f[1])?
+            } else {
+                key(&f[1])?
+            };
+            let owner = if class >= sealed_identity::ROOT_KEY {
+                id(&f[2])?
+            } else {
+                key(&f[2])?
+            };
             ensure!(
-                class <= 4 && public != owner && previous.is_none_or(|p| p < public),
+                class <= sealed_identity::ENCRYPTION_KEY
+                    && public != owner
+                    && previous.is_none_or(|p| p < public),
                 "invalid domain key ownership"
             );
             previous = Some(public);
@@ -230,6 +268,7 @@ impl State {
             page::validate_state(&state)?;
         }
         federation::validate_state(&state, partial)?;
+        sealed_identity::validate_state(&state, partial)?;
         Ok(state)
     }
     pub fn value(&self) -> V {
@@ -291,7 +330,13 @@ impl State {
     pub fn requesters(&self) -> Vec<Key> {
         self.keys
             .iter()
-            .filter_map(|(key, (class, _))| (*class == 3).then_some(*key))
+            .filter_map(|(key, (class, _))| {
+                matches!(
+                    *class,
+                    3 | sealed_identity::ROOT_KEY | sealed_identity::SIGNING_KEY
+                )
+                .then_some(*key)
+            })
             .collect()
     }
     pub fn extend_reservations(&self, base: &Reservations) -> Reservations {
@@ -336,11 +381,23 @@ impl State {
 
 #[derive(Clone, Debug)]
 pub enum Command {
+    SealedIdentity(sealed_identity::Command),
+    SealedPublication(sealed_publication::Command),
     Ssh(ssh::Command),
     Transfer(transfer::Command),
     Mail(mail::Command),
     Page(page::Command),
     Federation(federation::Command),
+}
+impl From<sealed_publication::Command> for Command {
+    fn from(c: sealed_publication::Command) -> Self {
+        Self::SealedPublication(c)
+    }
+}
+impl From<sealed_identity::Command> for Command {
+    fn from(c: sealed_identity::Command) -> Self {
+        Self::SealedIdentity(c)
+    }
 }
 impl From<ssh::Command> for Command {
     fn from(c: ssh::Command) -> Self {
@@ -388,7 +445,15 @@ impl Command {
     pub fn parse(value: &V, n: Digest, i: Digest) -> Result<Self> {
         let fields = value.list(10)?;
         let name = fields.first().context("empty domain command")?.text()?;
-        if name.starts_with("Federation") {
+        if name.starts_with("SealedPublication") {
+            Ok(Self::SealedPublication(sealed_publication::Command::parse(
+                value, n, i,
+            )?))
+        } else if name.starts_with("SealedIdentity") {
+            Ok(Self::SealedIdentity(sealed_identity::Command::parse(
+                value, n, i,
+            )?))
+        } else if name.starts_with("Federation") {
             Ok(Self::Federation(federation::Command::parse(value, n, i)?))
         } else if name.starts_with("Page") {
             Ok(Self::Page(page::Command::parse(value, n, i)?))
@@ -402,6 +467,8 @@ impl Command {
     }
     pub fn name(&self) -> &'static str {
         match self {
+            Self::SealedPublication(c) => c.name(),
+            Self::SealedIdentity(c) => c.name(),
             Self::Ssh(c) => c.name(),
             Self::Transfer(c) => c.name(),
             Self::Mail(c) => c.name(),
@@ -411,6 +478,8 @@ impl Command {
     }
     pub fn value(&self) -> V {
         match self {
+            Self::SealedPublication(c) => c.value(),
+            Self::SealedIdentity(c) => c.value(),
             Self::Ssh(c) => c.value(),
             Self::Transfer(c) => c.value(),
             Self::Mail(c) => c.value(),
@@ -420,6 +489,8 @@ impl Command {
     }
     pub fn resource(&self) -> Digest {
         match self {
+            Self::SealedPublication(c) => c.resource(),
+            Self::SealedIdentity(c) => c.resource(),
             Self::Ssh(c) => c.resource(),
             Self::Transfer(c) => c.resource(),
             Self::Mail(c) => c.resource(),
@@ -429,6 +500,8 @@ impl Command {
     }
     pub fn mutation(&self) -> bool {
         match self {
+            Self::SealedPublication(c) => c.mutation(),
+            Self::SealedIdentity(c) => c.mutation(),
             Self::Ssh(c) => c.mutation(),
             Self::Transfer(c) => c.mutation(),
             Self::Mail(c) => c.mutation(),
@@ -456,7 +529,10 @@ impl Command {
             }
             Self::Transfer(c) => c.mutation_kind(),
             Self::Mail(c) => c.mutation_kind(),
-            Self::Page(_) | Self::Federation(_) => None,
+            Self::Page(_)
+            | Self::Federation(_)
+            | Self::SealedIdentity(_)
+            | Self::SealedPublication(_) => None,
         }
     }
     pub fn serving(&self) -> bool {
@@ -465,7 +541,11 @@ impl Command {
             Self::Transfer(transfer::Command::Execute { .. })
                 | Self::Mail(mail::Command::Execute { .. })
                 | Self::Page(page::Command::MediaAuthorise { .. })
+                | Self::Page(page::Command::Content(
+                    page::content::Command::Authorise { .. }
+                ))
                 | Self::Federation(federation::Command::MediaAuthorise { .. })
+                | Self::Federation(federation::Command::ContentAuthorise { .. })
         )
     }
 }
@@ -531,6 +611,7 @@ impl Operation {
         intent: &Intent,
     ) -> Result<Key> {
         match &self.command {
+            Command::SealedPublication(_) | Command::SealedIdentity(_) => Ok(intent.requester),
             Command::Ssh(_) => Ok(intent.requester),
             Command::Mail(c) => mail::expected_recipient(c, state, records, reserved, intent),
             Command::Page(c) => page::expected_recipient(c, state, records, reserved, intent),
@@ -594,6 +675,12 @@ impl Operation {
             "domain evaluation input closure differs"
         );
         match &self.command {
+            Command::SealedPublication(c) => sealed_publication::evaluate(
+                self, c, state, records, reserved, intent, at, replay, exact,
+            ),
+            Command::SealedIdentity(c) => sealed_identity::evaluate(
+                self, c, state, records, reserved, intent, at, replay, exact,
+            ),
             Command::Federation(c) => federation::evaluate(
                 self, c, state, records, reserved, intent, at, replay, exact, inputs,
             ),

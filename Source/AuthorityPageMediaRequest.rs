@@ -10,6 +10,8 @@ use crate::{
     },
     trust_bootstrap::Verified,
 };
+#[path = "AuthorityPageContentRequest.rs"]
+mod content_request;
 type ResultContext = (V, Vec<VersionRef>, State, Vec<Vec<u8>>);
 
 #[derive(Clone)]
@@ -24,9 +26,13 @@ impl Request {
         let intent = Intent::from_signed(bytes)?;
         let operation = Operation::parse(&intent)?;
         let effect = match &operation.command {
-            super::super::Command::Page(command @ Command::MediaAuthorise { .. }) => {
+            super::super::Command::Page(
+                command @ (Command::MediaAuthorise { .. }
+                | Command::Content(content::Command::Authorise { .. })),
+            ) => {
                 ensure!(
-                    operation.grant.is_some(),
+                    operation.grant.is_some()
+                        || matches!(command, Command::Content(content::Command::Authorise { host, effect: content::Effect::Purge, .. }) if host.id == intent.requester),
                     "native media effect requires an explicit participant grant"
                 );
                 command.clone()
@@ -102,7 +108,7 @@ impl Request {
         for bytes in body[1].list(MAXIMUM_CONTEXT_RECORDS)? {
             let r = Record::parse(bytes.bytes()?, state.network, state.incarnation)?;
             ensure!(
-                matches!(r.reference.kind, 140..=157)
+                matches!(r.reference.kind, 104 | 107..=111 | 113 | 140..=164)
                     && previous.is_none_or(|p| p < r.reference.index()),
                 "media authority records repeat or reorder"
             );
@@ -168,10 +174,14 @@ impl Request {
                 );
             }
         }
-        for r in floor.iter().filter(|r| matches!(r.kind, 126 | 128 | 130)) {
+        for r in floor
+            .iter()
+            .filter(|r| matches!(r.kind, 126 | 128 | 130 | 161))
+        {
             let target = match r.kind {
                 126 => 102,
                 128 => 127,
+                161 => 159,
                 _ => 129,
             };
             ensure!(
@@ -272,6 +282,9 @@ impl Request {
         )
     }
     pub fn validate_response(&self, result: &OperationResult, bytes: &[u8]) -> Result<()> {
+        if matches!(self.command(), Command::Content(_)) {
+            return self.validate_content_response(result, bytes);
+        }
         let (_, value) = self.result_asset(result)?;
         let Command::MediaAuthorise {
             asset,

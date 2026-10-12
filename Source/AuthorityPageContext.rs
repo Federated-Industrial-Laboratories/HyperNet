@@ -11,17 +11,6 @@ pub(crate) struct Evaluation<'a> {
     pub(crate) expires: u64,
 }
 impl Evaluation<'_> {
-    pub(crate) fn host_readable(&self) -> Result<()> {
-        let policy = wire::decode(self.governance.record_bytes(100, self.state.network)?)?;
-        ensure!(
-            policy.array(17)?[10]
-                .list(2)?
-                .iter()
-                .any(|mode| mode.uint().ok() == Some(0)),
-            "network policy does not allow host-readable publications"
-        );
-        Ok(())
-    }
     pub(crate) fn optional<T>(
         &mut self,
         evaluate: impl FnOnce(&mut Self) -> Result<T>,
@@ -255,7 +244,12 @@ impl Evaluation<'_> {
         let revision =
             Revision::parse(&record.payload, self.state.network, self.state.incarnation)?;
         if live {
-            self.host_readable()?;
+            crate::authority_domains::publication_modes::permitted(
+                self,
+                &revision.author.namespace,
+                Some(revision.author.intent.resource),
+                0,
+            )?;
             let a = &revision.author;
             ensure!(
                 a.expires_ms > self.at.saturating_add(1250),

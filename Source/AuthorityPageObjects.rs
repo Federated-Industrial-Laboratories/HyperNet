@@ -8,6 +8,7 @@ pub struct Author {
     pub raw_page: [u8; 16],
     pub namespace: String,
     pub source: Reference,
+    pub metadata: SourceMetadata,
     pub grant: VersionRef,
     pub application: Option<VersionRef>,
     pub expires_ms: u64,
@@ -33,7 +34,7 @@ impl Author {
     pub fn parse(bytes: &[u8], n: Digest, i: Digest) -> Result<Self> {
         let intent = statement(bytes, n, i, "PageAuthorStatement")?;
         let value = wire::decode(&intent.parameters)?;
-        let f = value.array(11)?;
+        let f = value.array(12)?;
         ensure!(
             f[0].uint()? == 200
                 && f[1].uint()? == 1
@@ -57,6 +58,7 @@ impl Author {
             raw_page,
             namespace,
             source,
+            metadata: SourceMetadata::parse(&f[11])?,
             grant,
             application,
             expires_ms,
@@ -67,7 +69,7 @@ impl Author {
     pub fn parameters(
         raw_page: [u8; 16],
         namespace: &str,
-        source: &Reference,
+        source: &[u8],
         grant: &VersionRef,
         application: Option<&VersionRef>,
         expires_ms: u64,
@@ -80,11 +82,77 @@ impl Author {
             V::Text(namespace.into()),
             V::Uint(0),
             V::Text(markup::PROFILE.into()),
-            source.value(),
+            Reference::for_bytes(Class::PageSource, source)?.value(),
             reference(grant),
             application.map_or(V::Null, reference),
             V::Uint(expires_ms),
+            SourceMetadata::from_source(source)?.value(),
         ]))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SourceMetadata {
+    pub assets: Vec<markup::media::Asset>,
+    pub forms: Vec<Form>,
+}
+impl SourceMetadata {
+    pub fn parse(value: &V) -> Result<Self> {
+        let f = value.array(2)?;
+        let m = Self {
+            assets: f[0]
+                .list(markup::media::MAX_ASSETS)?
+                .iter()
+                .map(asset)
+                .collect::<Result<_>>()?,
+            forms: f[1]
+                .list(markup::forms::MAX_FORMS)?
+                .iter()
+                .map(Form::parse)
+                .collect::<Result<_>>()?,
+        };
+        markup::media::validate_assets(&m.assets).map_err(anyhow::Error::msg)?;
+        ensure!(
+            m.forms.iter().map(|f| &f.id).collect::<BTreeSet<_>>().len() == m.forms.len(),
+            "repeated Page form identity"
+        );
+        Ok(m)
+    }
+    pub fn value(&self) -> V {
+        a(vec![
+            a(self.assets.iter().map(asset_value).collect()),
+            a(self.forms.iter().map(Form::value).collect()),
+        ])
+    }
+    pub fn from_source(bytes: &[u8]) -> Result<Self> {
+        let document = markup::parse(std::str::from_utf8(bytes)?).map_err(anyhow::Error::msg)?;
+        let native = |text: &str| -> Result<Digest> {
+            let bytes = hex::decode(text)?;
+            ensure!(
+                hex::encode(&bytes) == text,
+                "noncanonical native Page digest"
+            );
+            id(&V::Bytes(bytes))
+        };
+        let forms = document
+            .forms
+            .into_iter()
+            .map(|f| {
+                Ok(Form {
+                    id: f.id,
+                    recipient: native(&f.recipient)?,
+                    owner: native(&f.owner)?,
+                    schema: native(&f.schema_digest)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Self::parse(
+            &Self {
+                assets: document.assets,
+                forms,
+            }
+            .value(),
+        )
     }
 }
 
@@ -175,7 +243,6 @@ pub struct Bundle {
     pub source: Vec<u8>,
 }
 impl Bundle {
-    #[cfg(test)]
     pub fn encode(source: &[u8], author: &[u8], review: &[u8]) -> Result<Vec<u8>> {
         wire::encode(&a(vec![
             V::Uint(200),
@@ -201,6 +268,10 @@ impl Bundle {
         let author = Author::parse(f[4].bytes()?, n, i)?;
         let review = Reviewer::parse(f[5].bytes()?, n, i)?;
         author.source.verify(&source)?;
+        ensure!(
+            SourceMetadata::from_source(&source)?.value() == author.metadata.value(),
+            "Page body metadata differs from signed author declaration"
+        );
         let document = markup::parse(std::str::from_utf8(&source)?).map_err(anyhow::Error::msg)?;
         ensure!(
             review.approve

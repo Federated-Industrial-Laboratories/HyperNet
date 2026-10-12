@@ -21,7 +21,11 @@ impl Value {
         let Self::Array(value) = self else {
             bail!("expected record array")
         };
-        ensure!(value.len() == arity, "incorrect record arity");
+        ensure!(
+            value.len() == arity,
+            "incorrect record arity: expected {arity}, received {}",
+            value.len()
+        );
         Ok(value)
     }
     pub fn list(&self, maximum: usize) -> Result<&[Value]> {

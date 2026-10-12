@@ -288,9 +288,10 @@ impl SourceFixture {
             vec![],
         );
         let mut intent = Intent::from_signed(&signed).unwrap();
+        let _ = objects;
         let inputs = Resolved::exact(
             &operation.command.required_inputs(&self.state).unwrap(),
-            objects,
+            vec![],
         )
         .unwrap();
         let prepared = operation
@@ -346,7 +347,7 @@ impl SourceFixture {
         let body = b"HyperNetPage/2\n# Books\n: Approved stock list.\n";
         let source = Reference::for_bytes(Class::PageSource, body).unwrap();
         let parameters =
-            page::objects::Author::parameters(raw, "Books", &source, &self.grant, None, 20000)
+            page::objects::Author::parameters(raw, "Books", body, &self.grant, None, 20000)
                 .unwrap();
         let author = page::objects::Author::parse(
             &deployment::signed(
@@ -376,6 +377,26 @@ impl SourceFixture {
             .unwrap()
             .reference
             .clone();
+        let manifest = Bridge::parse(
+            &self
+                .state
+                .record(152, self.treaty.source_bridge)
+                .unwrap()
+                .payload,
+            self.state.network,
+            self.state.incarnation,
+        )
+        .unwrap()
+        .profile
+        .manifest;
+        page::complete_content(
+            &mut self.state,
+            &self.records,
+            &self.local.reservations,
+            &self.grant,
+            &manifest,
+            &revision,
+        );
         let parameters = page::objects::Reviewer::parameters(
             &revision,
             &source,

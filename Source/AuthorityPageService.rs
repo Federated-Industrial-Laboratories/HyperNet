@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// An activated Page host maintains approved local bundles and fulfils exact reader tickets through authority.
+// An activated Page host serves durable content or maintains certified publication metadata.
 use crate::{
     authority_domains::{Record, page},
     authority_files as files, confinement,
@@ -31,7 +31,7 @@ struct Configuration {
 }
 pub struct Config {
     pub profile: page::HostProfile,
-    key: SigningKey,
+    pub(crate) key: SigningKey,
 }
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
@@ -136,6 +136,19 @@ pub fn initialise(guard: &Guard) -> Result<()> {
         "Page profile differs from local authorization"
     );
     runtime_service_activate::initialise(guard)?;
+    if config.profile.content.is_some() {
+        let limits = crate::authority_content_disk::Limits::from_profile(&config.profile)?;
+        let path = Path::new("/State/Content");
+        if !path.try_exists()? {
+            crate::authority_content_disk::Disk::initialise(path, &limits)?;
+        }
+        crate::authority_content_disk::Disk::open(
+            path,
+            &limits,
+            guard.health()?.observe()?.wall_ms,
+        )?;
+        return guard.check();
+    }
     let path = Path::new("/State/PageState.bin");
     if !path.try_exists()? {
         disk::Disk::initialise(path, &config.profile)?;
@@ -195,26 +208,9 @@ fn maintain(
             profile.manifest.network,
             profile.manifest.incarnation,
         )?;
-        let revision = page::Revision::parse(
-            &returned
-                .iter()
-                .find(|r| r.reference == review.statement.revision)
-                .context("Page ticket revision is absent")?
-                .payload,
-            profile.manifest.network,
-            profile.manifest.incarnation,
-        )?;
         let bundle = review
             .bundle
             .context("Page ticket has no approved bundle")?;
-        if !client.cached(&bundle) {
-            client.action(page::Command::Sync {
-                host: profile.service,
-                namespace: namespace.into(),
-                after: None,
-                fetch: Some(revision.author.raw_page),
-            })?;
-        }
         client.action(page::Command::ReplicaDeliver {
             ticket: record.reference.clone(),
             bundle,
@@ -229,33 +225,6 @@ fn maintain(
             fetch: None,
         })?
         .completed()?;
-    let returned = records(&value, profile)?;
-    for record in returned.iter().filter(|r| r.reference.kind == 140) {
-        let ledger = page::Ledger::parse(&record.payload)?;
-        let Some(published) = ledger.published else {
-            continue;
-        };
-        let review = page::Review::parse(
-            &returned
-                .iter()
-                .find(|r| r.reference == published)
-                .context("Page inventory review is absent")?
-                .payload,
-            profile.manifest.network,
-            profile.manifest.incarnation,
-        )?;
-        let bundle = review
-            .bundle
-            .context("Page inventory lacks approved bundle")?;
-        if !client.cached(&bundle) {
-            client.action(page::Command::Sync {
-                host: profile.service,
-                namespace: namespace.into(),
-                after: None,
-                fetch: Some(ledger.raw_page),
-            })?;
-        }
-    }
     *after = continuation(&value)?;
     Ok(())
 }
@@ -265,6 +234,9 @@ pub async fn run(config: Config, guard: &Guard, active: &mut Active) -> Result<(
         guard.role == 1 && config.profile.manifest == guard.manifest,
         "Page service differs from activated role"
     );
+    if config.profile.content.is_some() {
+        return crate::authority_content_service::run(config, guard, active).await;
+    }
     let mut client = client::Client::open(&config, guard, active)?;
     let mut cursors = vec![None; config.profile.namespaces.len()];
     let mut next = 0usize;

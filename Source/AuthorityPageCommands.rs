@@ -27,6 +27,7 @@ impl MediaEffect {
 }
 #[derive(Clone, Debug)]
 pub enum Command {
+    Content(content::Command),
     Context {
         action: u64,
         scope_kind: u64,
@@ -146,6 +147,9 @@ impl Command {
     pub fn parse(value: &V, n: Digest, i: Digest) -> Result<Self> {
         let f = value.list(10)?;
         let name = f.first().context("empty Page command")?.text()?;
+        if name.starts_with("PageContent") {
+            return Ok(Self::Content(content::Command::parse(value, n, i)?));
+        }
         Ok(match name {
             "PageContext" => {
                 let f = value.array(5)?;
@@ -370,6 +374,7 @@ impl Command {
     }
     pub fn name(&self) -> &'static str {
         match self {
+            Self::Content(c) => c.name(),
             Self::Context { .. } => "PageContext",
             Self::ApplicationGet { .. } => "PageApplicationGet",
             Self::Application { .. } => "PageApplicationPolicy",
@@ -398,8 +403,12 @@ impl Command {
         }
     }
     pub fn value(&self) -> V {
+        if let Self::Content(c) = self {
+            return c.value();
+        }
         let mut v = vec![V::Text(self.name().into())];
         v.extend(match self {
+            Self::Content(_) => unreachable!("handled content command"),
             Self::Context {
                 action,
                 scope_kind,
@@ -497,6 +506,9 @@ impl Command {
         a(v)
     }
     pub fn mutation(&self) -> bool {
+        if let Self::Content(c) = self {
+            return c.mutation();
+        }
         matches!(
             self,
             Self::Application { .. }
@@ -514,6 +526,7 @@ impl Command {
     }
     pub fn resource(&self) -> Digest {
         match self {
+            Self::Content(c) => c.resource(),
             Self::Context { resource, .. } => *resource,
             Self::ApplicationGet { application } => *application,
             Self::Application { policy } => policy.application,
@@ -543,83 +556,19 @@ impl Command {
         }
     }
     pub fn command_inputs(&self) -> Vec<Reference> {
-        match self {
-            Self::Submit { author } => vec![author.source.clone()],
-            Self::Review { bundle, .. } => bundle.iter().cloned().collect(),
-            Self::ReplicaDeliver { bundle, .. } => vec![bundle.clone()],
-            _ => vec![],
-        }
+        vec![]
     }
-    pub fn required_inputs(&self, state: &State) -> Result<Vec<Reference>> {
-        let mut refs = self.command_inputs();
-        match self {
-            Self::Review { review, .. } => {
-                if let Ok(r) = state.record(141, review.revision.id) {
-                    let revision = Revision::parse(&r.payload, state.network, state.incarnation)?;
-                    refs.push(revision.author.source);
-                }
-            }
-            Self::Inspect { page } => {
-                if let Ok(r) = state.record(140, page_id(page)?) {
-                    let ledger = Ledger::parse(&r.payload)?;
-                    if let Some(pending) = ledger.pending {
-                        let revision = Revision::parse(
-                            &state.record(141, pending.id)?.payload,
-                            state.network,
-                            state.incarnation,
-                        )?;
-                        refs.push(revision.author.source);
-                    }
-                }
-            }
-            Self::Read { page }
-            | Self::Sync {
-                fetch: Some(page), ..
-            } => {
-                if let Ok(r) = state.record(140, page_id(page)?)
-                    && let Some(published) = Ledger::parse(&r.payload)?.published
-                {
-                    refs.extend(
-                        Review::parse(
-                            &state.record(142, published.id)?.payload,
-                            state.network,
-                            state.incarnation,
-                        )?
-                        .bundle,
-                    );
-                }
-            }
-            Self::ReplicaResult { ticket } => {
-                if let Ok(r) = state.record(146, ticket.id) {
-                    // Pending results disclose metadata only; delivered results
-                    // require the exact bundle named by the current ticket.
-                    refs.extend(Ticket::parse(&r.payload)?.delivered);
-                }
-            }
-            Self::ReplicaDeliver { ticket, .. } => {
-                if let Ok(r) = state.record(146, ticket.id) {
-                    let ticket = Ticket::parse(&r.payload)?;
-                    let published = Review::parse(
-                        &state.record(142, ticket.publication.id)?.payload,
-                        state.network,
-                        state.incarnation,
-                    )?;
-                    refs.extend(published.bundle);
-                }
-            }
-            _ => {}
-        }
-        refs.sort();
-        refs.dedup();
-        Ok(refs)
+    pub fn required_inputs(&self, _state: &State) -> Result<Vec<Reference>> {
+        Ok(vec![])
     }
     pub fn mutation_indices(
         &self,
         state: &State,
         intent: &Intent,
-        inputs: &Resolved,
+        _inputs: &Resolved,
     ) -> Result<Vec<(u64, Digest)>> {
         let mut out = match self {
+            Self::Content(c) => c.mutation_indices(state)?,
             Self::Application { policy } => vec![(148, policy.application)],
             Self::HostRegister { profile } => {
                 vec![(if profile.role == 1 { 147 } else { 143 }, profile.service)]
@@ -628,7 +577,7 @@ impl Command {
                 vec![(if *role == 1 { 147 } else { 143 }, *host)]
             }
             Self::Submit { author } => {
-                let revision = Revision::from_source(author.clone(), inputs.get(&author.source)?)?;
+                let revision = Revision::from_author(author.clone())?;
                 let record = Record::next(
                     &State::empty(state.network, state.incarnation),
                     141,

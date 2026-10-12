@@ -103,7 +103,9 @@ pub fn inputs(
 pub fn derive_keys(state: &mut State) -> Result<()> {
     let records = state.records.values().cloned().collect::<Vec<_>>();
     for record in records {
-        if record.reference.kind == 132 {
+        if sealed_identity::persistent_kind(record.reference.kind) {
+            sealed_identity::reserve_record(state, &record)?;
+        } else if record.reference.kind == 132 {
             let s = Service::parse(&record.payload, state.network, state.incarnation)?;
             state.reserve(0, s.profile.native, s.profile.service)?;
         } else if record.reference.kind == 137 {
@@ -120,6 +122,7 @@ pub fn derive_keys(state: &mut State) -> Result<()> {
     domains::transfer::validate_state(state)?;
     domains::mail::validate_state(state)?;
     domains::page::validate_context(state)?;
+    domains::sealed_identity::validate_state(state, true)?;
     domains::federation::validate_state(state, true)
 }
 #[allow(clippy::too_many_arguments)]
@@ -156,7 +159,10 @@ pub fn verify(
         .list(
             if matches!(
                 &operation.command,
-                Command::Page(_) | Command::Federation(_)
+                Command::Page(_)
+                    | Command::Federation(_)
+                    | Command::SealedIdentity(_)
+                    | Command::SealedPublication(_)
             ) {
                 domains::page::MAXIMUM_CONTEXT_RECORDS
             } else {
@@ -239,6 +245,17 @@ pub fn verify(
                 .into_iter()
                 .collect::<Vec<_>>(),
         )
+    } else if let Command::SealedPublication(command) = &operation.command {
+        let mut context = before.clone();
+        for r in &returned {
+            context
+                .records
+                .entry(r.reference.index())
+                .or_insert_with(|| r.clone());
+        }
+        Some(command.mutation_indices(&context)?)
+    } else if let Command::SealedIdentity(command) = &operation.command {
+        Some(command.mutation_indices())
     } else {
         None
     };
@@ -272,16 +289,30 @@ pub fn verify(
     }
     derive_keys(&mut before)?;
     let inputs = inputs(&operation.command, &before, objects)?;
-    let d = operation.prepare_with_inputs(
-        &before,
-        &source,
-        &Reservations(bootstrap.reservations().to_vec()),
-        intent,
-        executed.evaluated_at_ms,
-        replay,
-        true,
-        &inputs,
-    )?;
+    let d = if matches!(
+        operation.command,
+        Command::SealedIdentity(sealed_identity::Command::Directory { .. })
+    ) {
+        sealed_identity::verify_directory_result(
+            &operation,
+            &before,
+            &source,
+            intent,
+            executed.evaluated_at_ms,
+            &value,
+        )?
+    } else {
+        operation.prepare_with_inputs(
+            &before,
+            &source,
+            &Reservations(bootstrap.reservations().to_vec()),
+            intent,
+            executed.evaluated_at_ms,
+            replay,
+            true,
+            &inputs,
+        )?
+    };
     ensure!(
         d.code == 0
             && d.value == value

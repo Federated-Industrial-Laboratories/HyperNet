@@ -30,7 +30,7 @@ pub struct Location {
 }
 #[derive(Subcommand)]
 pub enum Command {
-    /// Forward a signed Media, Mail or Transfer packet through this service's private local socket.
+    /// Forward a signed Content, Media, Mail or Transfer packet through this service's private local socket.
     Exchange {
         #[command(flatten)]
         location: Location,
@@ -283,12 +283,13 @@ impl Profile {
             );
             for (key, mount) in &self.media_controls {
                 let (media, _) = load(&mount.directory)?;
+                store_route(
+                    &self.manifest,
+                    &media.manifest,
+                    crate::trust_bootstrap::hex32(key)?,
+                )?;
                 ensure!(
-                    media.role()?.role == 2
-                        && hex::encode(media.role()?.service_key) == *key
-                        && media.manifest.network == self.manifest.network
-                        && media.manifest.incarnation == self.manifest.incarnation
-                        && media.digest()? == mount.profile_digest,
+                    media.digest()? == mount.profile_digest,
                     "local media mount changed its installed identity"
                 );
             }
@@ -411,3 +412,20 @@ pub fn run(command: Command) -> Result<Value> {
         }
     }
 }
+
+fn store_route(bridge: &Manifest, store: &Manifest, key: [u8; 32]) -> Result<()> {
+    ensure!(
+        bridge.roles.len() == 1
+            && bridge.roles[0].role == 7
+            && store.roles.len() == 1
+            && matches!(store.roles[0].role, 1 | 2)
+            && store.roles[0].service_key == key
+            && store.network == bridge.network
+            && store.incarnation == bridge.incarnation,
+        "Bridge content/media mount differs from exact installed identity or own network"
+    );
+    Ok(())
+}
+#[cfg(test)]
+#[path = "RuntimeServiceRouteTests.rs"]
+mod route_tests;

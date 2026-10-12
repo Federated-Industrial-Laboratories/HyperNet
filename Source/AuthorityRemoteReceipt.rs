@@ -47,17 +47,7 @@ impl Store {
         &mut self,
         report: crate::authority_domains::page::MediaReport,
     ) -> Result<Digest> {
-        ensure!(
-            matches!(
-                crate::authority_domains::Operation::parse(report.request())?.command,
-                crate::authority_domains::Command::Page(
-                    crate::authority_domains::page::Command::MediaAuthorise { .. }
-                ) | crate::authority_domains::Command::Federation(
-                    crate::authority_domains::federation::Command::MediaAuthorise { .. }
-                )
-            ),
-            "report is not a media effect"
-        );
+        media_operation(report.request())?;
         let result = if self.remote_known(report.result(), "AuthorityDomain")? {
             report.into_verified()
         } else {
@@ -148,3 +138,26 @@ impl Store {
         Ok(request)
     }
 }
+
+fn media_operation(intent: &crate::authority_proof::Intent) -> Result<()> {
+    ensure!(
+        matches!(
+            crate::authority_domains::Operation::parse(intent)?.command,
+            crate::authority_domains::Command::Page(
+                crate::authority_domains::page::Command::MediaAuthorise { .. }
+                    | crate::authority_domains::page::Command::Content(
+                        crate::authority_domains::page::content::Command::Authorise { .. }
+                    )
+            ) | crate::authority_domains::Command::Federation(
+                crate::authority_domains::federation::Command::MediaAuthorise { .. }
+                    | crate::authority_domains::federation::Command::ContentAuthorise { .. }
+            )
+        ),
+        "report is not a media effect"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "AuthorityRemoteReceiptTests.rs"]
+mod tests;

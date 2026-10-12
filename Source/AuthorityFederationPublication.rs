@@ -146,7 +146,7 @@ pub(super) fn import(
     agreement: &Agreement,
     proof: &VerifiedForeign,
     bundle: &Reference,
-    inputs: &Resolved,
+    _inputs: &Resolved,
     replay: bool,
 ) -> Result<()> {
     let t = &agreement.treaty;
@@ -155,15 +155,8 @@ pub(super) fn import(
         review.bundle.as_ref() == Some(bundle),
         "import is not the exact exported bundle"
     );
-    let parsed =
-        page::objects::Bundle::parse(inputs.get(bundle)?, t.source.network, t.source.incarnation)?;
-    ensure!(
-        parsed.author.bytes == metadata.author.bytes
-            && parsed.review.bytes == review.statement.bytes,
-        "import bytes differ from source approvals"
-    );
-    metadata.verify_source(&parsed.source)?;
     let id = qualified_page(t.id, &t.source, metadata.author.raw_page)?;
+    super::super::super::publication_modes::permitted(c, &t.destination_namespace, Some(id), 0)?;
     let revision_id = revision_id(id, &review.statement.revision, &share.reference)?;
     let prior = next.records.get(&(154, id)).cloned();
     let mut head = if let Some(r) = &prior {

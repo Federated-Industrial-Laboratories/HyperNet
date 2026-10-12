@@ -48,7 +48,7 @@ impl<'a> Profile<'a> {
     }
     fn bytes(self) -> u64 {
         match self {
-            Self::Page(p) => p.state_bytes,
+            Self::Page(p) => p.cache_bytes().expect("validated Page storage partition"),
             Self::Bridge(p) => p.state_bytes,
         }
     }
@@ -511,6 +511,7 @@ impl Disk {
     pub fn context(&self) -> (&domains::State, &[Vec<u8>]) {
         (&self.state.domain, &self.state.governance)
     }
+    #[cfg(test)]
     pub fn live(&self, reference: &Reference, now: u64) -> bool {
         !self.poisoned
             && self

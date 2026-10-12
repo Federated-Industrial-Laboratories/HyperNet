@@ -168,7 +168,12 @@ async fn lease(
     let result = crate::authority_proof::OperationResult::parse(&proof.result)?;
     let refs = domains::response_inputs(&intent, &wire::decode(&result.value)?)?;
     let objects = Resolved::parse(&refs, &f[4])?;
-    proof.verify(&client.context().0, &treaty, client.now()?, &objects, false)?;
+    let verified = proof.verify(&client.context().0, &treaty, client.now()?, &objects, false)?;
+    let objects = if include_bundle {
+        content::fetch(client, network, &treaty, &proof, &verified).await?
+    } else {
+        objects
+    };
     transport::remaining(deadline)?;
     Ok((proof, objects))
 }
@@ -271,7 +276,6 @@ async fn local(
                         lease(client, network, id, Some(raw), None, None, None, true).await?;
                     let agreement = client.context().0.record(151, id)?.clone();
                     let bridge = client.context().0.record(152, client.service())?.clone();
-                    client.stage(&objects)?;
                     let refs = objects.references();
                     ensure!(
                         refs.len() == 1,
@@ -283,6 +287,7 @@ async fn local(
                         export: proof,
                         bundle: refs[0].clone(),
                     })?;
+                    client.stage(&objects)?;
                     let body = completion.value.array(5)?[4].array(4)?;
                     let page = body[1]
                         .list(64)?
@@ -422,6 +427,7 @@ fn peer(
             )
         }
         "BridgeMedia" => media::source(client, network, &v),
+        "BridgeContent" => content::source(client, &v),
         _ => anyhow::bail!("unknown peer bridge operation"),
     }
 }
@@ -488,9 +494,11 @@ pub async fn run(
     network: &tls::Transport,
     client: &client::Shared<'_>,
 ) -> Result<()> {
-    client.recover()?;
+    client
+        .recover()
+        .context("recover pending Bridge operation")?;
     for (id, _) in &config.profile.agreements {
-        refresh(client, *id)?;
+        refresh(client, *id).context("refresh Bridge agreement at startup")?;
     }
     let capacity = ingress_capacity(config)?;
     let tcp = tokio::net::TcpListener::bind(network.listen).await?;
@@ -557,5 +565,7 @@ pub async fn run(
     responses.abort_all();
     Ok(())
 }
+#[path = "AuthorityBridgeContent.rs"]
+mod content;
 #[path = "AuthorityBridgeMedia.rs"]
 mod media;

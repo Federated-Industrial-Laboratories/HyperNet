@@ -19,7 +19,7 @@ Inventory packets bind the exact certified share IDs and their final cursor.
 Withdrawn rights or changed publications refuse the protected operation rather
 than reusing a historical export grant.
 
-Admission, Export, Import, grant-free media authorisation and media maintenance
+Admission, Export, Import, grant-free content/media authorisation and media maintenance
 receipts use a fixed challenge budget of at most 15000 ms. Each dependent step
 inherits the earliest certified expiry. Ordinary reader and reviewer operations,
 context lookups and stream controls retain the 5000-ms budget. The longer
@@ -79,10 +79,10 @@ according to the manifest's permanent role rules. ServiceConfig.json is:
 }
 ```
 
-For media, mediaHosts is a sorted list of lowercase32-byte local role2 service
-keys in hexadecimal. Each must have an explicit `--media-service
+For body and media transfer, mediaHosts is a sorted list of lowercase32-byte
+local role1 content or role2 media service keys in hexadecimal. Each must have an explicit `--media-service
 HOSTKEY=INSTALLED_DIRECTORY` setup argument. Setup checks the exact installed
-role2 profile and own network/incarnation. The service receives only that
+role1 or role2 profile and own network/incarnation. The service receives only that
 store's isolated Control directory at `/Media/HOSTKEY/Control`; it receives no
 store state, member key or authority key. Generated MediaBindings.json binds the
 exact source directories/profile digests to local operator consent. Container
@@ -120,7 +120,9 @@ old/new bank and encoding budget.
 
 The Suite `federation bridge sync` command asks the destination bridge to import
 shared Pages. The bridge issues current local Admission and remote Export,
-imports the exact bundle, fetches source media, checks the complete asset digest
+verifies the metadata Export, obtains the exact source body through a fresh
+finite ContentExchange, reconstructs its signed bundle, and submits metadata-only
+Import. It retains the optional bundle cache only after Import succeeds. It fetches source media, checks the complete asset digest
 and decoder, then uploads to the treaty's destination stores. Each store returns
 its own whole-asset copy receipt. This leaves the Page pending local review.
 `federation inspect`, `review-sign`, `review`, `read` and `media inspect/read`
@@ -146,17 +148,26 @@ Responses are respectively
 `[201,1,"BridgeSync",qualifiedPageIds]`. The private socket requires the same
 UID and existing private-directory/socket checks. A lease is inert until the
 participant independently verifies it and its local authority permits the
-requested operation. No unsigned local packet grants member authority.
+requested operation. With includeBundle=true the sidecar is a direct Bridge body
+transfer, separate from the authority result. Consumers verify the signed source,
+Author and Reviewer metadata and the exact rebuilt bundle digest. Source body
+reads require a fresh destination Admission after Export; they do not reuse its
+already advanced foreign-floor precondition. No unsigned local packet grants
+member authority.
 
-Peer TLS accepts only finite Anchor, Export and Media packets from the treaty's
+Peer TLS accepts only finite Anchor, Export, Content and Media packets from the treaty's
 exact counterpart. Destination coordination obtains an Admission before asking
 the source for Export; the source does not call back into the waiting destination.
 Every proof/effect has its own existing monotonic deadline. A multi-Page local
 sync is bounded by service consent validity, without replacing those per-effect
 freshness checks.
 
-The bridge retains authenticated metadata, exact immutable bundles, its requester
-stream and the current upload payload. A restart resumes the retained operation;
+The bridge retains authenticated metadata, optional exact immutable bundle
+caches within its signed physical budget, its requester stream and the current
+upload payload. Cached bundles are not additional durable publication copies
+and cannot grant offline access. Foreign body reads currently require an
+available consenting source content host and explicitly installed local control
+mounts. There is no implicit host route or anonymous remote reader route. A restart resumes the retained operation;
 it cannot skip an uncertain effect or silently choose another request. If its
 original rights or proof expire, inspect its exact requester state while stopped:
 

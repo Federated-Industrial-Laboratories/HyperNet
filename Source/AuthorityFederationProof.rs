@@ -2,6 +2,8 @@
 // Portable federation evidence extends actual accepted foreign floors with complete executed quorums.
 use super::*;
 use crate::{authority_history as history, authority_proof as authority};
+#[path = "AuthorityFederationBundle.rs"]
+mod bundle;
 
 #[derive(Clone, Debug)]
 pub struct ForeignProof {

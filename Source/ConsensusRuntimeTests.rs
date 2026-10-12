@@ -15,6 +15,9 @@ use std::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[path = "ConsensusHistoryOvertakenTests.rs"]
+mod history_overtaken;
+
 struct ExampleApplication(Configuration);
 impl Application for ExampleApplication {
     fn validate_checkpoint(&self, state: &[u8], height: u64) -> Result<()> {

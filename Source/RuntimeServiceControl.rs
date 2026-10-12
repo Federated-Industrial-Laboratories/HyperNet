@@ -38,6 +38,11 @@ pub(super) fn exchange(p: &Profile, s: &mut State, packet: &Path, receipt: &Path
     permitted(p, s)?;
     let role = p.role()?.role;
     let (command, limit, status) = match role {
+        1 => (
+            "authority-content-exchange",
+            crate::authority_domains::page::MEDIA_RECEIPT_LIMIT,
+            "ContentReceiptExported",
+        ),
         7 => (
             "authority-bridge-exchange",
             4 * wire::MAXIMUM,
@@ -58,7 +63,9 @@ pub(super) fn exchange(p: &Profile, s: &mut State, packet: &Path, receipt: &Path
             crate::authority_domains::transfer::RECEIPT_LIMIT,
             "TransferReceiptExported",
         ),
-        _ => anyhow::bail!("packet exchange requires a Media, Mail or Transfer service"),
+        _ => anyhow::bail!(
+            "packet exchange requires a Content, Media, Mail, Transfer or Bridge service"
+        ),
     };
     workload::recover(p, s, false)?;
     let resource = s
@@ -109,7 +116,7 @@ pub(super) fn exchange(p: &Profile, s: &mut State, packet: &Path, receipt: &Path
             "bridge response differs"
         );
         files::create(receipt, &reply)?;
-    } else if role == 2 {
+    } else if matches!(role, 1 | 2) {
         let parsed = crate::authority_domains::page::MediaReceipt::parse(&reply)?;
         files::create(receipt, parsed.canonical())?;
     } else if role == 3 {

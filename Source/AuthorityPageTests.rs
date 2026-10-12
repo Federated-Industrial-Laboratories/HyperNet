@@ -13,6 +13,51 @@ struct Fixture {
     grant: VersionRef,
     sequence: u64,
 }
+pub(crate) fn complete_content(
+    state: &mut State,
+    records: &[Vec<u8>],
+    reserved: &Reservations,
+    grant: &VersionRef,
+    manifest: &crate::runtime_manifest::Manifest,
+    revision: &VersionRef,
+) {
+    let mut fixture = Fixture {
+        state: state.clone(),
+        records: records.to_vec(),
+        reserved: reserved.clone(),
+        grant: grant.clone(),
+        sequence: 1,
+    };
+    let service = deployment::key(100).verifying_key().to_bytes();
+    if !state.records.contains_key(&(147, service)) {
+        let mut profile = HostProfile {
+            manifest: manifest.clone(),
+            role: 1,
+            service,
+            volume: [101; 32],
+            namespaces: vec!["Books".into()],
+            state_bytes: 8 * 1024 * 1024,
+            maximum_asset_bytes: crate::authority_objects::PAGE_BUNDLE_BYTES as u64,
+            retention_ms: MAXIMUM_LIFETIME_MS,
+            content: Some(ContentPolicy {
+                metadata_bytes: 65536,
+                data_bytes: 2 * 1024 * 1024,
+                staging_bytes: 1024 * 1024,
+                quarantine_bytes: 1024 * 1024,
+                maximum_objects: 128,
+                opaque: false,
+                failure_domain: [91; 32],
+                reviewers: vec![],
+            }),
+            envelope: vec![],
+        };
+        profile.envelope =
+            wire::sign_envelope(&profile.payload().unwrap(), &deployment::key(90)).unwrap();
+        fixture.apply(Command::HostRegister { profile }, vec![], 5000);
+    }
+    fixture.content(revision, 5000, true);
+    *state = fixture.state;
+}
 impl Fixture {
     fn new() -> Self {
         let f = deployment::Fixture::with_actions(vec![0, 2, 3, 5, 10, 11, 12, 13, 21, 26]);
@@ -34,9 +79,8 @@ impl Fixture {
         self.author_for([71; 16], body, revision)
     }
     fn author_for(&self, page: [u8; 16], body: &[u8], revision: u64) -> objects::Author {
-        let source = Reference::for_bytes(Class::PageSource, body).unwrap();
         let parameters =
-            objects::Author::parameters(page, "Books", &source, &self.grant, None, 700000).unwrap();
+            objects::Author::parameters(page, "Books", body, &self.grant, None, 700000).unwrap();
         let bytes = deployment::signed(
             &deployment::key(5),
             "PageAuthorStatement",
@@ -140,6 +184,9 @@ impl Fixture {
         grant: Option<VersionRef>,
     ) -> (Intent, Operation, Decision, Resolved) {
         let expected = command.required_inputs(&self.state).unwrap();
+        // Sources remain local fixtures; authority accepts metadata without body sidecars.
+        let _ = objects;
+        let objects = vec![];
         let inputs = Resolved::exact(&expected, objects).unwrap();
         let (mut intent, mut operation) = self.request_as(command.clone(), grant, seed);
         let prepared = evaluate(
@@ -177,6 +224,24 @@ impl Fixture {
         (intent, operation, decision, inputs)
     }
     fn apply(&mut self, command: Command, objects: Vec<Object>, at: u64) -> (Intent, Decision) {
+        let revision = match &command {
+            Command::Review { review, .. } if review.approve => Some(review.revision.clone()),
+            Command::Inspect { page } => {
+                Ledger::parse(
+                    &self
+                        .state
+                        .record(140, page_id(page).unwrap())
+                        .unwrap()
+                        .payload,
+                )
+                .unwrap()
+                .pending
+            }
+            _ => None,
+        };
+        if let Some(revision) = revision {
+            self.content(&revision, at, true);
+        }
         let (intent, _, decision, _) = self.evaluate(command, objects, at);
         assert_eq!(decision.code, 0);
         if let Some(state) = &decision.state {
@@ -191,6 +256,83 @@ impl Fixture {
         self.sequence += 1;
         (intent, decision)
     }
+    fn content(&mut self, revision_ref: &VersionRef, at: u64, acknowledge: bool) -> VersionRef {
+        let revision = Revision::parse(
+            &self.state.record(141, revision_ref.id).unwrap().payload,
+            self.state.network,
+            self.state.incarnation,
+        )
+        .unwrap();
+        let host_id = deployment::key(100).verifying_key().to_bytes();
+        if !self.state.records.contains_key(&(147, host_id)) {
+            self.hosts_with_storage_until(8 * 1024 * 1024, revision.author.expires_ms);
+        }
+        let host_record = self.state.record(147, host_id).unwrap().clone();
+        let host = Host::parse(
+            &host_record.payload,
+            self.state.network,
+            self.state.incarnation,
+        )
+        .unwrap();
+        let placement_id = content::placement_id(&revision).unwrap();
+        if !self
+            .state
+            .records
+            .contains_key(&(content::PLACEMENT_KIND, placement_id))
+        {
+            self.apply(
+                Command::Content(content::Command::Place {
+                    revision: revision_ref.clone(),
+                    hosts: vec![host_record.reference.clone()],
+                    copies: 1,
+                    failure_domains: 1,
+                    expires_ms: revision
+                        .author
+                        .expires_ms
+                        .min(host.profile.manifest.validity.1)
+                        .min(at + host.profile.retention_ms),
+                }),
+                vec![],
+                at,
+            );
+        }
+        let record = self
+            .state
+            .record(content::PLACEMENT_KIND, placement_id)
+            .unwrap()
+            .clone();
+        if acknowledge
+            && !self
+                .state
+                .records
+                .contains_key(&(content::COPIES_KIND, placement_id))
+        {
+            let placement = content::Placement::parse(&record.payload).unwrap();
+            let mut receipt = content::Copy {
+                placement: record.reference.clone(),
+                host: host_record.reference,
+                digest: placement.digest,
+                bytes: placement.bytes,
+                request: [77; 32],
+                recorded_ms: at,
+                expires_ms: placement.expires_ms,
+                envelope: vec![],
+            };
+            receipt.envelope = wire::sign_envelope(
+                &receipt
+                    .payload(self.state.network, self.state.incarnation)
+                    .unwrap(),
+                &deployment::key(100),
+            )
+            .unwrap();
+            self.apply(
+                Command::Content(content::Command::Receipt { receipt }),
+                vec![],
+                at,
+            );
+        }
+        record.reference
+    }
     fn hosts(&mut self) -> Vec<HostProfile> {
         self.hosts_with_storage(8 * 1024 * 1024)
     }
@@ -201,6 +343,14 @@ impl Fixture {
         &mut self,
         physical_bytes: u64,
         expires_ms: u64,
+    ) -> Vec<HostProfile> {
+        self.hosts_with_content_quota(physical_bytes, expires_ms, 2 * 1024 * 1024)
+    }
+    fn hosts_with_content_quota(
+        &mut self,
+        physical_bytes: u64,
+        expires_ms: u64,
+        content_bytes: u64,
     ) -> Vec<HostProfile> {
         let f = deployment::Fixture::with_actions(vec![0, 2, 3, 5, 10, 11, 12, 13, 21, 26]);
         let mut manifest = deployment::manifest();
@@ -221,11 +371,21 @@ impl Fixture {
                         8 * 1024 * 1024
                     },
                     maximum_asset_bytes: if role == 1 {
-                        crate::authority_objects::PAGE_BUNDLE_BYTES as u64
+                        (crate::authority_objects::PAGE_BUNDLE_BYTES as u64).min(content_bytes)
                     } else {
                         markup::media::MAX_PAGE_BYTES.min(physical_bytes)
                     },
                     retention_ms: MAXIMUM_LIFETIME_MS,
+                    content: (role == 1).then_some(ContentPolicy {
+                        metadata_bytes: 65536,
+                        data_bytes: content_bytes,
+                        staging_bytes: (1024 * 1024).min(content_bytes),
+                        quarantine_bytes: (1024 * 1024).min(content_bytes),
+                        maximum_objects: 128,
+                        opaque: false,
+                        failure_domain: [91; 32],
+                        reviewers: vec![],
+                    }),
                     envelope: vec![],
                 };
                 p.envelope =
@@ -352,10 +512,7 @@ fn replica_ticket_reservation_has_a_bounded_lifetime_and_expired_delivery_can_be
         90000,
     );
     assert_eq!(result.code, 0);
-    assert_eq!(
-        response_inputs(&intent, &result.value).unwrap(),
-        vec![bundle_ref]
-    );
+    assert!(response_inputs(&intent, &result.value).unwrap().is_empty());
 }
 #[test]
 fn page_host_owner_context_prepares_fresh_withdrawal_after_authority_revocation() {
@@ -635,17 +792,14 @@ fn page_replacement_review_and_withdrawal_preserve_exact_object_history() {
     assert_ne!(denied.code, 0);
     assert!(denied.state.is_none());
     assert_eq!(before, f.state.value());
-    let mut expected = vec![author.source, author2.source, bundle_ref];
-    expected.sort();
-    assert_eq!(
-        retained_inputs(&f.state).unwrap(),
-        expected,
-        "accepted history exports the complete exact immutable closure"
+    assert!(
+        retained_inputs(&f.state).unwrap().is_empty(),
+        "native publication history retains metadata without Page bytes"
     );
 }
 
 #[test]
-fn page_provenance_and_response_sidecar_cannot_substitute_revision_or_network() {
+fn page_source_metadata_verification_rejects_substituted_bytes_and_network() {
     let mut f = Fixture::new();
     let source = b"HyperNetPage/2\n# Provenance\n: Exact source.\n";
     let author = f.author(source, 1);
@@ -663,7 +817,7 @@ fn page_provenance_and_response_sidecar_cannot_substitute_revision_or_network() 
     );
     assert_eq!(
         response_inputs(&inspection, &result.value).unwrap(),
-        vec![author.source.clone()]
+        Vec::<Reference>::new()
     );
     let review = f.reviewer(&author, true, 10000);
     let bytes = objects::Bundle::encode(source, &author.bytes, &review.bytes).unwrap();
@@ -672,22 +826,9 @@ fn page_provenance_and_response_sidecar_cannot_substitute_revision_or_network() 
     let other = b"HyperNetPage/2\n# Provenance\n: Different source.\n";
     let altered = objects::Bundle::encode(other, &author.bytes, &review.bytes).unwrap();
     assert!(objects::Bundle::parse(&altered, f.state.network, f.state.incarnation).is_err());
-    let before = f.state.value();
-    let reference = Reference::for_bytes(Class::PageBundle, &altered).unwrap();
-    let (_, _, denied, _) = f.evaluate(
-        Command::Review {
-            review,
-            bundle: Some(reference),
-        },
-        vec![
-            input(Class::PageSource, source),
-            input(Class::PageBundle, &altered),
-        ],
-        5000,
-    );
-    assert_eq!(denied.code, 3);
-    assert!(denied.state.is_none());
-    assert_eq!(before, f.state.value());
+    let revision = Revision::from_author(author).unwrap();
+    assert!(revision.verify_source(other).is_err());
+    revision.verify_source(source).unwrap();
 }
 
 #[test]
@@ -892,11 +1033,9 @@ fn page_application_policy_requires_dual_consent_and_exact_author_policy_version
     f.apply(Command::Application { policy }, vec![], 5000);
     let policy = f.state.record(148, application).unwrap().reference.clone();
     let source = b"HyperNetPage/2\n# Application\n: Scoped submission.\n";
-    let source_ref = Reference::for_bytes(Class::PageSource, source).unwrap();
     let statement = |bound: Option<&VersionRef>, page: [u8; 16]| {
         let parameters =
-            objects::Author::parameters(page, "Books", &source_ref, &delegated, bound, 400000)
-                .unwrap();
+            objects::Author::parameters(page, "Books", source, &delegated, bound, 400000).unwrap();
         let signed = deployment::signed(
             &deployment::key(150),
             "PageAuthorStatement",
@@ -1191,38 +1330,82 @@ fn page_media_requires_exact_copy_and_inspection_then_stops_on_host_withdrawal()
         5000,
     );
     assert_eq!(result.code, 0);
-    assert_eq!(
-        response_inputs(&intent, &result.value).unwrap(),
-        vec![Reference::for_bytes(Class::PageBundle, &bundle).unwrap()]
-    );
+    assert!(response_inputs(&intent, &result.value).unwrap().is_empty());
     let delivered_context = result_context(&result.value);
     let command = result_command.into();
     assert!(
-        crate::authority_domains::result::inputs(&command, &delivered_context, &[]).is_err(),
-        "delivered results still require their exact bundle"
+        crate::authority_domains::result::inputs(&command, &delivered_context, &[]).is_ok(),
+        "replica acknowledgement must remain independently verifiable without body bytes"
     );
-    let mut substituted = bundle.clone();
-    *substituted.last_mut().unwrap() ^= 1;
-    assert!(
-        crate::authority_domains::result::inputs(
-            &command,
-            &delivered_context,
-            &[input(Class::PageBundle, &substituted)],
-        )
-        .is_err(),
-        "a different object cannot satisfy the certified delivered reference"
-    );
-    let resolved = crate::authority_domains::result::inputs(
-        &command,
-        &delivered_context,
-        &[input(Class::PageBundle, &bundle)],
+    let unexpected = Resolved::exact(
+        &[Reference::for_bytes(Class::PageBundle, &bundle).unwrap()],
+        vec![input(Class::PageBundle, &bundle)],
     )
     .unwrap();
+    assert!(
+        Resolved::parse(
+            &response_inputs(&intent, &result.value).unwrap(),
+            &unexpected.value()
+        )
+        .is_err(),
+        "the certified metadata response cannot carry a body sidecar"
+    );
+    let mut changed_ticket = ticket.clone();
+    changed_ticket.digest[0] ^= 1;
     assert_eq!(
-        resolved
-            .get(&Reference::for_bytes(Class::PageBundle, &bundle).unwrap())
-            .unwrap(),
-        bundle
+        f.evaluate(
+            Command::ReplicaResult {
+                ticket: changed_ticket
+            },
+            vec![],
+            5000
+        )
+        .2
+        .code,
+        3,
+        "replica metadata cannot substitute the requested ticket digest"
+    );
+    let current = Ticket::parse(&f.state.record(146, ticket.id).unwrap().payload).unwrap();
+    let approval = Review::parse(
+        &f.state.record(142, current.publication.id).unwrap().payload,
+        f.state.network,
+        f.state.incarnation,
+    )
+    .unwrap();
+    let revision = Revision::parse(
+        &f.state
+            .record(141, approval.statement.revision.id)
+            .unwrap()
+            .payload,
+        f.state.network,
+        f.state.incarnation,
+    )
+    .unwrap();
+    let placement = f
+        .state
+        .record(159, content::placement_id(&revision).unwrap())
+        .unwrap()
+        .reference
+        .clone();
+    let mut changed_host = current.host;
+    changed_host.digest[0] ^= 1;
+    assert_eq!(
+        f.evaluate(
+            Command::Content(content::Command::Authorise {
+                placement,
+                host: changed_host,
+                effect: content::Effect::Read,
+                offset: 0,
+                bytes: 1,
+                digest: None,
+            }),
+            vec![],
+            5000
+        )
+        .2
+        .code,
+        3,
+        "direct replica retrieval must bind the exact consented host version"
     );
     let domain_records = result.value.array(5).unwrap()[4].array(4).unwrap()[1]
         .list(MAXIMUM_CONTEXT_RECORDS)
@@ -1371,5 +1554,331 @@ fn page_and_namespace_ids_preserve_canonical_scope_and_validation() {
     assert_ne!(
         namespace_id("Books").unwrap(),
         namespace_id("books").unwrap()
+    );
+}
+
+#[test]
+fn page_content_placement_replay_at_quota_preserves_exact_allocation() {
+    let mut f = Fixture::new();
+    let body = b"HyperNetPage/2\n# Durable Books\n: Exact retained content.\n";
+    let quota = body.len() as u64;
+    let hosts = f.hosts_with_content_quota(8 * 1024 * 1024, 20000, quota);
+    let host = f
+        .state
+        .record(147, hosts[0].service)
+        .unwrap()
+        .reference
+        .clone();
+    let revisions = [71, 72].map(|page| {
+        let author = f.author_for([page; 16], body, 1);
+        f.apply(
+            Command::Submit {
+                author: author.clone(),
+            },
+            vec![],
+            5000,
+        );
+        f.state
+            .record(141, revision_id(author.intent.resource, 1).unwrap())
+            .unwrap()
+            .reference
+            .clone()
+    });
+    let place = |revision: VersionRef, expires_ms| {
+        Command::Content(content::Command::Place {
+            revision,
+            hosts: vec![host.clone()],
+            copies: 1,
+            failure_domains: 1,
+            expires_ms,
+        })
+    };
+    let (intent, operation, decision, inputs) =
+        f.evaluate(place(revisions[0].clone(), 10000), vec![], 5000);
+    assert_eq!(decision.code, 0, "the first placement fills the quota");
+    f.state = decision.state.unwrap();
+    f.sequence += 1;
+    let allocated = f
+        .state
+        .records
+        .values()
+        .filter(|r| r.reference.kind == content::PLACEMENT_KIND)
+        .map(|r| content::Placement::parse(&r.payload).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(allocated.len(), 1);
+    assert_eq!(allocated[0].bytes, quota);
+    let retained = f.state.value();
+    let replay = operation
+        .prepare_with_inputs(
+            &f.state,
+            &f.records,
+            &f.reserved,
+            &intent,
+            5000,
+            true,
+            true,
+            &inputs,
+        )
+        .unwrap();
+    assert_eq!(replay.code, 0, "exact replay adds no storage charge");
+    assert!(replay.state.is_none(), "exact replay changes no allocation");
+    assert_eq!(f.state.value(), retained);
+    let extra = f
+        .evaluate(place(revisions[1].clone(), 10000), vec![], 5000)
+        .2;
+    assert_eq!(extra.code, 3, "an additional placement still exceeds quota");
+    assert!(extra.state.is_none());
+
+    let mut changed = operation.clone();
+    changed.command = place(revisions[0].clone(), 9999).into();
+    let mut changed_intent = intent;
+    changed_intent.parameters = changed.parameters().unwrap();
+    let refused = changed
+        .prepare_with_inputs(
+            &f.state,
+            &f.records,
+            &f.reserved,
+            &changed_intent,
+            5000,
+            true,
+            true,
+            &inputs,
+        )
+        .unwrap();
+    assert_eq!(
+        refused.code, 3,
+        "replay cannot change the retained placement"
+    );
+    assert!(refused.state.is_none());
+    assert_eq!(f.state.value(), retained);
+}
+
+#[test]
+fn page_approval_requires_complete_body_placement_and_read_reports_degraded_metadata() {
+    let mut f = Fixture::new();
+    let body = b"HyperNetPage/2\n# Durable Books\n: Exact retained content.\n";
+    let author = f.author(body, 1);
+    f.apply(
+        Command::Submit {
+            author: author.clone(),
+        },
+        vec![],
+        5000,
+    );
+    let revision = f
+        .state
+        .record(141, revision_id(author.intent.resource, 1).unwrap())
+        .unwrap()
+        .reference
+        .clone();
+    let review = f.reviewer(&author, true, 10000);
+    let bundle = objects::Bundle::encode(body, &author.bytes, &review.bytes).unwrap();
+    let approve = Command::Review {
+        review,
+        bundle: Some(Reference::for_bytes(Class::PageBundle, &bundle).unwrap()),
+    };
+    assert_eq!(
+        f.evaluate(approve.clone(), vec![], 5000).2.code,
+        3,
+        "approval cannot omit placement"
+    );
+    let placement = f.content(&revision, 5000, false);
+    assert_eq!(
+        f.evaluate(approve.clone(), vec![], 5000).2.code,
+        3,
+        "reservation is not a complete-copy acknowledgement"
+    );
+    f.content(&revision, 5000, true);
+    f.apply(approve, vec![], 5000);
+    let host = f
+        .state
+        .record(147, deployment::key(100).verifying_key().to_bytes())
+        .unwrap()
+        .reference
+        .clone();
+    f.apply(
+        Command::HostWithdraw {
+            role: 1,
+            host: host.id,
+            generation: host.generation,
+        },
+        vec![],
+        6000,
+    );
+    let (intent, _, read, _) = f.evaluate(
+        Command::Read {
+            page: author.raw_page,
+        },
+        vec![],
+        6000,
+    );
+    assert_eq!(
+        read.code, 0,
+        "lost host availability must not hide still-approved publication metadata"
+    );
+    assert!(response_inputs(&intent, &read.value).unwrap().is_empty());
+    let records = read.value.array(5).unwrap()[4].array(4).unwrap()[1]
+        .list(MAXIMUM_CONTEXT_RECORDS)
+        .unwrap();
+    assert!(records.iter().any(|v| {
+        Record::parse(v.bytes().unwrap(), f.state.network, f.state.incarnation)
+            .unwrap()
+            .reference
+            == placement
+    }));
+    assert_eq!(
+        f.evaluate(
+            Command::Content(content::Command::Authorise {
+                placement: placement.clone(),
+                host,
+                effect: content::Effect::Read,
+                offset: 0,
+                bytes: body.len() as u64,
+                digest: None
+            }),
+            vec![],
+            6000
+        )
+        .2
+        .code,
+        3,
+        "withdrawn host cannot serve despite an old durable acknowledgement"
+    );
+    f.apply(
+        Command::Content(content::Command::Withdraw {
+            placement: placement.clone(),
+        }),
+        vec![],
+        6000,
+    );
+    let (_, _, read, _) = f.evaluate(
+        Command::Read {
+            page: author.raw_page,
+        },
+        vec![],
+        6000,
+    );
+    assert_eq!(
+        read.code, 0,
+        "withdrawn content retains publication metadata with unavailable storage"
+    );
+    let records = read.value.array(5).unwrap()[4].array(4).unwrap()[1]
+        .list(MAXIMUM_CONTEXT_RECORDS)
+        .unwrap();
+    assert!(records.iter().any(|v| {
+        Record::parse(v.bytes().unwrap(), f.state.network, f.state.incarnation)
+            .unwrap()
+            .reference
+            .kind
+            == content::TOMBSTONE_KIND
+    }));
+}
+
+#[test]
+fn opaque_content_profile_cannot_exceed_signed_deployment_consent() {
+    let mut f = Fixture::new();
+    let mut profile = f.hosts().remove(0);
+    let reviewer = deployment::key(5).verifying_key().to_bytes();
+    profile.content.as_mut().unwrap().opaque = true;
+    profile.content.as_mut().unwrap().reviewers = vec![reviewer];
+    let parse = |profile: &HostProfile| {
+        let signed =
+            wire::sign_envelope(&profile.payload().unwrap(), &deployment::key(90)).unwrap();
+        HostProfile::parse(&signed, f.state.network, f.state.incarnation)
+    };
+    assert!(
+        parse(&profile).is_err(),
+        "host profile cannot override deployment opaque refusal"
+    );
+    profile.manifest.consent_policy.allow_opaque = true;
+    assert!(
+        parse(&profile).is_err(),
+        "deployment must name the exact trusted reviewer"
+    );
+    profile.manifest.consent_policy.reviewer_roots =
+        vec![deployment::key(6).verifying_key().to_bytes()];
+    assert!(
+        parse(&profile).is_err(),
+        "another reviewer is not consent for this finaliser"
+    );
+    profile.manifest.consent_policy.reviewer_roots = vec![reviewer];
+    assert!(parse(&profile).is_ok());
+}
+
+#[test]
+fn expired_body_placement_preserves_metadata_but_refuses_serving() {
+    let mut f = Fixture::new();
+    let hosts = f.hosts();
+    let body = b"HyperNetPage/2\n# Short Storage\n: Approved source.\n";
+    let author = f.author(body, 1);
+    f.apply(
+        Command::Submit {
+            author: author.clone(),
+        },
+        vec![],
+        5000,
+    );
+    let revision = f
+        .state
+        .record(141, revision_id(author.intent.resource, 1).unwrap())
+        .unwrap()
+        .reference
+        .clone();
+    let host = f
+        .state
+        .record(147, hosts[0].service)
+        .unwrap()
+        .reference
+        .clone();
+    f.apply(
+        Command::Content(content::Command::Place {
+            revision: revision.clone(),
+            hosts: vec![host.clone()],
+            copies: 1,
+            failure_domains: 1,
+            expires_ms: 6500,
+        }),
+        vec![],
+        5000,
+    );
+    let placement = f.content(&revision, 5000, true);
+    let review = f.reviewer(&author, true, 10000);
+    let bundle = objects::Bundle::encode(body, &author.bytes, &review.bytes).unwrap();
+    f.apply(
+        Command::Review {
+            review,
+            bundle: Some(Reference::for_bytes(Class::PageBundle, &bundle).unwrap()),
+        },
+        vec![],
+        5000,
+    );
+    assert_eq!(
+        f.evaluate(
+            Command::Read {
+                page: author.raw_page
+            },
+            vec![],
+            6600
+        )
+        .2
+        .code,
+        0
+    );
+    assert_eq!(
+        f.evaluate(
+            Command::Content(content::Command::Authorise {
+                placement,
+                host,
+                effect: content::Effect::Read,
+                offset: 0,
+                bytes: body.len() as u64,
+                digest: None
+            }),
+            vec![],
+            6600
+        )
+        .2
+        .code,
+        3
     );
 }

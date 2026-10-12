@@ -8,6 +8,8 @@ use publication::*;
 #[path = "AuthorityFederationResult.rs"]
 mod output;
 use output::*;
+#[path = "AuthorityFederationContent.rs"]
+mod content;
 #[path = "AuthorityFederationMedia.rs"]
 mod media;
 
@@ -91,7 +93,19 @@ pub fn expected_recipient(
     _reserved: &Reservations,
     intent: &Intent,
 ) -> Result<Key> {
-    if let Command::MediaAuthorise { host, .. } = command {
+    if let Command::ContentAuthorise { host, .. } = command {
+        let r = state.record(147, host.id)?;
+        ensure!(
+            r.reference == *host,
+            "foreign content recipient host changed"
+        );
+        let selected = page::Host::parse(&r.payload, state.network, state.incarnation)?;
+        ensure!(
+            selected.profile.role == 1 && selected.profile.content.is_some() && !selected.withdrawn,
+            "foreign content recipient lacks active role1 consent"
+        );
+        Ok(selected.profile.service)
+    } else if let Command::MediaAuthorise { host, .. } = command {
         let r = state.record(143, host.id)?;
         ensure!(r.reference == *host, "foreign media recipient host changed");
         let selected = page::Host::parse(&r.payload, state.network, state.incarnation)?;
@@ -132,6 +146,15 @@ pub fn evaluate(
     let mut cursor = None;
     let decision = (|| -> Result<()> {
         match command {
+            Command::ContentAuthorise { .. } => content::authorise(
+                &mut c,
+                operation,
+                command,
+                intent,
+                &mut next,
+                &mut changed,
+                replay,
+            )?,
             Command::MediaGet { .. }
             | Command::MediaAuthorise { .. }
             | Command::MediaReceipt { .. }

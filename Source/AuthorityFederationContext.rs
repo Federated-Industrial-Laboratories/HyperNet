@@ -131,6 +131,12 @@ impl page::Evaluation<'_> {
         treaty: &Treaty,
         raw: [u8; 16],
     ) -> Result<()> {
+        super::super::publication_modes::permitted(
+            self,
+            &treaty.destination_namespace,
+            Some(qualified_page(treaty.id, &treaty.source, raw)?),
+            0,
+        )?;
         for id in &treaty.destination_hosts {
             let host = self.select(143, *id)?;
             self.host(&host.reference, Some(&treaty.destination_namespace), true)?;
@@ -224,6 +230,7 @@ impl page::Evaluation<'_> {
             "source media exceeds bilateral byte consent"
         );
         self.media_metadata(&review.statement.revision, &revision)?;
+        page::content::select_placement(self, &review.statement.revision, &revision, false)?;
         Ok((head, review, revision, share_record, share))
     }
     pub(super) fn federation_revision(

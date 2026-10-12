@@ -54,7 +54,12 @@ impl Receipt {
         let v = wire::decode_state(bytes)?;
         let f = v.array(13)?;
         ensure!(
-            f[0].uint()? == 200 && f[1].uint()? == 1 && f[2].text()? == "PageMediaEffectReceipt",
+            f[0].uint()? == 200
+                && f[1].uint()? == 1
+                && matches!(
+                    f[2].text()?,
+                    "PageMediaEffectReceipt" | "PageContentEffectReceipt"
+                ),
             "invalid media effect receipt"
         );
         Ok(Self {
@@ -89,7 +94,7 @@ impl Receipt {
             &wire::encode(&a(vec![
                 V::Uint(200),
                 V::Uint(1),
-                V::Text("PageMediaEffectComplete".into()),
+                V::Text(request.completion_tag().into()),
                 result.point().prefix().scope().value(),
                 b(&request.intent().digest),
                 b(&result.executed.result),
@@ -103,7 +108,7 @@ impl Receipt {
         let bytes = wire::encode_state(&a(vec![
             V::Uint(200),
             V::Uint(1),
-            V::Text("PageMediaEffectReceipt".into()),
+            V::Text(request.receipt_tag().into()),
             b(request.signed()),
             b(challenge),
             b(ordered),
@@ -132,7 +137,7 @@ impl Receipt {
         Self::parse(&wire::encode_state(&a(vec![
             V::Uint(200),
             V::Uint(1),
-            V::Text("PageMediaEffectReceipt".into()),
+            V::Text(request.receipt_tag().into()),
             b(request.signed()),
             b(challenge),
             b(ordered),
@@ -149,6 +154,10 @@ impl Receipt {
         let v = wire::decode_state(&self.bytes)?;
         let f = v.array(13)?;
         let request = Request::parse(f[3].bytes()?)?;
+        ensure!(
+            f[2].text()? == request.receipt_tag(),
+            "effect receipt tag differs from its exact request"
+        );
         let ancestry = f[8]
             .list(128)?
             .iter()
@@ -197,7 +206,7 @@ impl Receipt {
                 && signatures[0].0 == result.executed.recipient
                 && c[0].uint()? == 200
                 && c[1].uint()? == 1
-                && c[2].text()? == "PageMediaEffectComplete"
+                && c[2].text()? == request.completion_tag()
                 && proof::Scope::parse(&c[3])? == *descriptor.scope()
                 && c[4].fixed::<32>()? == request.intent().digest
                 && c[5].fixed::<32>()? == result.executed.result

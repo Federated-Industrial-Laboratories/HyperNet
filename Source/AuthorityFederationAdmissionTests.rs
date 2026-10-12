@@ -38,6 +38,7 @@ fn destination() -> SourceFixture {
         state_bytes: 8 * 1024 * 1024,
         maximum_asset_bytes: markup::media::MAX_PAGE_BYTES.min(8 * 1024 * 1024),
         retention_ms: page::MAXIMUM_LIFETIME_MS,
+        content: None,
         envelope: vec![],
     };
     host.envelope = wire::sign_envelope(&host.payload().unwrap(), &deployment::key(90)).unwrap();
@@ -114,8 +115,15 @@ fn exported_media(f: &SourceFixture, raw: [u8; 16], number: u64) -> (VerifiedFor
             page_id,
             number,
             wire::decode(
-                &page::objects::Author::parameters(raw, "Books", &source, &f.grant, None, 20000)
-                    .unwrap(),
+                &page::objects::Author::parameters(
+                    raw,
+                    "Books",
+                    body.as_bytes(),
+                    &f.grant,
+                    None,
+                    20000,
+                )
+                .unwrap(),
             )
             .unwrap(),
         ),
@@ -306,7 +314,7 @@ fn import_cached(
         &agreement,
         proof,
         &objects.references()[0],
-        objects,
+        &Resolved::default(),
         false,
     )?;
     Ok(next)
@@ -357,6 +365,12 @@ fn admission_context_supports_cold_import_and_preserves_repeated_import_state() 
     assert_eq!(checked.value, result.value);
     let cold = checked.state;
     f.state = import_cached(&f, &cold, &records, &intent, &proof, &objects).unwrap();
+    assert!(
+        crate::authority_domains::federation::retained_inputs(&f.state)
+            .unwrap()
+            .is_empty(),
+        "foreign authority retains metadata without Page body objects"
+    );
     let id = qualified_page(f.treaty.id, &f.treaty.source, raw).unwrap();
     let mut head = ForeignPage::parse(&f.state.record(154, id).unwrap().payload).unwrap();
     let asset = f
@@ -470,4 +484,28 @@ fn admission_context_requires_exact_bridge_and_live_destination_host_consent() {
     host.withdrawn = true;
     insert(&mut f.state, 143, id, host.value());
     assert_eq!(f.evaluate(command.into(), vec![], 106, None).2.code, 3);
+}
+
+#[test]
+fn host_readable_import_and_body_admission_refuse_sealed_only_destination() {
+    let mut f = destination();
+    let raw = [194; 16];
+    let (proof, objects) = exported_media(&f, raw, 1);
+    let command = admission(&f, Some(raw));
+    let (intent, _, allowed) = f.evaluate(command.clone().into(), vec![], 106, None);
+    assert_eq!(allowed.code, 0);
+    let policy = crate::authority_domains::publication_modes::Policy {
+        namespace: f.treaty.destination_namespace.clone(),
+        modes: vec![1],
+        administrator: deployment::key(5).verifying_key().to_bytes(),
+        grant: f.grant.clone(),
+    };
+    insert(
+        &mut f.state,
+        164,
+        page::namespace_id(&policy.namespace).unwrap(),
+        policy.value(),
+    );
+    assert_eq!(f.evaluate(command.into(), vec![], 106, None).2.code, 3);
+    assert!(import_cached(&f, &f.state, &f.records, &intent, &proof, &objects).is_err());
 }

@@ -7,6 +7,15 @@ use std::collections::BTreeSet;
 pub const INTERVAL: u64 = 32;
 pub const MAX_STATE: usize = crate::authority_capacity::MAX_STATE_BYTES;
 pub const CHUNK: usize = 16384;
+#[derive(Debug)]
+pub struct HistoryOvertaken;
+impl std::fmt::Display for HistoryOvertaken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Certified checkpoint overtook the requested history target")
+    }
+}
+impl std::error::Error for HistoryOvertaken {}
+
 pub fn chunk(input: &[u8]) -> Result<(Digest, usize, usize, Vec<u8>)> {
     let value = wire::decode(input)?;
     let a = record(&value, 48, 6)?;
@@ -672,6 +681,15 @@ impl Engine {
                 archive::root(&leaves[..prior_size as usize]) == root,
                 "History retained root differs"
             );
+        }
+        if let Some(index) = leaves.iter().position(|digest| *digest == target)
+            && (index as u64 + 1) < c.height()
+        {
+            ensure!(
+                index as u64 + 1 >= height,
+                "History target precedes retained position"
+            );
+            return Err(HistoryOvertaken.into());
         }
         let b = records::bytes;
         let inclusion = if height == 0 {

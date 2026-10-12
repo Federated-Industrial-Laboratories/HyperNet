@@ -379,20 +379,18 @@ common maximum. Requests are `[41,1,Scope,operation,payloadBytes]`:
 Ordinary replies are
 `[42,1,Scope,status,code,orderedRequestOrNull,nodeOrNull,executedCertificateOrNull,operationResultOrNull,outputSidecar]`.
 Status is Pending=0, Certified=1 or Refused=2. Code is None=0, Unavailable=1,
-Malformed=2, Capacity=3 or ClockUnknown=4. Only a complete quorum-certified
+Malformed=2, Capacity=3, ClockUnknown=4 or HistoryOvertaken=5. Only a complete quorum-certified
 kind 23 result over the supplied kind 24 bytes can authorise a consumer effect.
 A Pending acknowledgement, process status or local diagnostic cannot do so.
 An exact request may be queried through another replica after its reply is lost.
 Its original recipient challenge and deadline remain unchanged.
 
-The mandatory output sidecar has the same exact reference/body encoding as input
-sidecars. It is empty for pending replies, refused results and operations which
-do not return Page objects. A successful finite Page result selects the exact
-source or approved bundle references; the local server has no arbitrary object-get
-operation. Missing object bytes return transport Unavailable without changing the
-committed result. Clients validate the exact sidecar, quorum result, retained floor
-and durable permit before exposing bytes. Object parsing, proof retrieval and
-output release share the original monotonic request deadline.
+The mandatory output sidecar retains its exact reference/body framing. Native
+and federated Page authority results carry metadata and an empty object sidecar.
+Page source and ciphertext travel through separately authorised finite content
+exchanges to exact consented hosts. Clients verify current publication metadata,
+content placement, host identity and hashes before reconstructing a viewer bundle.
+No authority object-get operation supplies Page bodies or bypasses this boundary.
 
 Successful operation 3 returns `[43,1,Scope,[nodeBytes,...]]`, containing at most
 128 contiguous nodes strictly after the named floor through the named target.
@@ -462,30 +460,33 @@ permission and content approval still apply after the digest check.
 
 The immutable input sidecar is the sorted unique array
 `[[reference203,bodyBytes],...]`. It contains exactly the references declared by
-that signed operation. Metadata-only operations carry an empty array. The
-ordered request and its consensus digest do not include a second copy of the
-bodies. PageSource is at most16384bytes; PageBundle is at most57344bytes. The
-replica verifies class, raw SHA256, length and declared membership before using
-or retaining bytes. Evaluation may read only its exact deterministic subset of
-new operation inputs and the prior state's retained inputs.
+that signed operation. Native Page submission, review, read, replica delivery and
+federated publication commands are metadata-only and use an empty array.
+PageSource is at most16384bytes; PageBundle is at most57344bytes. These references
+identify exact content without retaining its body in authority history.
 
-Missing bytes prevent voting or execution; they do not produce an ordered
-refusal. A type18 request names either `[0,quorumCertificateDigest]` or
-`[1,checkpointDigest]` as its input anchor. The reference must occur in that
-verified certificate's unapplied command ancestry or the checkpoint state's
-complete retained closure. Type19 must match the exact active request ID, anchor,
-reference and deadline. Only authenticated current committee peers participate;
-there is no caller-supplied path, URL or unauthenticated object retrieval. Null
-reports absence without authorising a fallback. Certificate repair queries the
-other committee members within the existing peer deadline; checkpoint repair
-uses its fixed transfer lease.
+Content placement159 binds an exact revision or outer113, owner capability,
+namespace, raw SHA256, length, opaque flag, selected host147 references, required
+copies, failure-domain count and expiry. Upload, inspect, read, repair and purge
+are separate finite actions. Each signed content request binds placement, exact
+host, effect, offset, length and an upload digest where applicable. A chunk is
+at most32768bytes. Recipient challenges, current authority and durable requester
+floors apply to each exchange, including retries. Filenames, arbitrary URLs and
+network-supplied host paths are not transport parameters.
 
-Objects and their reachability records precede any durable vote or applied
-result. Checkpoint transfer reserves and restores its complete retained input
-closure before installation. Publication history, pending revisions and retained
-approval bundles remain in that closure. Bitmap/vector bodies and generated
-animation frames are excluded: media remains on explicitly consented hosts and
-animation is performed by the viewing client.
+Complete-copy160 receipts are signed only after exact body verification and
+local durable storage. Tombstone161 stops serving independently of physical
+cleanup. Approved source is retrieved directly and checked against its signed
+author metadata; the viewer constructs the approved bundle locally. Bitmap and
+vector bodies remain on explicitly consented hosts. Animation frames are
+produced by the viewing client and are not replicated as authority data.
+
+The generic authority input repair transport remains bounded to explicitly
+referenced objects in a verified command or checkpoint closure. Missing bytes
+prevent voting or execution; they do not create an ordered refusal. Type18 names
+`[0,quorumCertificateDigest]` or `[1,checkpointDigest]`; type19 must match the
+active request, anchor, exact reference and deadline. This transport does not
+make Page bodies part of consensus history or grant a content read permission.
 
 The local policy-inspection action uses
 `[200,1,"AuthorityInspect",grantId,recordKind,lookupId]`. The resource is the
@@ -789,6 +790,15 @@ retained position and optional retained tree head. Clients verify this evidence
 independently and durably retain the new head, result position and restrictive
 policy floors before releasing an effect. Ordinary operation3 remains available
 for short contiguous ancestry. Unknown positions, roots and suffixes refuse.
+
+If the exact target is in the certified archive before the latest checkpoint,
+operation4 returns Refused/HistoryOvertaken with all optional fields null and an
+empty output sidecar. The retained position and prior root must still validate.
+This reply grants no permission and cannot replace history evidence. Installed
+service activation may discard that attempt's challenge and issue a fresh one
+for the same immutable intent within the original monotonic startup deadline.
+Malformed history and proof data never trigger this refresh. Ordinary request
+recovery does not automatically retry a mutation with a different challenge.
 
 State has at most262144 bytes. Kind48 uses at most16 chunks of16384 bytes, with
 zero-based exact indices and only the final chunk shorter. Archive requests name
