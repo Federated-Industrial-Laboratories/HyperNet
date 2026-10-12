@@ -4,27 +4,20 @@ use super::{files::*, model::*};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs, path::Path};
+#[path = "RuntimeImage.rs"]
+pub(super) mod image;
 #[path = "RuntimePreparation.rs"]
 mod preparation;
 pub use preparation::prepare;
 
 fn topology(p: &Profile, role: &str) -> Result<BTreeMap<String, String>> {
-    let a = p.subnet.octets();
-    let host_ip = |last| format!("{}.{}.{}.{last}", a[0], a[1], a[2] + 1);
     Ok(match role {
-        "Voter1" => [(p.network_name(), p.ip(11))].into(),
-        "Voter2" => [(p.network_name(), p.ip(12))].into(),
-        "Voter3" => [(p.network_name(), p.ip(13))].into(),
         "Authority" => [(p.network_name(), p.ip(20))].into(),
-        "Gate" => [
-            (p.network_name(), p.ip(21)),
-            (p.host_network_name(), host_ip(3)),
-        ]
-        .into(),
-        "Host" => [(p.host_network_name(), host_ip(2))].into(),
+        "Initialise" | "Inspect" | "ImageCheck" => BTreeMap::new(),
         _ => anyhow::bail!("Unknown container role"),
     })
 }
+
 fn check_addresses(
     networks: &Value,
     expected: &BTreeMap<String, String>,
@@ -57,7 +50,11 @@ fn check_addresses(
             ensure!(
                 value["IPAddress"] == *address
                     && value["IPPrefixLen"] == 24
-                    && matches!(value["Gateway"].as_str(), Some("" | "<nil>")),
+                    && value["Gateway"]
+                        == format!(
+                            "{}.1",
+                            address.rsplit_once('.').context("Invalid IPv4 address")?.0
+                        ),
                 "Active network addressing differs from consent"
             );
         } else {
@@ -67,6 +64,28 @@ fn check_addresses(
             );
         }
     }
+    Ok(())
+}
+fn check_unnetworked(value: &Value) -> Result<()> {
+    ensure!(
+        value["HostConfig"]["NetworkMode"] == "none",
+        "Unnetworked container mode differs from consent"
+    );
+    let networks = value["NetworkSettings"]["Networks"]
+        .as_object()
+        .context("Missing effective network attachments")?;
+    // Podman 4.9 and 5.7 report this synthetic entry for --network=none.
+    // It names no actual network and must contain no addressing or options.
+    let synthetic = json!({"none":{
+        "EndpointID":"", "Gateway":"", "IPAddress":"", "IPPrefixLen":0,
+        "IPv6Gateway":"", "GlobalIPv6Address":"", "GlobalIPv6PrefixLen":0,
+        "MacAddress":"", "NetworkID":"none", "DriverOpts":null,
+        "IPAMConfig":null, "Links":null
+    }});
+    ensure!(
+        networks.is_empty() || Some(networks) == synthetic.as_object(),
+        "Unnetworked container has effective network attachments"
+    );
     Ok(())
 }
 fn verify_topology(p: &Profile, r: &Resource, value: &Value) -> Result<()> {
@@ -79,11 +98,15 @@ fn verify_topology(p: &Profile, r: &Resource, value: &Value) -> Result<()> {
         r.network_ids.len() == expected.len(),
         "Recorded network identities differ"
     );
-    check_addresses(
-        &value["NetworkSettings"]["Networks"],
-        &expected,
-        value["State"]["Running"] == true,
-    )?;
+    if expected.is_empty() {
+        check_unnetworked(value)?;
+    } else {
+        check_addresses(
+            &value["NetworkSettings"]["Networks"],
+            &expected,
+            value["State"]["Running"] == true,
+        )?;
+    }
     for name in expected.keys() {
         let id = r
             .network_ids
@@ -94,7 +117,7 @@ fn verify_topology(p: &Profile, r: &Resource, value: &Value) -> Result<()> {
         ensure!(
             network["id"] == *id
                 && network["name"] == *name
-                && network["internal"] == true
+                && network["internal"] == false
                 && network["labels"]["io.hypernet.deployment"] == p.deployment
                 && network["labels"]["io.hypernet.configuration"] == p.configuration_digest()?,
             "Effective network identity differs from consent"
@@ -108,7 +131,7 @@ fn verify_topology(p: &Profile, r: &Resource, value: &Value) -> Result<()> {
     Ok(())
 }
 
-fn inspect(kind: &str, id: &str) -> Result<Value> {
+pub(super) fn inspect(kind: &str, id: &str) -> Result<Value> {
     let bytes = podman(&strings(&[kind, "inspect", id]))?;
     let value: Value = serde_json::from_slice(&bytes)?;
     value
@@ -117,45 +140,12 @@ fn inspect(kind: &str, id: &str) -> Result<Value> {
         .cloned()
         .context("Missing resource inspection")
 }
-fn fingerprint(kind: &str, v: &Value) -> Result<String> {
-    let selected = if kind == "network" {
-        json!({"id":v["id"],"name":v["name"],"subnets":v["subnets"],"internal":v["internal"],"labels":v["labels"],"driver":v["driver"],"networkInterface":v["network_interface"],"dnsEnabled":v["dns_enabled"],"ipv6Enabled":v["ipv6_enabled"],"options":v["options"],"ipamOptions":v["ipam_options"]})
-    } else {
-        let mut config = v["Config"].clone();
-        let host = v["HostConfig"].clone();
-        // Podman supplies these informational defaults when a created container starts.
-        if config["Annotations"].is_null() {
-            config["Annotations"] = json!({});
-        }
-        let annotations = config["Annotations"]
-            .as_object_mut()
-            .context("Invalid annotations")?;
-        annotations
-            .entry("io.container.manager")
-            .or_insert(json!("libpod"));
-        annotations
-            .entry("org.opencontainers.image.stopSignal")
-            .or_insert(json!("15"));
-        let hostname = config["Hostname"]
-            .as_str()
-            .context("Missing hostname")?
-            .to_string();
-        let environment = config["Env"]
-            .as_array_mut()
-            .context("Invalid environment")?;
-        for (name, value) in [("HOME", "/"), ("HOSTNAME", hostname.as_str())] {
-            if !environment.iter().any(|item| {
-                item.as_str()
-                    .is_some_and(|s| s.starts_with(&format!("{name}=")))
-            }) {
-                environment.push(json!(format!("{name}={value}")));
-            }
-        }
-        environment.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
-        json!({"Id":v["Id"],"Image":v["Image"],"Config":config,"HostConfig":host,"Mounts":v["Mounts"],"MountLabel":v["MountLabel"],"ProcessLabel":v["ProcessLabel"]})
-    };
-    Ok(hex_digest(&serde_json::to_vec(&selected)?))
+#[path = "RuntimeContainerFingerprint.rs"]
+mod fingerprint;
+pub(super) fn fingerprint(kind: &str, v: &Value) -> Result<String> {
+    fingerprint::of(kind, v)
 }
+
 pub fn verify(p: &Profile, r: &Resource) -> Result<Value> {
     let id =
         r.id.as_deref()
@@ -216,7 +206,7 @@ fn recover_container(root: &Path, p: &Profile, r: &mut Resource) -> Result<()> {
     r.fingerprint = Some(fingerprint("container", &value)?);
     Ok(())
 }
-fn container_present(id: &str) -> Result<bool> {
+pub(super) fn container_present(id: &str) -> Result<bool> {
     let result = String::from_utf8(podman(&strings(&[
         "ps",
         "--all",
@@ -240,12 +230,8 @@ fn labels(p: &Profile) -> Result<Vec<String>> {
         &format!("io.hypernet.configuration={}", p.configuration_digest()?),
     ]))
 }
-pub fn network(root: &Path, p: &Profile, s: &mut State, host: bool) -> Result<()> {
-    let name = if host {
-        p.host_network_name()
-    } else {
-        p.network_name()
-    };
+pub fn network(root: &Path, p: &Profile, s: &mut State) -> Result<()> {
+    let name = p.network_name();
     if let Some(r) = s
         .resources
         .iter()
@@ -260,12 +246,7 @@ pub fn network(root: &Path, p: &Profile, s: &mut State, host: bool) -> Result<()
         !existing.iter().any(|network| network["name"] == name),
         "Network name collision; unrelated resource preserved"
     );
-    let octets = p.subnet.octets();
-    let subnet = if host {
-        format!("{}.{}.{}.0/24", octets[0], octets[1], octets[2] + 1)
-    } else {
-        format!("{}/24", p.subnet)
-    };
+    let subnet = format!("{}/24", p.subnet);
     s.resources.push(Resource {
         kind: "network".into(),
         name: name.clone(),
@@ -277,10 +258,11 @@ pub fn network(root: &Path, p: &Profile, s: &mut State, host: bool) -> Result<()
     let mut args = strings(&[
         "network",
         "create",
-        "--internal",
         "--disable-dns",
         "--subnet",
         &subnet,
+        "--gateway",
+        &p.ip(1),
     ]);
     args.extend(labels(p)?);
     args.push(name.clone());
@@ -297,18 +279,24 @@ pub fn network(root: &Path, p: &Profile, s: &mut State, host: bool) -> Result<()
     save(root, s)?;
     Ok(())
 }
-fn common(p: &Profile, role: &str, memory: u64, pids: u32, quota: u32) -> Result<Vec<String>> {
-    let lifetime = p.expires.checked_sub(now()?).context("Consent expired")?;
+fn common(p: &Profile, role: &str, memory: u64, pids: u64, quota: u64) -> Result<Vec<String>> {
+    let lifetime = if role == "Inspect" {
+        45
+    } else {
+        p.expires.checked_sub(now()?).context("Consent expired")?
+    };
     ensure!(lifetime > 0, "Consent expired");
     let mut args = strings(&[
         "create",
         "--name",
         &format!("{}{role}", p.prefix()),
         "--pull=never",
+        "--entrypoint=/HyperNet",
         "--read-only",
         "--read-only-tmpfs=false",
         "--userns=nomap",
-        "--user=0:0",
+        "--user=1000:1000",
+        "--env=HOME=/",
         "--cap-drop=all",
         "--security-opt=no-new-privileges",
         &format!(
@@ -323,9 +311,10 @@ fn common(p: &Profile, role: &str, memory: u64, pids: u32, quota: u32) -> Result
         &format!("--memory={memory}"),
         &format!("--memory-swap={memory}"),
         &format!("--pids-limit={pids}"),
-        "--cpu-period=100000",
+        &format!("--cpu-period={}", p.resources.cpu_period),
         &format!("--cpu-quota={quota}"),
         &format!("--timeout={lifetime}"),
+        "--stop-timeout=15",
         "--log-driver=k8s-file",
         "--log-opt=max-size=1mb",
     ]);
@@ -353,12 +342,13 @@ fn mount(p: &Profile, args: &mut Vec<String>, source: &Path, target: &str, write
     ]));
 }
 
-fn create_start(
+fn create_container(
     root: &Path,
     p: &Profile,
     s: &mut State,
     role: &str,
     mut args: Vec<String>,
+    start: bool,
 ) -> Result<()> {
     let name = format!("{}{role}", p.prefix());
     ensure!(
@@ -418,112 +408,97 @@ fn create_start(
     r.fingerprint = Some(fingerprint("container", &value)?);
     save(root, s)?;
     verify(p, s.resources.last().unwrap())?;
-    podman(&strings(&["start", &id]))?;
-    Ok(())
-}
-pub fn voters(root: &Path, p: &Profile, s: &mut State) -> Result<()> {
-    for i in 1..=3 {
-        let role = format!("Voter{i}");
-        let mut args = common(p, &role, 536870912, 128, 100000)?;
-        args.extend(strings(&[
-            "--network",
-            &format!("{}:ip={}", p.network_name(), p.ip(10 + i)),
-            "--publish",
-            &format!("127.0.0.1:{}:2379", p.voter_port_base + u16::from(i) - 1),
-        ]));
-        args.extend(strings(&[
-            "--volume",
-            &format!(
-                "{}:/Etcd:{}",
-                p.etcd.display(),
-                volume_options(false, true, p.selinux_relabel)
-            ),
-        ]));
-        mount(
-            p,
-            &mut args,
-            &root.join(format!("Launch/{role}/Config")),
-            "/Config",
-            false,
-        );
-        mount(
-            p,
-            &mut args,
-            &root.join(format!("Launch/{role}/State")),
-            "/State",
-            true,
-        );
-        args.extend(strings(&[
-            &p.image,
-            "runtime-guard",
-            "--kind",
-            "voter",
-            "--expires",
-            &p.expires.to_string(),
-            "--",
-            &format!("--name={role}"),
-            "--data-dir=/State",
-            "--listen-client-urls=https://0.0.0.0:2379",
-            &format!("--advertise-client-urls=https://{}:2379", p.ip(10 + i)),
-            "--listen-peer-urls=https://0.0.0.0:2380",
-            &format!(
-                "--initial-advertise-peer-urls=https://{}:2380",
-                p.ip(10 + i)
-            ),
-            &format!(
-                "--initial-cluster={}",
-                (1..=3)
-                    .map(|n| format!("Voter{n}=https://{}:2380", p.ip(10 + n)))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ),
-            &format!("--initial-cluster-token={}", p.deployment),
-            &format!("--cert-file=/Config/{role}.pem"),
-            &format!("--key-file=/Config/{role}Key.pem"),
-            "--client-cert-auth",
-            "--trusted-ca-file=/Config/VoterCa.pem",
-            &format!("--peer-cert-file=/Config/{role}Peer.pem"),
-            &format!("--peer-key-file=/Config/{role}PeerKey.pem"),
-            "--peer-client-cert-auth",
-            "--peer-trusted-ca-file=/Config/PeerCa.pem",
-            "--peer-cert-allowed-cn=HyperNetVoter",
-            "--tls-min-version=TLS1.3",
-            "--tls-max-version=TLS1.3",
-            "--quota-backend-bytes=67108864",
-            "--max-wals=2",
-            "--max-snapshots=2",
-            "--snapshot-count=100",
-            "--auto-compaction-retention=1m",
-            "--enable-grpc-gateway=false",
-        ]));
-        create_start(root, p, s, &role, args)?;
+    if start {
+        podman(&strings(&["start", &id]))?;
     }
     Ok(())
 }
-pub fn authority(root: &Path, p: &Profile, s: &mut State) -> Result<()> {
-    podman(&strings(&[
-        "unshare",
-        "/usr/bin/chown",
-        "-R",
-        "1:1",
-        root.join("AuthorityState").to_str().unwrap(),
-    ]))?;
-    let mut args = common(p, "Authority", 536870912, 64, 100000)?;
+pub fn verify_image(root: &Path, p: &Profile, s: &mut State) -> Result<()> {
+    let mut args = common(
+        p,
+        "ImageCheck",
+        p.resources.memory_bytes,
+        p.resources.pids,
+        p.resources.cpu_quota,
+    )?;
+    args.extend(strings(&["--network=none", &p.image, "--version"]));
+    // The image is not executed and no credentials, state or authorization are mounted.
+    create_container(root, p, s, "ImageCheck", args, false)?;
+    let index = s
+        .resources
+        .iter()
+        .position(|r| r.name == format!("{}ImageCheck", p.prefix()))
+        .context("Image verification resource absent")?;
+    let resource = &s.resources[index];
+    verify(p, resource)?;
+    let result = image::verify(
+        resource
+            .id
+            .as_deref()
+            .context("Image container identity absent")?,
+        &p.software_digest,
+    );
+    remove_container(root, p, resource)?;
+    s.resources.remove(index);
+    save(root, s)?;
+    result
+}
+fn workload_args(root: &Path, p: &Profile, role: &str) -> Result<Vec<String>> {
+    let mut args = common(
+        p,
+        role,
+        p.resources.memory_bytes,
+        p.resources.pids,
+        p.resources.cpu_quota,
+    )?;
+    if role == "Authority" {
+        args.extend(strings(&[
+            "--network",
+            &format!("{}:ip={}", p.network_name(), p.ip(20)),
+            "--publish",
+            &format!("{}:{}:{}", p.bind, p.port, p.port),
+        ]));
+    } else {
+        args.push("--network=none".into());
+    }
+    mount(p, &mut args, &root.join("Launch/Config"), "/Config", false);
+    mount(
+        p,
+        &mut args,
+        &root.join("Launch/State/Authority"),
+        "/State",
+        true,
+    );
+    let mut control_options = String::from("rw,nosuid,nodev,noexec");
+    if p.selinux_relabel {
+        control_options.push_str(",z");
+    }
     args.extend(strings(&[
-        "--network",
-        &format!("{}:ip={}", p.network_name(), p.ip(20)),
-        "--publish",
-        &format!("{}:{}:8443", p.bind, p.port),
-        "--ulimit=fsize=65536:65536",
+        "--volume",
+        &format!(
+            "{}:/State/Control:{control_options}",
+            root.join("Launch/State/Control").display()
+        ),
     ]));
     mount(
         p,
         &mut args,
-        &root.join("Launch/Authority"),
-        "/Config",
+        &root.join("Authorization"),
+        "/Authorization",
         false,
     );
-    mount(p, &mut args, &root.join("AuthorityState"), "/State", true);
+    // Directory binding observes signed observation replacement without granting writes.
+    args.extend(strings(&[
+        "--volume",
+        &format!(
+            "{}:/Clock:ro,nosuid,nodev,noexec",
+            p.clock_directory.display()
+        ),
+    ]));
+    Ok(args)
+}
+pub fn authority(root: &Path, p: &Profile, s: &mut State) -> Result<()> {
+    let mut args = workload_args(root, p, "Authority")?;
     args.extend(strings(&[
         &p.image,
         "runtime-guard",
@@ -531,42 +506,188 @@ pub fn authority(root: &Path, p: &Profile, s: &mut State) -> Result<()> {
         "authority",
         "--expires",
         &p.expires.to_string(),
+        "--",
+        &format!("--minimum-generation={}", signer_generation(root)?),
     ]));
-    create_start(root, p, s, "Authority", args)
+    create_container(root, p, s, "Authority", args, true)
 }
-pub fn host(root: &Path, p: &Profile, s: &mut State) -> Result<()> {
-    let a = p.subnet.octets();
-    let gate = format!("{}.{}.{}.3", a[0], a[1], a[2] + 1);
-    let host = format!("{}.{}.{}.2", a[0], a[1], a[2] + 1);
-    let mut args = common(p, "Gate", 134217728, 32, 50000)?;
-    args.extend(strings(&[
-        "--network",
-        &format!("{}:ip={gate}", p.host_network_name()),
-        "--network",
-        &format!("{}:ip={}", p.network_name(), p.ip(21)),
-        "--tmpfs=/State:rw,noexec,nosuid,nodev,size=8388608,mode=0700",
-    ]));
-    mount(p, &mut args, &root.join("Launch/Gate"), "/Config", false);
-    args.extend(strings(&[
-        "--entrypoint=/HyperNetGate",
-        &p.image,
-        "/Config/Gate.json",
-    ]));
-    create_start(root, p, s, "Gate", args)?;
-    let mut args = common(p, "Host", 134217728, 32, 50000)?;
-    args.extend(strings(&[
-        "--network",
-        &format!("{}:ip={host}", p.host_network_name()),
-        "--tmpfs=/State:rw,noexec,nosuid,nodev,size=8388608,mode=0700",
-    ]));
-    mount(p, &mut args, &root.join("Launch/Host"), "/Config", false);
+pub fn temporary(root: &Path, p: &Profile, s: &mut State, initialise: bool) -> Result<Value> {
+    let role = if initialise { "Initialise" } else { "Inspect" };
+    let mut args = workload_args(root, p, role)?;
     args.extend(strings(&[
         &p.image,
-        "host",
-        "--config",
-        "/Config/Host.json",
+        "authority-replica",
+        if initialise { "initialise" } else { "status" },
+        "--directory",
+        "/State/Replica",
     ]));
-    create_start(root, p, s, "Host", args)
+    if initialise {
+        args.extend(strings(&[
+            "--bootstrap",
+            "/Config/Bootstrap.cbor",
+            "--bootstrap-digest",
+            &p.bootstrap_digest,
+            "--key",
+            "/Config/Identity.json",
+            "--config",
+            "/Config/ReplicaConfig.json",
+            "--authorization",
+            "/Authorization",
+        ]));
+    } else {
+        args.extend(strings(&[
+            "--minimum-generation",
+            &signer_generation(root)?.to_string(),
+        ]));
+    }
+    run_temporary(root, p, s, role, args, MAXIMUM)
+}
+pub(super) fn epoch_temporary(
+    root: &Path,
+    p: &Profile,
+    s: &mut State,
+    input: &Path,
+    output: Option<&Path>,
+    command: &[String],
+) -> Result<Value> {
+    let role = "Inspect";
+    let mut args = workload_args(root, p, role)?;
+    mount(p, &mut args, input, "/EpochInput", false);
+    if let Some(output) = output {
+        mount(p, &mut args, output, "/EpochOutput", true);
+    }
+    args.extend(strings(&[&p.image, "authority-replica", "epoch"]));
+    args.extend(command.iter().cloned());
+    run_temporary(
+        root,
+        p,
+        s,
+        role,
+        args,
+        2 * crate::authority_capacity::MAX_STATE_BYTES
+            + crate::authority_epoch::archive::MAX_ARCHIVE_BYTES
+            + 1048576,
+    )
+}
+fn run_temporary(
+    root: &Path,
+    p: &Profile,
+    s: &mut State,
+    role: &str,
+    args: Vec<String>,
+    maximum: usize,
+) -> Result<Value> {
+    create_container(root, p, s, role, args, true)?;
+    let index = s
+        .resources
+        .iter()
+        .position(|r| r.name == format!("{}{role}", p.prefix()))
+        .context("Temporary container is not recorded")?;
+    let result = (|| -> Result<Value> {
+        let resource = &s.resources[index];
+        let id = resource
+            .id
+            .as_deref()
+            .context("Temporary identity missing")?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+        loop {
+            let value = verify(p, resource)?;
+            if value["State"]["Running"] == false {
+                ensure!(
+                    value["State"]["ExitCode"] == 0,
+                    "Inert signer command refused; retained data was not replaced"
+                );
+                let (bytes, _) = capture(
+                    Path::new("/usr/bin/podman"),
+                    &strings(&["logs", id]),
+                    45,
+                    maximum,
+                    32768,
+                )?;
+                return Ok(serde_json::from_slice(&bytes)?);
+            }
+            ensure!(
+                std::time::Instant::now() < deadline,
+                "Inert signer command timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    })();
+    if result.is_err() {
+        let _ = failure_diagnostic(root, p, &s.resources[index], role);
+    }
+    remove_container(root, p, &s.resources[index])?;
+    s.resources.remove(index);
+    save(root, s)?;
+    result
+}
+fn failure_diagnostic(root: &Path, p: &Profile, resource: &Resource, role: &str) -> Result<()> {
+    ensure!(
+        matches!(role, "Authority" | "Initialise" | "Inspect")
+            && resource.kind == "container"
+            && resource.name == format!("{}{role}", p.prefix()),
+        "Unexpected diagnostic resource"
+    );
+    let observed = verify(p, resource)?;
+    let id = resource
+        .id
+        .as_deref()
+        .context("Diagnostic identity missing")?;
+    let state = &observed["State"];
+    let mut record = json!({
+        "stage":role,"resourceId":id,
+        "state":{
+            "running":state["Running"].as_bool(),
+            "exitCode":state["ExitCode"].as_i64(),
+            "oomKilled":state["OOMKilled"].as_bool(),
+            "pid":state["Pid"].as_u64()
+        }
+    });
+    match capture(
+        Path::new("/usr/bin/podman"),
+        &strings(&["logs", "--tail=64", id]),
+        15,
+        32768,
+        32768,
+    ) {
+        Ok((out, err)) => {
+            record["stdout"] = json!(String::from_utf8_lossy(&out));
+            record["stderr"] = json!(String::from_utf8_lossy(&err));
+        }
+        Err(_) => record["capture"] = json!("UnavailableOrExceededBound"),
+    }
+    super::files::save(
+        &root.join("Diagnostics").join(format!("{role}Failure.json")),
+        &record,
+    )
+}
+pub fn authority_failure(root: &Path, p: &Profile, s: &State) -> Result<()> {
+    if let Some(resource) = s.resources.iter().find(|resource| {
+        resource.kind == "container" && resource.name == format!("{}Authority", p.prefix())
+    }) {
+        failure_diagnostic(root, p, resource, "Authority")?;
+    }
+    Ok(())
+}
+fn remove_container(root: &Path, p: &Profile, r: &Resource) -> Result<()> {
+    let id = r.id.as_deref().context("Unresolved container identity")?;
+    if container_present(id)? {
+        verify(p, r)?;
+        podman(&strings(&["stop", "--time=15", id]))?;
+        podman(&strings(&["rm", id]))?;
+    }
+    let role = r
+        .name
+        .strip_prefix(&p.prefix())
+        .context("Invalid role name")?;
+    let cid = root.join(format!("Container{role}.id"));
+    if cid.exists() {
+        let recorded = String::from_utf8(receipt(&cid)?)?;
+        ensure!(recorded.trim() == id, "Container receipt changed");
+        fs::remove_file(cid)?;
+        fs::File::open(root)?.sync_all()?;
+    }
+    Ok(())
 }
 pub fn stop(root: &Path, p: &Profile, s: &mut State) -> Result<()> {
     let mut failed = false;
@@ -581,26 +702,7 @@ pub fn stop(root: &Path, p: &Profile, s: &mut State) -> Result<()> {
         if save(root, s).is_err() {
             failed = true;
         }
-        let r = &s.resources[index];
-        let id = r.id.as_deref().unwrap();
-        let remove = (|| -> Result<()> {
-            if container_present(id)? {
-                verify(p, r)?;
-                podman(&strings(&["stop", "--time=2", id]))?;
-                podman(&strings(&["rm", id]))?;
-            }
-            let role = r
-                .name
-                .strip_prefix(&p.prefix())
-                .context("Invalid role name")?;
-            let cid = root.join(format!("Container{role}.id"));
-            if cid.exists() {
-                let recorded = String::from_utf8(receipt(&cid)?)?;
-                ensure!(recorded.trim() == id, "Container receipt changed");
-                fs::remove_file(cid)?;
-            }
-            Ok(())
-        })();
+        let remove = remove_container(root, p, &s.resources[index]);
         if remove.is_err() {
             failed = true;
             continue;
@@ -616,6 +718,37 @@ pub fn stop(root: &Path, p: &Profile, s: &mut State) -> Result<()> {
     );
     Ok(())
 }
+pub fn withdraw_networks(root: &Path, p: &Profile, s: &mut State) -> Result<()> {
+    ensure!(
+        !s.resources.iter().any(|r| r.kind == "container"),
+        "Stop owned containers before releasing networking"
+    );
+    for index in (0..s.resources.len()).rev() {
+        let resource = &s.resources[index];
+        ensure!(resource.kind == "network", "Unexpected recorded resource");
+        let id = resource
+            .id
+            .as_deref()
+            .context("Unresolved network identity; withdrawal remains effective")?;
+        let current: Vec<Value> =
+            serde_json::from_slice(&podman(&strings(&["network", "ls", "--format", "json"]))?)?;
+        let mut present = false;
+        for network in &current {
+            let actual = network["id"]
+                .as_str()
+                .context("Network listing omitted its full identity")?;
+            crate::protocol::fixed_hex::<32>(actual).map_err(anyhow::Error::msg)?;
+            present |= actual == id;
+        }
+        if present {
+            verify(p, resource)?;
+            podman(&strings(&["network", "rm", id]))?;
+        }
+        s.resources.remove(index);
+        save(root, s)?;
+    }
+    Ok(())
+}
 pub fn processes(p: &Profile, s: &State) -> Result<bool> {
     for r in &s.resources {
         let value = verify(p, r)?;
@@ -623,29 +756,66 @@ pub fn processes(p: &Profile, s: &State) -> Result<bool> {
             return Ok(false);
         }
     }
-    Ok(s.resources.iter().filter(|r| r.kind == "container").count() == 6)
+    Ok(s.resources.iter().filter(|r| r.kind == "container").count() == 1)
 }
-pub fn host_status(p: &Profile, s: &State) -> Result<Value> {
+pub fn live_status(p: &Profile, s: &State, minimum_generation: u64) -> Result<Value> {
     let r = s
         .resources
         .iter()
-        .find(|r| r.kind == "container" && r.name == format!("{}Host", p.prefix()))
-        .context("Host is not started")?;
-    verify(p, r)?;
-    let bytes = podman(&strings(&["logs", "--tail=1", r.id.as_deref().unwrap()]))?;
-    let v: Value = serde_json::from_slice(&bytes)?;
+        .find(|r| r.kind == "container" && r.name == format!("{}Authority", p.prefix()))
+        .context("Authority is not started")?;
+    let inspected = verify(p, r)?;
     ensure!(
-        v["active"] == true
-            && v["leaseExpires"]
-                .as_u64()
-                .is_some_and(|t| t > now().unwrap_or(u64::MAX)),
-        "Host lease is not current"
+        inspected["State"]["Running"] == true,
+        "Authority is not running"
     );
-    Ok(v)
+    let bytes = podman(&strings(&[
+        "exec",
+        r.id.as_deref().unwrap(),
+        "/HyperNet",
+        "authority-replica",
+        "live-status",
+        "--directory",
+        "/State/Replica",
+        "--minimum-generation",
+        &minimum_generation.to_string(),
+    ]))?;
+    Ok(serde_json::from_slice(&bytes)?)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unnetworked_requires_none_mode_and_no_effective_attachment() {
+        let empty = json!({"HostConfig":{"NetworkMode":"none"},"NetworkSettings":{"Networks":{}}});
+        assert!(check_unnetworked(&empty).is_ok());
+        let mut synthetic = empty.clone();
+        synthetic["NetworkSettings"]["Networks"] = json!({"none":{
+            "EndpointID":"", "Gateway":"", "IPAddress":"", "IPPrefixLen":0,
+            "IPv6Gateway":"", "GlobalIPv6Address":"", "GlobalIPv6PrefixLen":0,
+            "MacAddress":"", "NetworkID":"none", "DriverOpts":null,
+            "IPAMConfig":null, "Links":null
+        }});
+        assert!(check_unnetworked(&synthetic).is_ok());
+        for (field, hidden) in [
+            ("IPAddress", json!("10.89.132.20")),
+            ("Gateway", json!("10.89.132.1")),
+            ("GlobalIPv6Address", json!("fd00::1")),
+            ("NetworkID", json!("Authority")),
+            ("DriverOpts", json!({"route":"unexpected"})),
+        ] {
+            let mut changed = synthetic.clone();
+            changed["NetworkSettings"]["Networks"]["none"][field] = hidden;
+            assert!(check_unnetworked(&changed).is_err(), "{field}");
+        }
+        let mut changed = synthetic.clone();
+        changed["NetworkSettings"]["Networks"]["Authority"] = json!({});
+        assert!(check_unnetworked(&changed).is_err());
+        for mut changed in [empty, synthetic] {
+            changed["HostConfig"]["NetworkMode"] = json!("host");
+            assert!(check_unnetworked(&changed).is_err());
+        }
+    }
     #[test]
     fn effective_networks_reject_new_routes_and_changed_addresses() {
         let expected = BTreeMap::from([("Authority".into(), "10.89.132.11".into())]);
@@ -653,7 +823,7 @@ mod tests {
         assert!(check_addresses(&networks, &expected, false).is_ok());
         networks["Authority"]["IPAddress"] = json!("10.89.132.11");
         networks["Authority"]["IPPrefixLen"] = json!(24);
-        networks["Authority"]["Gateway"] = json!("<nil>");
+        networks["Authority"]["Gateway"] = json!("10.89.132.1");
         assert!(check_addresses(&networks, &expected, true).is_ok());
         let mut changed = networks.clone();
         changed["Extra"] = changed["Authority"].clone();
@@ -662,7 +832,7 @@ mod tests {
         changed["Authority"]["IPAddress"] = json!("10.89.132.12");
         assert!(check_addresses(&changed, &expected, true).is_err());
         changed = networks.clone();
-        changed["Authority"]["Gateway"] = json!("10.89.132.1");
+        changed["Authority"]["Gateway"] = json!("10.89.132.254");
         assert!(check_addresses(&changed, &expected, true).is_err());
         networks["Authority"]["GlobalIPv6Address"] = json!("fd00::1");
         assert!(check_addresses(&networks, &expected, true).is_err());
@@ -712,5 +882,55 @@ mod tests {
             fingerprint("container", &created).unwrap(),
             fingerprint("container", &started).unwrap()
         );
+    }
+    #[test]
+    fn inspection_preserves_explicit_home_across_image_user_defaults() {
+        for home in ["/", "/Work"] {
+            let created = json!({"Id":"id","Image":"image","Config":{"Hostname":"host","Env":[format!("HOME={home}")],"Annotations":null},"HostConfig":{},"Mounts":[]});
+            let mut started = created.clone();
+            started["Config"]["Env"] = json!(["HOSTNAME=host", format!("HOME={home}")]);
+            assert_eq!(
+                fingerprint("container", &created).unwrap(),
+                fingerprint("container", &started).unwrap()
+            );
+            started["Config"]["Env"] = json!(["HOSTNAME=host", "HOME=/Other"]);
+            assert_ne!(
+                fingerprint("container", &created).unwrap(),
+                fingerprint("container", &started).unwrap()
+            );
+        }
+    }
+    #[test]
+    fn inspection_preserves_stop_and_mount_constraints_across_start() {
+        let created = json!({"Id":"id","Image":"image","Config":{"Hostname":"host","Env":[],"Annotations":null},"HostConfig":{"Annotations":null,"StopTimeout":15},"Mounts":[{"Type":"bind","Source":"/ProbeRead","Destination":"/Config","RW":false,"Options":["ro","nosuid","nodev","noexec"]}]});
+        let mut started = created.clone();
+        started["Config"]["Env"] = json!(["HOSTNAME=host", "HOME=/"]);
+        for section in ["Config", "HostConfig"] {
+            started[section]["Annotations"] = json!({
+                "io.container.manager":"libpod",
+                "org.opencontainers.image.stopSignal":"15",
+                "org.systemd.property.KillSignal":"15",
+                "org.systemd.property.TimeoutStopUSec":"uint64 15000000"
+            });
+        }
+        let expected = fingerprint("container", &created).unwrap();
+        assert_eq!(expected, fingerprint("container", &started).unwrap());
+        for section in ["Config", "HostConfig"] {
+            for (name, changed) in [
+                ("org.systemd.property.KillSignal", "9"),
+                ("org.systemd.property.TimeoutStopUSec", "uint64 30000000"),
+                ("Other", "unexpected"),
+            ] {
+                let mut altered = started.clone();
+                altered[section]["Annotations"][name] = json!(changed);
+                assert_ne!(expected, fingerprint("container", &altered).unwrap());
+            }
+        }
+        let mut altered = started.clone();
+        altered["HostConfig"]["StopTimeout"] = json!(30);
+        assert_ne!(expected, fingerprint("container", &altered).unwrap());
+        altered = started;
+        altered["Mounts"][0]["RW"] = json!(true);
+        assert_ne!(expected, fingerprint("container", &altered).unwrap());
     }
 }

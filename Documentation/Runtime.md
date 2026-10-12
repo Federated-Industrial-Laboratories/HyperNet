@@ -1,183 +1,243 @@
-# Native runtime management
+# Installed authority runtime
 
-The installed `Bin/HyperNet runtime` command prepares and supervises a dedicated
-rootless Linux deployment. Core operates independently of HyperNetSuite. Setup
-generates private configuration, identities and transport certificates through
-the maintained OpenSSL executable. It starts no container or network listener.
+`HyperNet runtime` manages one already appointed authority voter per deployment.
+Four deployments use the same accepted bootstrap and distinct appointed voter
+keys. Their Basic HotStuff committee requires three replicas for authority
+results. The runtime does not create membership, appoint voters, issue transport
+certificates or expose a reader endpoint.
 
-The available serving profile uses three trusted etcd voters, one authority
-broker, one consenting nonvoting Pages host and its fixed-destination gate. This
-is crash-fault infrastructure. It does not provide Byzantine authority, private
-reader relays, sealed Pages or the replacement authority protocol. A prepared
-offline 0.8.0 client trust profile does not authenticate this serving profile.
+The supported installed profile is Linux, rootless Podman, delegated cgroup v2,
+Landlock ABI6 or later and seccomp. It uses explicit IPv4 addresses and one owned
+NAT bridge per deployment. IPv6 installation and SELinux-enabled operation require
+platform qualification. Mandatory confinement failures stop activation.
 
-## Prepare and inspect
+## Inputs and setup
 
-Install and verify the signed package as described in [Packages](Packages.md).
-Use a private parent directory and independently verified etcd and etcdctl
-executables. The manager pins their complete file digests. Group-writable
-executables are refused. Current dependencies are `/usr/bin/podman`,
-`/usr/bin/openssl`, delegated cgroup v2, subordinate UID/GID mappings, seccomp,
-Landlock ABI 6 or later and the native Linux ABI recorded in the package.
+Obtain the fully accepted bootstrap and authenticate its complete SHA256 digest
+independently. A draft bootstrap cannot initialise a voter. Supply the existing
+appointed voter identity, four-peer configuration, matching TLS credentials and
+a signed clock witness from a separately pinned monitor. The monitor export
+must occupy its own public directory, containing observations only. The runtime
+mounts that directory read-only so atomic witness replacements remain visible.
+Keep the monitor signing key in its separate private directory.
 
-Choose the authority's explicit IPv4 ingress address and port. The example uses
-a loopback test address; remote access requires its intended address and
-firewall. This generator colocates all three voters; it does not configure
-independent physical failure domains. The three voter management
-ports always bind loopback. Two adjacent private /24 container networks must be
-free. All workload resources carry a random deployment identity.
+The imported configuration uses the strict schema in
+[AuthorityReplica.md](AuthorityReplica.md). Its peer origins contain literal
+IPv4 addresses and exact certificate pins. Input TLS paths name local files.
+The signed clock path names the host export. Setup rewrites only local workload
+paths and the listening address to the fixed container layout; the preview shows
+the exact resulting configuration. Peers retain their configured addresses,
+ports, identities and certificate pins. NAT or firewall forwarding must make the
+advertised peer origins reach the corresponding published port.
 
-```sh
-Bin/HyperNet runtime setup --directory /Private/Network \
-  --image sha256:VerifiedImageDigest \
-  --etcd /Private/Dependencies/etcd \
-  --etcdctl /Private/Dependencies/etcdctl \
-  --bind 127.0.0.1 --port 32543 --voter-port-base 32551 \
-  --subnet 10.89.132.0 --lifetime-seconds 3600 --session-policy Session
-Bin/HyperNet runtime preview --directory /Private/Network
-```
-
-The runtime path must be absolute, privately owned, short enough for its Unix
-socket and free of symbolic components and control characters. Setup refuses an
-existing destination. Its output supplies the profile digest and local generation.
-Preview reports roles, endpoints, resource deltas, expiry, backend guarantees and
-unmet prerequisites. No inherited proxy configuration or arbitrary command is
-accepted. An initialisation failure leaves a non-serving directory for inspection;
-it does not overwrite an existing deployment.
-
-The authority, host and operator use separate signing identities. CA and root
-administration keys remain outside every workload mount. Workload configuration
-and persistent state use dedicated subordinate identities. The native manager
-never receives a mailbox or confidential-page decryption key. Setup records
-whether the kernel has SELinux enabled. Activation requires the same kernel and
-Podman mode; private relabelling is requested only in that mode. Mount paths,
-permissions, options and confinement labels remain part of exact inspection.
-
-## Consent and activate a session
-
-Each mutation requires a fresh 16-byte hexadecimal operation ID, the expected
-local generation and the exact previewed profile digest. The ID is not a secret.
-Use the generation returned by the previous successful operation or Status.
-Repeat exactly the same request to resolve an uncertain result; changing a
-recorded ID's input is refused. Accepted IDs and request digests are persisted
-before effects. A crash leaves an explicit `InterruptedOperation` receipt;
-retrying it returns that failure and does not repeat the uncertain action. Stop
-can reconcile its owned resources before a fresh operation ID is used.
-Each profile admits at most 120 ordinary mutation
-receipts, then reserves one final Stop and one terminal Withdraw receipt. Fresh
-Stop requests for an already stopped deployment and fresh Withdraw requests for
-an already withdrawn profile are refused without another state write. Exact
-recorded retries remain available; receipts are never evicted to reuse IDs.
-
-Withdrawal is a restrictive local veto on this immutable profile. It accepts an
-earlier positive generation for the same exact profile, so queued withdrawal
-still stops a concurrently completed activation. Future generations and changed
-profiles are refused. Other mutations require the exact current generation.
+Use a private existing parent directory. Choose distinct non-overlapping private
+subnets for deployments on the same host. Replace the example addresses and
+paths with the intended deployment inputs:
 
 ```sh
-Bin/HyperNet runtime consent --directory /Private/Network \
-  --operation-id 00000000000000000000000000000001 \
-  --expected-generation 1 --profile-digest ProfileDigest
-Bin/HyperNet runtime serve --directory /Private/Network
+HyperNet runtime setup --directory /Private/AuthorityOne \
+  --image sha256:<verified-image-digest> \
+  --bootstrap /Private/Bootstrap.cbor \
+  --bootstrap-digest <independently-authenticated-sha256> \
+  --voter-key /Private/VoterOne.json \
+  --replica-config /Private/ReplicaOne.json \
+  --peer-certificate /Private/PeerOne.pem /Private/PeerTwo.pem \
+    /Private/PeerThree.pem /Private/PeerFour.pem \
+  --bind 192.0.2.10 --port 24443 --subnet 10.89.132.0 \
+  --memory-bytes 536870912 --pids 64 --cpu-quota 100000 \
+  --state-bytes 1073741824 --lifetime-seconds 3600
+HyperNet runtime preview --directory /Private/AuthorityOne
 ```
 
-`serve` stays in the foreground. Leave it attached to the selected terminal
-session. From another terminal, start the exact consented deployment:
+Setup reads and validates inputs, copies them into a new private directory and
+creates the local operator identity. It starts no processes or network listeners.
+It imports no administrator or recovery private keys. It does not invoke a
+certificate authority or change the accepted authority appointment.
+
+Supply exactly four leaf PEM certificates matching the runtime peer pins. Each
+Ed25519 transport key must match its voter mapping in the authenticated bootstrap.
+The separately signed clock monitor must also be reserved by that bootstrap.
+The operator cannot reuse a service, voter, monitor or transport key. Setup
+stores the canonical CBOR manifest in `Authorization/Manifest.cbor`; JSON remains
+a local input and display representation. The exact signed consent binds the
+canonical manifest, fixed workload handles and separately ordered peer list.
+
+The default resource allocation is512MiB RAM,64PIDs and one CPU period of100000
+microseconds with a matching quota. CPU quota is configurable. These are workload
+allocations, separate from authority policy limits. Size production resources for
+the expected traffic and measured durable-storage latency. Four colocated voters
+share storage and scheduling risks; four processes do not establish operational
+independence.
+
+`stateBytes` is an available-space admission requirement, not a filesystem quota.
+Its default1GiB leaves headroom above the engine's bounded object, result,
+maintenance, metadata and archive profile; the minimum is1GiB. This includes
+225MiB journal allocation and an atomic replacement,256MiB pending objects,
+128MiB maintenance and metadata/archive headroom. The engine
+continues to enforce its individual storage limits. A deployment requires the
+configured available capacity at each start. Ordinary filesystems may have other
+consumers and filesystem overhead. The runtime does not claim total disk-quota
+isolation.
+
+## Consent and activation
+
+Preview returns `generation` and `profileDigest`. Review the complete resource
+manifest, peer exposure, role and expiry. Each mutation requires a new128-bit
+operation ID, the observed lifecycle generation and exact profile digest:
 
 ```sh
-Bin/HyperNet runtime start --directory /Private/Network \
-  --operation-id 00000000000000000000000000000002 \
-  --expected-generation 2 --profile-digest ProfileDigest
-Bin/HyperNet runtime status --directory /Private/Network
+HyperNet runtime consent --directory /Private/AuthorityOne \
+  --operation-id <32-hex-digits> --expected-generation <generation> \
+  --profile-digest <profile-digest>
+HyperNet runtime serve --directory /Private/AuthorityOne
 ```
 
-Start requires the running local supervisor. Its socket is owner-only and checks
-the kernel-reported peer UID. The manager has a finite typed API; requests cannot
-select executable commands, filesystem destinations or arbitrary network URLs.
-The socket uses a four-byte big-endian length followed by a bounded JSON request.
-Request fields are `operation`, `operationId`, `expectedGeneration` and
-`profileDigest`. Read-only requests use null mutation fields. Responses contain
-`ok` and either `result` or `error`. Unknown fields and operations are refused.
-
-The canonical HostConsent signature binds the exact DesiredProfile digest.
-The local endpoint identifier commits the complete generated configuration,
-including registered paths, executable hashes and resource settings. The runtime
-journal is a separate private transactional representation; it is not a certified
-authority LifecycleState or a Byzantine evidence object.
-
-Workload preparation publishes its configuration tree only after every file and
-ownership change is durable. Interrupted preparation resumes without deleting
-retained voter data. Container inspection checks the exact registered network
-identities, attachments and addresses. An added or changed route prevents
-readiness and automatic lifecycle changes to that container. Restore its
-consented topology before normal Stop reconciliation can proceed.
-
-Bootstrap records bounded stages and reconciles the exact intended etcd users,
-roles and permissions after interruption. Once authentication is enabled, missing
-or changed rights cause refusal; the runtime does not restore revoked grants.
-A committed initial authority namespace can resume only when its exact initial
-bytes, revision history and retained cluster floor match. A retained invitation
-secret makes initial host enrolment repeatable, while changed membership or
-withdrawn consent causes refusal. These recovery checks preserve voter data.
-
-Start persists its intended generation before creating resources. It checks
-consent, generated-file integrity, software digests, rootless isolation and
-fresh authority/host observations. Status distinguishes readiness from process
-existence and reports the trusted backend explicitly. It checks local clock
-rollback; distributed clock-uncertainty qualification is unavailable.
-
-Every container has a consent-bounded Podman timeout. Authority and voter
-processes also run behind a native deadline guard which checks absolute time,
-clock rollback and the suspend-aware boot clock every 100 ms. Host and gate
-processes enforce their signed consent deadline. These checks remain active
-after the manager dies. Graceful SIGHUP, SIGINT or SIGTERM to the foreground
-supervisor stops its owned workloads. Abrupt supervisor loss can leave workloads
-active until their consent deadline; another local command can inspect and stop
-them. There is no implicit boot enablement,
-lingering session, automatic renewal or unattended service promise. A replacement
-supervisor does not automatically reactivate retained state.
-
-## Stop, withdraw and diagnose
-
-Use the same mutation arguments with `stop` to preserve consent and durable
-state. Start can reactivate this exact profile before expiry. Use `withdraw` to
-persist a withdrawal counter before stopping work. Withdrawal does not depend on
-network quorum. This profile cannot be reactivated; create a fresh profile and
-give fresh consent. Old consent never clears its tombstone.
-
-Separate generation and withdrawal floors detect replacement of the lifecycle
-journal with an older copy. Restoring every local file, including the floors, cannot be detected
-without an independently retained anchor. Copying runtime directories is not a
-supported restoration procedure. A failed or interrupted activation remains
-non-serving until exact resource reconciliation succeeds. Container names or
-labels alone do not authorise taking over or deleting an unrelated resource.
-A private immutable container-ID receipt can reconcile interrupted creation for
-cleanup only. Start never starts that recovered resource: it requires successful
-cleanup and creates new containers from the exact consented arguments.
+Keep `serve` in a foreground session. Its private `Management.sock` accepts only
+the same local UID. In another terminal, inspect the new generation and activate:
 
 ```sh
-Bin/HyperNet runtime diagnose --directory /Private/Network
+HyperNet runtime status --directory /Private/AuthorityOne
+HyperNet runtime start --directory /Private/AuthorityOne \
+  --operation-id <new-32-hex-digits> --expected-generation <generation> \
+  --profile-digest <profile-digest> --minimum-signer-generation 1
 ```
 
-Diagnose reports bounded local state and finite failure codes. It makes no
-network probe and does not include private keys, bodies, invitation material or
-raw logs. Redirecting this output is an explicit local export. Status can make
-an authenticated authority health request; Diagnose remains local.
+Consent is a signed105 record bound to the exact desired117 profile, appointment,
+transport configuration, signed clock, lifetime and resource manifest. The
+operator key never enters the workload. Before mounting credentials, activation creates a stopped, network-free image
+inspection container. It checks the single `/HyperNet` payload against the
+installed executable through bounded archive output; it never executes that
+container or extracts archive paths. Every workload uses the fixed `/HyperNet`
+entrypoint. Activation then uses a bounded, network-free container to initialise
+the signer, followed by the fixed confined replica entrypoint.
+A completed exact initialisation resumes without recreating state. An incomplete
+or changed signer deployment refuses activation and retains its data.
 
-Voter databases have a 64 MiB backend quota each, bounded retained WAL/snapshot
-counts and dedicated directories. This is not a filesystem project quota or a
-complete disk-exhaustion guarantee. Activation checks at least 512 MiB of available space and setup reserves 1 MiB
-for failure reporting. Reserve additional space for WALs, snapshots, logs and
-recovery before activation. Pages on the current nonvoting host remain
-a volatile bounded cache. Durable publication placement requires a different
-storage contract. Mail, media, transfer, relay, bridge and SSH role setup,
-renewal, software replacement and restoration are explicitly unavailable through
-this management interface.
+The first voter starts without requiring an existing quorum. A live status reply
+reports signer generation, view, committed/applied heights and clock readiness.
+`quorum: NotProbed` and `ready: false` mean the runtime has made no fresh authority
+query. They do not assert quorum failure. `Running` or process presence alone
+is not authority readiness. Use an independently validating Suite authority
+operation to establish that a current quorum can answer that operation.
 
-The maintained installed test driver is `Tests/RuntimeWorkflow.py`. Its
-`--selection Lifecycle` checks the session, consent, withdrawal and expiry
-workflow. `--selection Recovery` checks interrupted preparation, authentication,
-initial authority creation and enrolment, plus changed network attachments.
-`--selection All` runs both. Recovery uses only native setup for identities and
-configuration; its explicit local journal fault injections model lost completion
-writes without changing authority data or grants.
+This profile runs the `Authority` role. The separate `runtime services` commands
+manage explicitly admitted Page, Media, Mail, Transfer and SSH services. See
+[ServiceRuntime](ServiceRuntime.md) for their exact consent and activation workflow.
+Reader join, mail and Pages are unavailable through the authority runtime profile.
+
+## Stop, restart and withdrawal
+
+```sh
+HyperNet runtime stop --directory /Private/AuthorityOne \
+  --operation-id <new-32-hex-digits> --expected-generation <generation> \
+  --profile-digest <profile-digest>
+HyperNet runtime status --directory /Private/AuthorityOne
+```
+
+Stop retains the signer journal and consent. It inspects the stopped signer
+exclusively and records its latest generation outside the workload. Retain that
+generation independently, together with the bootstrap and profile pins. A later
+start requires `--minimum-signer-generation` at least as high as the retained
+floor. A stale signer journal cannot satisfy a newer floor. Files colocated on
+one disk cannot prove that the entire disk was not rolled back; an independently
+retained floor is still required.
+
+Graceful supervisor exit stops its owned containers. Abrupt supervisor loss does
+not renew consent. The confined replica and its guard enforce expiry and observe
+the local withdrawal tombstone independently. The guard checks wall-clock
+rollback and a suspend-aware boot-clock deadline. A new supervisor reconciles the
+recorded resource identities; it does not automatically restart the voter.
+
+```sh
+HyperNet runtime withdraw --directory /Private/AuthorityOne \
+  --operation-id <new-32-hex-digits> --expected-generation <observed-generation> \
+  --profile-digest <profile-digest>
+```
+
+Withdrawal needs no quorum or active supervisor. It durably increases the
+independent tombstone before attempting stop. It can use an older observed
+lifecycle generation for the exact immutable profile, so a concurrent activation
+cannot defeat a restrictive veto. Ordinary mutations require an exact generation.
+Withdrawal is terminal for this profile and cannot be undone by restoring only
+`State.json`. Signer data is preserved. After stopped-state inspection, withdrawal also removes the exact owned bridge.
+Changed or unresolved resource identities remain recorded for explicit recovery.
+No unrelated resource is removed.
+
+A new operation cannot reuse an ID with changed input. Repeat the exact original
+withdrawal command after interrupted or failed cleanup. It resumes exact resource
+cleanup using the same receipt and permanent tombstone, even when receipt capacity
+is exhausted. A completed withdrawal returns its retained success. Other failed
+or interrupted operations preserve their failure disposition. There are120 ordinary mutation
+receipts and two reserved terminal stop/withdraw slots. They fit the bounded
+local journal without discarding operation-ID bindings. An already stopped or
+withdrawn deployment cannot consume fresh emergency receipts indefinitely.
+
+The lifetime is finite. Consent renewal, live update, unattended boot and
+installed host-reboot reconsent are not supported. A changed signed-clock boot
+binding therefore requires explicit operator recovery; it never causes the
+runtime to recreate the signer. Preserve the existing journal and its independent
+floor when arranging new consent. Do not initialise the same voter key into a
+fresh journal to bypass expiry or a restart refusal.
+
+## Recovery and diagnostics
+
+`diagnose` reports only local lifecycle state and fixed failure categories. It
+opens no network connection. `status` checks exact owned resource identities and
+uses the private control socket of the recorded replica; it is not a reader API.
+Neither command exports keys or protected authority records. Failed inert
+initialisation or stopped-state inspection records bounded private logs under
+`Diagnostics/` before its exact temporary container is removed.
+Failed authority startup retains `Diagnostics/AuthorityFailure.json` before
+cleanup, when the recorded container identity and configuration still verify.
+The private record contains running, exit, OOM and PID observations plus up to
+32 KiB each of standard output and standard error from the last 64 log lines.
+Diagnostic capture failure does not prevent stopping the owned workload.
+
+The runtime publishes a completed configuration tree atomically. Pending
+preparation can resume, but published state is never deleted or replaced. Every
+container action uses its immutable Podman ID and inspected configuration.
+Unrelated name collisions, changed mounts, extra network attachments and changed
+security settings refuse action. Recovery from a create/record interruption uses
+the private exact CID receipt only for conservative cleanup, never adoption or
+restart of an altered container.
+
+The maintained installed workflow driver is `Tests/RuntimeWorkflow.py`. Supply
+an isolated accepted bootstrap, appointed key, normal configuration and signed
+clock; the driver does not fabricate PKI, grants or authority state. Its local
+lifecycle results do not replace four-deployment quorum and Internet-path
+qualification.
+
+## Publish a local withdrawal
+
+After `runtime withdraw` durably records the local veto, export its operator assertion:
+
+```sh
+HyperNet runtime withdrawal-receipt --directory /Private/AuthorityOne
+```
+
+The result names `Authorization/WithdrawalReceipt.cbor`. Its exact signature binds
+network, incarnation, deployment, operator,117profile digest and withdrawal counter.
+Supply it to the Suite's deployment withdrawal command. This local command does
+not contact authority or clear the veto. `cleanupComplete: false` reports remaining
+owned resources; retry the original Withdraw operation for cleanup. Publish the
+restrictive network withdrawal even when cleanup remains incomplete. The assertion
+is signed operator evidence, not independent proof of physical host shutdown.
+
+
+## Replace an authority committee
+
+`runtime setup --future-epoch N` creates an explicitly non-serving future
+installation. It requires four fresh voter and transport identities and an
+independently authenticated signed clock. Committed nominations, complete state
+installation and both old and new quorums are required before it can start.
+Use `runtime epoch terminal`, `handoff`, `prepare` and `activate` as described in
+[Authority committee replacement](AuthorityEpochs.md). Every offline operation
+requires stopped workloads and preserves the independent signer-generation floor.
+Epoch-appointed consent is immutable; clock-boot changes require a fresh committed
+replacement rather than rewriting117/129 or bypassing the local approval.
+
+The authority's private signer source is `Launch/State/Authority`, mounted at
+`/State`; its isolated sibling `Launch/State/Control` is mounted at
+`/State/Control`. SELinux keeps signer state private and labels only the control
+directory for sharing with approved local services. Older prepared layouts refuse
+startup and require an explicit offline migration; live state is not moved.

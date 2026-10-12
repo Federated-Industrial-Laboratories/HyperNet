@@ -43,6 +43,7 @@ struct PortRule {
 
 const READ_FILE: u64 = 1 << 2;
 const READ_DIR: u64 = 1 << 3;
+const MAKE_SOCK: u64 = 1 << 9;
 const ALL_FILESYSTEM: u64 = (1 << 16) - 1;
 const STATE_ACCESS: u64 = READ_FILE
     | READ_DIR
@@ -245,6 +246,33 @@ fn confined_path(path: &Path, root: &Path) -> Result<PathBuf> {
     Ok(canonical)
 }
 
+fn read_root(path: &Path, authority: bool, bridge: bool) -> Result<&Path> {
+    if authority {
+        for root in ["/Clock", "/Authorization", "/Authority"] {
+            if path == Path::new(root) {
+                return Ok(Path::new(root));
+            }
+        }
+        if bridge
+            && let Some(host) = path
+                .to_str()
+                .and_then(|s| s.strip_prefix("/Media/"))
+                .and_then(|s| s.strip_suffix("/Control"))
+            && host.len() == 64
+            && host
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Ok(path);
+        }
+    }
+    ensure!(
+        path.starts_with("/Config"),
+        "read grant is outside the role's fixed input roots"
+    );
+    Ok(Path::new("/Config"))
+}
+
 fn port_rule(ruleset: &OwnedFd, port: u16, access: u64) -> Result<()> {
     ensure!(
         port > 0,
@@ -272,7 +300,53 @@ pub fn enter(
     bind_ports: &[u16],
     connect_ports: &[u16],
 ) -> Result<Profile> {
-    enter_state(state, read_paths, bind_ports, connect_ports, false)
+    enter_state(
+        state,
+        read_paths,
+        bind_ports,
+        connect_ports,
+        false,
+        false,
+        false,
+    )
+}
+
+/// Authority also reads its fixed clock and consent mounts, never general proc access.
+#[allow(dead_code)] // The confined TCP relay shares this module without authority mounts.
+pub fn enter_authority(
+    state: &Path,
+    read_paths: &[PathBuf],
+    bind_ports: &[u16],
+    connect_ports: &[u16],
+) -> Result<Profile> {
+    enter_state(
+        state,
+        read_paths,
+        bind_ports,
+        connect_ports,
+        false,
+        true,
+        false,
+    )
+}
+
+/// Bridges add only the exact consented local media control directories.
+#[allow(dead_code)] // The confined TCP relay shares this module without bridge mounts.
+pub fn enter_bridge(
+    state: &Path,
+    read_paths: &[PathBuf],
+    bind_ports: &[u16],
+    connect_ports: &[u16],
+) -> Result<Profile> {
+    enter_state(
+        state,
+        read_paths,
+        bind_ports,
+        connect_ports,
+        false,
+        true,
+        true,
+    )
 }
 
 #[allow(dead_code)]
@@ -290,7 +364,7 @@ pub fn enter_mail(
         unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &limit) } == 0,
         "mail file size limit could not be enforced"
     );
-    enter_state(state, &[], bind_ports, connect_ports, true)
+    enter_state(state, &[], bind_ports, connect_ports, true, false, false)
 }
 
 fn enter_state(
@@ -299,6 +373,8 @@ fn enter_state(
     bind_ports: &[u16],
     connect_ports: &[u16],
     single_file: bool,
+    authority_clock: bool,
+    bridge: bool,
 ) -> Result<Profile> {
     let mut profile = preflight()?;
     let state = confined_path(state, Path::new("/State"))?;
@@ -329,18 +405,43 @@ fn enter_state(
         &state,
         if single_file {
             READ_FILE | (1 << 1)
+        } else if authority_clock {
+            STATE_ACCESS | MAKE_SOCK
         } else {
             STATE_ACCESS
         },
     )?;
+    if authority_clock && state == Path::new("/State/Replica") {
+        let control = confined_path(Path::new("/State/Control"), Path::new("/State"))?;
+        ensure!(
+            control.is_dir(),
+            "installed authority control directory is absent"
+        );
+        path_rule(&ruleset, &control, STATE_ACCESS | MAKE_SOCK)?;
+    }
     for path in read_paths {
-        let path = confined_path(path, Path::new("/Config"))?;
+        let root = read_root(path, authority_clock, bridge)?;
+        let path = confined_path(path, root)?;
+        if root != Path::new("/Config") {
+            ensure!(
+                path == root && path.is_dir(),
+                "authority input must be its fixed mount directory without redirection"
+            );
+        }
         let access = if path.is_dir() {
             READ_FILE | READ_DIR
         } else {
             READ_FILE
         };
         path_rule(&ruleset, &path, access)?;
+    }
+    if authority_clock {
+        for path in [
+            "/proc/self/timens_offsets",
+            "/proc/sys/kernel/random/boot_id",
+        ] {
+            path_rule(&ruleset, Path::new(path), READ_FILE)?;
+        }
     }
     for port in bind_ports {
         port_rule(&ruleset, *port, 1)?;
@@ -447,10 +548,19 @@ fn ssh_rules(
     let execute = 1;
     if let Some(state) = state {
         let state = confined_path(state, Path::new("/State"))?;
-        ensure!(state.is_dir(), "SSH state must be a directory");
-        let fixed = confined_path(&state.join("SshState.bin"), Path::new("/State"))?;
-        ensure!(fixed.is_file(), "SSH floor must be a fixed file");
-        path_rule(&ruleset, &fixed, READ_FILE | (1 << 1))?;
+        ensure!(
+            stage == 0 && state == Path::new("/State") && state.is_dir(),
+            "SSH authority stores require the dedicated fixed state mount"
+        );
+        path_rule(&ruleset, &state, STATE_ACCESS)?;
+        for root in ["/Clock", "/Authorization", "/Authority", "/Config"] {
+            let path = confined_path(Path::new(root), Path::new(root))?;
+            ensure!(
+                path == Path::new(root) && path.is_dir(),
+                "SSH authority input must be a fixed mount without redirection"
+            );
+            path_rule(&ruleset, &path, READ_FILE | READ_DIR)?;
+        }
     }
     for directory in ["/lib", "/lib64", "/usr/lib"] {
         let path = Path::new(directory);
@@ -520,6 +630,61 @@ pub fn enter_ssh_command() -> Result<Profile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn authority_read_roots_do_not_expand_other_roles_or_arbitrary_paths() {
+        for root in ["/Clock", "/Authorization", "/Authority"] {
+            assert_eq!(
+                read_root(Path::new(root), true, false).unwrap(),
+                Path::new(root)
+            );
+            assert!(read_root(Path::new(root), false, false).is_err());
+        }
+        for authority in [false, true] {
+            assert_eq!(
+                read_root(Path::new("/Config/Tls/Certificate.pem"), authority, false).unwrap(),
+                Path::new("/Config")
+            );
+            for rejected in [
+                "/",
+                "/etc",
+                "/State",
+                "/proc",
+                "/Clock/Observation.json",
+                "/Authorization/Consent.cbor",
+                "/Clock/../etc",
+                "/ConfigOther",
+                "Config/Tls",
+            ] {
+                assert!(
+                    read_root(Path::new(rejected), authority, false).is_err(),
+                    "{rejected}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn bridge_media_access_requires_an_exact_control_directory_and_role() {
+        let host = "ab".repeat(32);
+        let selected = PathBuf::from(format!("/Media/{host}/Control"));
+        assert_eq!(read_root(&selected, true, true).unwrap(), selected);
+        assert!(read_root(&selected, true, false).is_err());
+        assert!(read_root(&selected, false, false).is_err());
+        assert!(read_root(&selected, false, true).is_err());
+        for path in [
+            "/Media".into(),
+            format!("/Media/{host}"),
+            format!("/Media/{host}/State"),
+            format!("/Media/{host}/Control/Control.sock"),
+            format!("/Media/{host}/Control/../Control"),
+            format!("/Media/{host}/../Control"),
+            format!("/Media//{host}/Control"),
+            format!("/Media/{}/Control", host.to_uppercase()),
+            "/Media/ab/Control".into(),
+            format!("Media/{host}/Control"),
+        ] {
+            assert!(read_root(Path::new(&path), true, true).is_err(), "{path}");
+        }
+    }
     #[test]
     fn nomap_excludes_the_login_identity_in_the_parent_namespace() {
         assert!(require_subordinate_mapping("0 1 65536\n").is_ok());

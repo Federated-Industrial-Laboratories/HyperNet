@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT
 // SSHSIG proves possession without importing native SSH private keys.
-use crate::{protocol, ssh_authority};
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use crate::protocol;
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use ed25519_dalek::{Signature, VerifyingKey};
 use sha2::{Digest, Sha512};
 
@@ -9,6 +12,24 @@ const NAMESPACE: &[u8] = b"HyperNetSshKey1";
 const HASH: &[u8] = b"sha512";
 const DOMAIN: &[u8] = b"HyperNet/SshKeyProof/1\0";
 type Failure = &'static str;
+
+pub fn public_key(value: &str) -> Result<String, Failure> {
+    let encoded = value.strip_prefix("ssh-ed25519 ").ok_or("SshInvalidKey")?;
+    let bytes = STANDARD.decode(encoded).map_err(|_| "SshInvalidKey")?;
+    if STANDARD.encode(&bytes) != encoded
+        || bytes.len() != 51
+        || bytes[..19]
+            != [
+                0, 0, 0, 11, b's', b's', b'h', b'-', b'e', b'd', b'2', b'5', b'5', b'1', b'9', 0,
+                0, 0, 32,
+            ]
+    {
+        return Err("SshInvalidKey");
+    }
+    ed25519_dalek::VerifyingKey::from_bytes(bytes[19..].try_into().unwrap())
+        .map_err(|_| "SshInvalidKey")?;
+    Ok(hex::encode(&bytes[19..]))
+}
 
 struct Reader<'a>(&'a [u8]);
 impl<'a> Reader<'a> {
@@ -56,7 +77,7 @@ pub fn verify(proof: &str, network: &str, member: &str, native: &str) -> Result<
     if URL_SAFE_NO_PAD.encode(&raw) != proof {
         return Err("SshInvalidKeyProof");
     }
-    let native = protocol::fixed_hex::<32>(&ssh_authority::public_key(native)?)?;
+    let native = protocol::fixed_hex::<32>(&public_key(native)?)?;
     let network = protocol::fixed_hex::<32>(network)?;
     let member = protocol::fixed_hex::<32>(member)?;
     let mut blob = Reader(&raw);

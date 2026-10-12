@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -18,7 +19,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--image', required=True, help='Verified immutable local OCI image ID')
     parser.add_argument('--output', required=True, help='New private JSON report')
+    parser.add_argument('--work-directory', required=True, help='Existing private persistent directory for qualification state')
     args = parser.parse_args()
+    work = Path(args.work_directory).resolve(strict=True)
+    info = work.stat()
+    if not info.st_uid == os.geteuid() or not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
+        parser.error('Select an existing private persistent work directory owned by this user')
     if not re.fullmatch(r'sha256:[a-f0-9]{64}', args.image) or os.geteuid() == 0:
         parser.error('Use an immutable local image and a non-root operator')
     report = {'product': 'HyperNet', 'version': '0.7.5', 'imageId': args.image,
@@ -26,7 +32,7 @@ def main():
               'kernel': platform.release(), 'passed': False, 'profile': None, 'error': None}
     container = None
     try:
-        with tempfile.TemporaryDirectory(prefix='HyperNetQualification') as name:
+        with tempfile.TemporaryDirectory(prefix='HyperNetQualification', dir=work) as name:
             temporary = Path(name)
             info = subprocess.run(['podman', 'info', '--format', 'json'], capture_output=True, timeout=30, check=True)
             if len(info.stdout) > 256 * 1024:

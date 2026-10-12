@@ -5,10 +5,14 @@ mod bootstrap;
 mod containers;
 #[path = "RuntimeControl.rs"]
 mod control;
+#[path = "RuntimeEpoch.rs"]
+mod epoch;
 #[path = "RuntimeFiles.rs"]
-mod files;
+pub(crate) mod files;
 #[path = "RuntimeModel.rs"]
 mod model;
+#[path = "RuntimeServices.rs"]
+mod services;
 #[path = "RuntimeSetup.rs"]
 mod setup;
 
@@ -44,9 +48,20 @@ pub struct Mutation {
     expected_generation: u64,
     #[arg(long)]
     profile_digest: String,
+    /// Last signer generation retained independently; required only for Start.
+    #[arg(long)]
+    minimum_signer_generation: Option<u64>,
 }
 #[derive(Subcommand)]
 pub enum Command {
+    Services {
+        #[command(subcommand)]
+        command: services::Command,
+    },
+    Epoch {
+        #[command(subcommand)]
+        command: epoch::Command,
+    },
     Setup(setup::Setup),
     Preview(Location),
     Status(Location),
@@ -55,6 +70,8 @@ pub enum Command {
     Start(Mutation),
     Stop(Mutation),
     Withdraw(Mutation),
+    /// Export an operator assertion after the permanent local withdrawal is durable.
+    WithdrawalReceipt(Location),
     Serve(Location),
 }
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -204,6 +221,7 @@ fn operate(
             operation_id: Some(m.operation_id),
             expected_generation: Some(m.expected_generation),
             profile_digest: Some(m.profile_digest),
+            minimum_signer_generation: m.minimum_signer_generation,
         }
     } else {
         Request {
@@ -211,6 +229,7 @@ fn operate(
             operation_id: None,
             expected_generation: None,
             profile_digest: None,
+            minimum_signer_generation: None,
         }
     };
     let root = files::root(&directory)?;
@@ -222,6 +241,8 @@ fn operate(
 }
 pub fn run(command: Command) -> Result<()> {
     let result = match command {
+        Command::Services { command } => services::run(command)?,
+        Command::Epoch { command } => epoch::run(command)?,
         Command::Setup(args) => setup::setup(args)?,
         Command::Serve(args) => return serve(&args.directory),
         Command::Preview(args) => operate(args.directory, Operation::Preview, None)?,
@@ -230,6 +251,7 @@ pub fn run(command: Command) -> Result<()> {
         Command::Consent(args) => operate(args.directory.clone(), Operation::Consent, Some(args))?,
         Command::Start(args) => operate(args.directory.clone(), Operation::Start, Some(args))?,
         Command::Stop(args) => operate(args.directory.clone(), Operation::Stop, Some(args))?,
+        Command::WithdrawalReceipt(args) => control::withdrawal_receipt(&args.directory)?,
         Command::Withdraw(args) => {
             operate(args.directory.clone(), Operation::Withdraw, Some(args))?
         }
@@ -258,3 +280,7 @@ mod tests {
         peer(&a).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "RuntimeTests.rs"]
+mod lifecycle_tests;

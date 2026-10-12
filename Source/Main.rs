@@ -1,81 +1,115 @@
 // SPDX-License-Identifier: MIT
-#[path = "ApplicationAuthority.rs"]
-mod application_authority;
-#[path = "Authority.rs"]
-mod authority;
-#[path = "Bridge.rs"]
-mod bridge;
+#[path = "AuthorityApplication.rs"]
+mod authority_application;
+#[path = "AuthorityApplications.rs"]
+mod authority_applications;
+#[path = "AuthorityBridgeService.rs"]
+mod authority_bridge_service;
+#[path = "AuthorityCapacity.rs"]
+mod authority_capacity;
+#[path = "AuthorityChallenge.rs"]
+mod authority_challenge;
+#[path = "AuthorityClockHandoff.rs"]
+mod authority_clock_handoff;
+#[path = "AuthorityClockMonitor.rs"]
+mod authority_clock_monitor;
+#[path = "AuthorityDeploymentRecords.rs"]
+mod authority_deployment_records;
+#[path = "AuthorityDeployments.rs"]
+mod authority_deployments;
+#[path = "AuthorityDomains.rs"]
+mod authority_domains;
+#[path = "AuthorityEpoch.rs"]
+mod authority_epoch;
+#[path = "AuthorityFiles.rs"]
+mod authority_files;
+#[path = "AuthorityFloor.rs"]
+mod authority_floor;
+#[path = "AuthorityGovernance.rs"]
+mod authority_governance;
+#[path = "AuthorityHistory.rs"]
+mod authority_history;
+#[path = "AuthorityLocalTransport.rs"]
+mod authority_local_transport;
+#[path = "AuthorityMailService.rs"]
+mod authority_mail_service;
+#[path = "AuthorityMediaService.rs"]
+mod authority_media_service;
+#[path = "AuthorityMembership.rs"]
+mod authority_membership;
+#[path = "AuthorityObjectFiles.rs"]
+mod authority_object_files;
+#[path = "AuthorityObjects.rs"]
+mod authority_objects;
+#[path = "AuthorityPageService.rs"]
+mod authority_page_service;
+#[path = "AuthorityProof.rs"]
+mod authority_proof;
+#[path = "AuthorityRecipient.rs"]
+mod authority_recipient;
+#[cfg(test)]
+#[path = "AuthorityRecovery.rs"]
+mod authority_recovery;
+#[path = "AuthorityReplica.rs"]
+mod authority_replica;
+#[path = "AuthorityRuntimeActivation.rs"]
+mod authority_runtime_activation;
+#[path = "AuthorityTransferService.rs"]
+mod authority_transfer_service;
 #[path = "Confinement.rs"]
 mod confinement;
-#[path = "FederationAuthority.rs"]
-mod federation_authority;
-#[path = "Host.rs"]
-mod host;
-#[path = "MailAuthority.rs"]
-mod mail_authority;
-#[path = "MailDisk.rs"]
-mod mail_disk;
-#[path = "MailStore.rs"]
-mod mail_store;
-#[path = "MailTransport.rs"]
-mod mail_transport;
-#[path = "MailTypes.rs"]
-mod mail_types;
+#[path = "Consensus.rs"]
+mod consensus;
+#[path = "ConsensusClock.rs"]
+mod consensus_clock;
 #[path = "Markup.rs"]
 mod markup;
-#[path = "MediaAuthority.rs"]
-mod media_authority;
-#[path = "MediaDisk.rs"]
-mod media_disk;
-#[path = "MediaStore.rs"]
-mod media_store;
-#[path = "MediaTls.rs"]
-mod media_tls;
-#[path = "MediaTransport.rs"]
-mod media_transport;
-#[path = "MediaTypes.rs"]
-mod media_types;
-#[path = "PageAuthority.rs"]
-mod page_authority;
 #[path = "Policy.rs"]
 mod policy;
 #[path = "Protocol.rs"]
 mod protocol;
+#[path = "RuntimeAuthorization.rs"]
+mod runtime_authorization;
+#[path = "RuntimeBootstrapKeys.rs"]
+mod runtime_bootstrap_keys;
 #[path = "RuntimeGuard.rs"]
 mod runtime_guard;
 #[path = "Runtime.rs"]
 mod runtime_management;
-#[path = "SshAuthority.rs"]
-mod ssh_authority;
+#[path = "RuntimeManifest.rs"]
+mod runtime_manifest;
+#[path = "RuntimeServiceActivate.rs"]
+mod runtime_service_activate;
+#[path = "RuntimeServiceAuthorization.rs"]
+mod runtime_service_authorization;
+#[path = "RuntimeServiceEntry.rs"]
+mod runtime_service_entry;
+#[path = "RuntimeServiceEpochCommand.rs"]
+mod runtime_service_epoch_command;
 #[path = "SshProof.rs"]
 mod ssh_proof;
 #[path = "SshService.rs"]
 mod ssh_service;
-#[path = "SshTypes.rs"]
-mod ssh_types;
 #[path = "Store.rs"]
 mod store;
-#[path = "TransferAuthority.rs"]
-mod transfer_authority;
-#[path = "TransferDisk.rs"]
-mod transfer_disk;
-#[path = "TransferStore.rs"]
-mod transfer_store;
-#[path = "TransferTransport.rs"]
-mod transfer_transport;
-#[path = "TransferTypes.rs"]
-mod transfer_types;
 #[path = "Transport.rs"]
 mod transport;
+#[path = "TrustBootstrap.rs"]
+mod trust_bootstrap;
 #[path = "TrustWire.rs"]
 #[allow(dead_code)]
 mod trust_wire;
-#[path = "Types.rs"]
-mod types;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
+
+fn random_hex<const N: usize>() -> String {
+    use rand::RngCore;
+    let mut value = [0; N];
+    rand::rngs::OsRng.fill_bytes(&mut value);
+    hex::encode(value)
+}
 
 #[derive(Parser)]
 #[command(
@@ -90,6 +124,16 @@ struct Arguments {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Initialise or run one independently pinned authority replica.
+    AuthorityReplica {
+        #[command(subcommand)]
+        command: authority_replica::Command,
+    },
+    /// Observe authenticated local time without changing the system clock.
+    AuthorityClock {
+        #[command(subcommand)]
+        command: authority_clock_monitor::Command,
+    },
     #[command(hide = true)]
     RuntimeGuard {
         #[arg(long, value_enum)]
@@ -104,48 +148,42 @@ enum Command {
         #[command(subcommand)]
         command: runtime_management::Command,
     },
-    /// Initialise a new authority namespace without opening an ingress listener.
-    Initialise {
-        #[arg(long)]
-        config: PathBuf,
-        #[arg(long)]
-        admin_key: String,
-    },
-    /// Run a confined authority broker connected to the trusted voters.
-    Authority {
-        #[arg(long)]
-        config: PathBuf,
-    },
-    /// Run a confined nonvoting host with signed local consent.
-    Host {
-        #[arg(long)]
-        config: PathBuf,
-    },
-    /// Run a consenting bridge between two independently administered networks.
-    Bridge {
-        #[arg(long)]
-        config: PathBuf,
-    },
-    /// Run a selected persistent mail store with exact signed host consent.
-    MailStore {
-        #[arg(long)]
-        config: PathBuf,
-    },
-    /// Run a consented static page media store.
-    PageMediaStore {
-        #[arg(long)]
-        config: PathBuf,
-    },
-    /// Run a recipient-selected encrypted transfer store.
-    TransferStore {
-        #[arg(long)]
-        config: PathBuf,
-    },
     /// Supervise a separately consented OpenSSH service.
     SshService {
         #[arg(long)]
         config: PathBuf,
     },
+    #[command(hide = true)]
+    RuntimeServiceInitialise,
+    #[command(hide = true)]
+    RuntimeServiceReceipt,
+    #[command(hide = true)]
+    RuntimeServiceRequesterStatus,
+    #[command(hide = true)]
+    RuntimeServiceRequesterFence,
+    #[command(hide = true)]
+    RuntimeServiceEpoch {
+        #[command(subcommand)]
+        command: runtime_service_epoch_command::Command,
+    },
+    /// Run a consented Page replica with no direct reader endpoint.
+    AuthorityPageService,
+    /// Run a consented immutable media store through its private control socket.
+    AuthorityMediaService,
+    #[command(hide = true)]
+    AuthorityMediaExchange,
+    /// Run a consented Transfer service through its private local control socket.
+    AuthorityTransferService,
+    #[command(hide = true)]
+    AuthorityTransferExchange,
+    /// Run a consented Mail service through its private local control socket.
+    AuthorityMailService,
+    #[command(hide = true)]
+    AuthorityMailExchange,
+    #[command(hide = true)]
+    AuthorityBridgeService,
+    #[command(hide = true)]
+    AuthorityBridgeExchange,
     #[command(hide = true)]
     SshChild {
         #[arg(long)]
@@ -158,22 +196,6 @@ enum Command {
         #[arg(long, default_value = "/State")]
         state: PathBuf,
     },
-}
-
-fn authority_config(path: &Path) -> Result<types::AuthorityConfig> {
-    let config: types::AuthorityConfig =
-        serde_json::from_slice(&store::read_bounded(path, 32 * 1024)?)
-            .context("Invalid authority configuration")?;
-    protocol::fixed_hex::<32>(&config.network).map_err(anyhow::Error::msg)?;
-    ensure!(
-        config.state_directory.is_absolute(),
-        "Authority state directory must be absolute"
-    );
-    ensure!(
-        !config.etcd_server_name.is_empty(),
-        "Authority voter server name is required"
-    );
-    Ok(config)
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime> {
@@ -190,141 +212,47 @@ fn run() -> Result<()> {
         .install_default()
         .map_err(|_| anyhow::anyhow!("The TLS provider was already configured"))?;
     match Arguments::parse().command {
+        Command::AuthorityReplica { command } => authority_replica::run(command)?,
+        Command::AuthorityClock { command } => authority_clock_monitor::run(command)?,
         Command::RuntimeGuard {
             kind,
             expires,
             arguments,
         } => runtime_guard::run(kind, expires, arguments)?,
         Command::Runtime { command } => runtime_management::run(command)?,
-        Command::Initialise { config, admin_key } => {
-            let config = authority_config(&config)?;
-            runtime()?.block_on(async {
-                store::Store::connect(&config)
-                    .await?
-                    .initialise(&admin_key)
-                    .await
-            })?;
-            println!("Authority initialised");
+        Command::RuntimeServiceInitialise => {
+            runtime_service_entry::initialise()?;
         }
-        Command::Authority { config: path } => {
-            let config = authority_config(&path)?;
-            let tls = transport::tls_config(&config)?;
-            let mut reads = vec![
-                path,
-                config.certificate.clone(),
-                config.private_key.clone(),
-                config.client_ca.clone(),
-                config.etcd_ca.clone(),
-                config.etcd_certificate.clone(),
-                config.etcd_key.clone(),
-            ];
-            if let Some(path) = &config.federation_signing_key {
-                reads.push(path.clone());
-            }
-            if let Some(path) = &config.mail_signing_key {
-                reads.push(path.clone());
-            }
-            if let Some(path) = &config.service_signing_key {
-                reads.push(path.clone());
-            }
-            if let Some(path) = &config.page_media_signing_key {
-                reads.push(path.clone());
-            }
-            let mut ports = Vec::new();
-            for endpoint in &config.etcd_endpoints {
-                let url = reqwest::Url::parse(endpoint)?;
-                ensure!(
-                    url.scheme() == "https"
-                        && url.username().is_empty()
-                        && url.password().is_none(),
-                    "Authority voter endpoints require credential-free HTTPS URLs"
-                );
-                ports.push(
-                    url.port_or_known_default()
-                        .context("Authority voter port is missing")?,
-                );
-            }
-            let profile = confinement::enter(
-                &config.state_directory,
-                &reads,
-                &[config.listen.port()],
-                &ports,
-            )?;
-            confinement::canaries(&config.state_directory)?;
-            println!("{}", serde_json::to_string(&profile)?);
-            runtime()?.block_on(transport::serve(config, tls))?;
+        Command::RuntimeServiceReceipt => runtime_service_entry::receipt()?,
+        Command::RuntimeServiceRequesterStatus => runtime_service_entry::bridge_requester(false)?,
+        Command::RuntimeServiceRequesterFence => runtime_service_entry::bridge_requester(true)?,
+        Command::RuntimeServiceEpoch { command } => {
+            println!("{}", runtime_service_epoch_command::run(command)?)
         }
-        Command::Host { config: path } => {
-            let config = host::load(&path)?;
-            let mut reads = config.read_paths();
-            reads.push(path);
-            let profile = confinement::enter(
-                &config.state_directory,
-                &reads,
-                &[],
-                &config.connect_ports(),
-            )?;
-            runtime()?.block_on(host::run(config, profile))?;
-        }
-        Command::Bridge { config: path } => {
-            let config = bridge::load(&path)?;
-            let mut reads = config.read_paths();
-            reads.push(path);
-            let profile = confinement::enter(
-                &config.state_directory,
-                &reads,
-                &[],
-                &config.connect_ports(),
-            )?;
-            runtime()?.block_on(bridge::run(config, profile))?;
-        }
-        Command::MailStore { config: path } => {
-            let config = mail_store::Config::load(&path)?;
-            let profile = confinement::enter_mail(
-                &config.state_file,
-                &[config.listen.port()],
-                &[config.relay_address.port()],
-                config.consent.state_bytes,
-            )?;
-            confinement::mail_canaries(&config.state_file)?;
-            config.check_resources(&profile)?;
-            println!("{}", serde_json::to_string(&profile)?);
-            runtime()?.block_on(mail_transport::serve(config))?;
-        }
-        Command::PageMediaStore { config: path } => {
-            let config = media_store::Config::load(&path)?;
-            let profile = confinement::enter_mail(
-                &config.state_file,
-                &[config.listen.port()],
-                &[config.relay_address.port()],
-                config.consent.state_bytes,
-            )?;
-            confinement::mail_canaries(&config.state_file)?;
-            config.check_resources(&profile)?;
-            println!("{}", serde_json::to_string(&profile)?);
-            runtime()?.block_on(media_transport::serve(config))?;
-        }
-        Command::TransferStore { config: path } => {
-            let config = transfer_store::Config::load(&path)?;
-            let profile = confinement::enter_mail(
-                &config.state_file,
-                &[config.listen.port()],
-                &[config.relay_address.port()],
-                config.consent.state_bytes,
-            )?;
-            confinement::mail_canaries(&config.state_file)?;
-            config.check_resources(&profile)?;
-            println!("{}", serde_json::to_string(&profile)?);
-            runtime()?.block_on(transfer_transport::serve(config))?;
-        }
+        Command::AuthorityPageService => runtime_service_entry::pages()?,
+        Command::AuthorityMediaService => runtime_service_entry::media()?,
+        Command::AuthorityMediaExchange => runtime_service_entry::exchange(2)?,
+        Command::AuthorityTransferService => runtime_service_entry::transfers()?,
+        Command::AuthorityTransferExchange => runtime_service_entry::exchange(4)?,
+        Command::AuthorityMailService => runtime_service_entry::mail()?,
+        Command::AuthorityMailExchange => runtime_service_entry::exchange(3)?,
+        Command::AuthorityBridgeService => runtime_service_entry::bridge()?,
+        Command::AuthorityBridgeExchange => runtime_service_entry::exchange(7)?,
         Command::SshService { config: path } => {
-            let config = ssh_service::Config::load(&path)?;
-            let profile = confinement::enter_ssh_parent(
-                &config.state_directory,
-                &[config.listen.port()],
-                &[config.relay_address.port()],
+            ensure!(
+                path == Path::new("/Config/ServiceConfig.json"),
+                "service requires its fixed consented configuration"
+            );
+            let guard = runtime_service_authorization::Guard::load(
+                Path::new("/Authorization"),
+                Path::new("/Config"),
+                8,
             )?;
-            runtime()?.block_on(ssh_service::run(config, profile))?;
+            let config = ssh_service::Config::load(&path)?;
+            let profile =
+                confinement::enter_ssh_parent(Path::new("/State"), &[config.listen.port()], &[])?;
+            let active = runtime_service_activate::activate(&guard)?;
+            runtime()?.block_on(ssh_service::run(config, profile, || active.check(&guard)))?;
         }
         Command::SshChild { port } => ssh_service::child(port)?,
         Command::SshRun => ssh_service::command()?,
@@ -343,3 +271,7 @@ fn main() {
         std::process::exit(1);
     }
 }
+
+#[cfg(test)]
+#[path = "AuthorityDeploymentTests.rs"]
+mod authority_deployment_tests;

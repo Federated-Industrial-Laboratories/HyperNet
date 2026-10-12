@@ -23,9 +23,9 @@ inside the OCI image. The native manager uses host-maintained shared libraries.
 The signed manifest declares its ELF interpreter, required libraries and minimum
 GNU libc version; installation refuses an older libc or missing interpreter.
 The native host also needs OpenSSL 3 and the qualified Podman/kernel profile.
-Current trusted authority setup requires explicitly selected `etcd` and `etcdctl`
-binaries. Package operations use Python and OpenSSH tools; existing individual
-role launchers additionally use Bash, GNU core utilities, `jq` and `flock`.
+Package operations use Python, OpenSSH tools, Bash and the documented native
+runtime prerequisites. Authority ordering is provided by the installed HyperNet
+replicas.
 See [Runtime](Runtime.md) for inert native setup and explicit local activation.
 
 ```sh
@@ -92,7 +92,7 @@ fails; inspect that exact image ID before any separate cleanup.
 ```sh
 python3 Tools/Bundle.py VerifyInstalled \
   --prefix /Private/HyperNetCurrent --public-key /Trust/Publisher.pub
-python3 Tools/Qualify.py \
+python3 Tools/Qualify.py --work-directory /Private/QualificationWork \
   --image sha256:ImageDigest --output /Private/Qualification.json
 ```
 
@@ -102,46 +102,21 @@ inventory. It does not trust a modified local manifest. Qualify uses the native
 kernel and a disposable bounded container to verify actual confinement. A
 userspace container on another distribution is not a native kernel qualification.
 
-The following image-switch procedure applies only to individual role-launcher
-profiles. Native runtime deployments bind exact software in their consent; this
-helper cannot update them. Stop the relevant launcher profile before changing its
-image.
-All workload and relay containers must be removed by Stop, including exited
-containers. Select a fully verified installation and inspect the current network
-state schema before using the switch operation:
+Every installed deployment binds its exact binary and image in signed operator consent.
+An executable change requires fresh consent and current governance approval.
+Authority replacement uses the terminal and Ready workflow in
+[AuthorityEpochs.md](AuthorityEpochs.md); services use the installed service
+lifecycle in [ServiceRuntime.md](ServiceRuntime.md). Package installation alone
+cannot change a running deployment or its authority floor.
 
-```sh
-python3 Tools/Upgrade.py --kind Authority \
-  --profile /Private/AuthorityProfile \
-  --installation /Private/HyperNetUpdated \
-  --public-key /Trust/Publisher.pub \
-  --expected-image sha256:PreviousImageDigest --state-schema 9
-```
+The current package declares authority schema1 for the canonical authority
+contract. Incompatible prerelease state requires an explicit fresh deployment;
+there is no compatibility parser or implicit migration. Never restore old state,
+grants, checkpoints or floors to make another executable start.
 
-Kinds are Authority, Host, Bridge, MailStore and TransferStore. The operation holds
-the same lifecycle lock as their launchers, checks the expected old image and
-signed authority schema, and changes only `Control.json.image`. It does not
-start a service or modify resources, endpoints, credentials, consent, withdrawal
-markers, durable state or floors. Run Start explicitly and confirm real readiness
-with an authenticated operation before directing clients to the new process.
-Keep the consented authority endpoint stable across container recreation. An
-automatically allocated private container address is not a stable service address.
-
-`--state-schema` is the operator's inspected value, not independent proof of the
-quorum's current schema. The authority checks the real quorum state again at
-startup and refuses incompatible state. The current package requires schema9.
-There is no legacy schema acceptance or migration. Use a fresh development
-installation when replacing an incompatible prerelease contract. The switch
-operation can change an image only within the current schema. Never restore old
-state, grants, voter snapshots or revision floors to make an old executable start.
-
-SSH profiles cannot use image switching: their signed consent binds the exact
-image and fixed command. Package the new SSH service image and obtain fresh
-operator consent and a fresh grant through the existing SSH provisioning workflow.
-No generic package update can bypass that binding. The signed offline bundle
-currently accepts the general Core image from `Tools/Package.sh`. Custom fixed-command
-SSH overlays from `Tools/SshPackage.sh` require their separate trusted image
-distribution and fresh consent; they are not part of this default bundle profile.
+The default offline bundle contains the Core image from `Tools/Package.sh`.
+Custom fixed-command SSH images from `Tools/SshPackage.sh` require independently
+trusted image distribution and fresh operator consent.
 
 Stop using an installation before removing its files:
 

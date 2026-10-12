@@ -1,120 +1,107 @@
 # Mail store operation
 
-A mail store is a separate rootless service with its own Ed25519 identity,
-transport certificate, consent and bounded persistent file. Do not use a Pages,
-Bridge or administrator identity. Invite the service with `MEMBER | HOST` (3),
-redeem it, then register its signed `MailHostConsent` through the authority. The
-permanent service history prevents using that key for Pages or administration.
-Withdrawal or expiry of one service role does not erase this history.
+A Mail service is an installed role3 workload with a dedicated Ed25519 service
+identity. Its operator signs the host consent and Mail profile, each bound to the exact
+canonical deployment manifest.
+Network registration, local operator consent and serving activation are separate
+requirements. The owner selects this service key in each mailbox manifest.
 
-## Authority and transport provisioning
+## Profile and registration
 
-Generate a separate authority mail signing identity in a private
-`MailSigningKey.json` file and add `mailSigningKey` to `Authority.json` before
-initialising the broker. Every broker must use the current authority state-9
-contract; other state versions are refused without migration. To enable the
-service on a current network, stop each broker,
-provision its separate signing file and update its confined configuration before
-restarting. Never
-replace a signer silently: existing host consents pin it. `Tools/Authority.sh`
-accepts the optional mail signer independently of federation and remaps it to
-`/Config/MailSigningKey.json`. Public mail metadata uses the existing exact
-`/HyperNet/<network>/Authority` RBAC key; no private-message prefix is permitted.
+Prepare an admitted manifest with one Mail role, a writable state volume,
+`allowOpaque` consent and explicit resource limits. Its Mail role has no bind or
+outbound endpoints. The profile names the exact volume, preallocated state size,
+maximum ciphertext size and maximum lifetime. `HyperNetSuite mail profile` signs
+these values as the deployment operator; `mail register` publishes the result
+through an admitted manager with StoreMail14 and ManageService26 capabilities.
+The registered deployment's registrar and consent must also remain current.
 
-Issue a dedicated TLS certificate with `serverAuth` and `clientAuth` usages. The
-same service certificate authenticates its public TLS listener and authority
-mTLS, but its private key must differ from the Ed25519 service signing key. The
-authority's hosting-client trust bundle must trust this issuer. The public
-certificate must cover the advertised endpoint's DNS name. Pin the SHA-256 of
-the DER leaf certificate and the SHA-256 of the exact PEM root file in consent.
-Keep the CA private key outside all runtime directories.
+A ciphertext is at most128KiB. The profile may choose a smaller maximum with a
+clear workload reason. Lifetime is at most seven days. Each of the two storage
+banks must fit its header and at least one maximum-sized entry. State admission
+must fit the chosen volume and role limits. The role's memory admission must be
+at least three times the state file size, accounting for decoding and atomic
+bank replacement. Storage capacity refusal preserves existing state.
 
-The consent pins the public HTTPS endpoint/address, authority endpoint/address,
-authority signing public key, generation, lifetime and worker resources. Endpoint
-paths are `/`; redirects, ambient proxies and DNS fallback are disabled. A
-fixed-destination relay is the only worker egress. Publish only the mail TLS
-port and restrict management paths independently. A public endpoint may map to
-a different internal listener port.
+Prepare the exact configuration artifacts:
 
-## Install and operate
-
-Prepare a private configuration directory containing `MailStore.json`,
-`Consent.json`, `Identity.json`, `AuthorityCa.pem`, `Ca.pem`, `Client.pem` and
-`ClientKey.pem`. `Consent.json` is the exact registered signed consent.
-`AuthorityCa.pem` trusts the authority listener; `Ca.pem` is the exact root file
-advertised for the mail listener. Private keys must be owner-readable only.
-The launcher sets all paths and the relay address; the input JSON has this shape:
+| File | Purpose |
+| --- | --- |
+| Bootstrap.cbor | Fully accepted, independently pinned bootstrap |
+| Manifest.cbor | Exact canonical admitted deployment manifest |
+| Service.key | Dedicated Mail service's raw32-byte private seed |
+| MailProfile.cbor | Signed role3 storage profile |
+| ServiceConfig.json | Fixed paths below |
 
 ```json
 {
-  "network": "<64 lowercase hexadecimal digits>",
-  "listen": "0.0.0.0:8443",
-  "identity": "/Config/Identity.json",
-  "consentFile": "/Config/Consent.json",
-  "authorityCa": "/Config/AuthorityCa.pem",
-  "certificate": "/Config/Client.pem",
-  "privateKey": "/Config/ClientKey.pem",
-  "caCertificate": "/Config/Ca.pem",
+  "bootstrapFile": "/Config/Bootstrap.cbor",
+  "manifestFile": "/Config/Manifest.cbor",
+  "profileFile": "/Config/MailProfile.cbor",
+  "identityFile": "/Config/Service.key",
   "stateFile": "/State/MailState.bin",
-  "relayAddress": "127.0.0.1:8443"
+  "controlSocket": "/Authority/Control.sock",
+  "clockWitnessFile": "/Clock/ClockHealth.cbor",
+  "listenSocket": "/State/Control/Control.sock"
 }
 ```
 
-Use the immutable image produced by `Tools/Package.sh`. The profile and dedicated
-state directory must both be new; the state directory must be outside the profile.
-The external publication port must equal the consented public address port and
-the target port must equal the configured listener:
+Keys and configuration use owned private files. The operator key is never
+mounted into the service. The authority mount contains only its isolated Control
+directory; authority keys and replica state remain inaccessible.
+
+## Installed lifecycle
+
+Use [ServiceRuntime](ServiceRuntime.md) for setup, preview, explicit local
+consent, activation and supervised start. The same command family provides
+status, stop, withdrawal, receipt export and healthy-epoch adoption:
 
 ```sh
-bash Tools/MailStore.sh Initialise /Private/MailProfile /Private/MailConfig \
-  /Private/MailState sha256:<image-id> MailEgress 0.0.0.0:29443:8443
-bash Tools/MailStore.sh Start /Private/MailProfile
-bash Tools/MailStore.sh Status /Private/MailProfile
-bash Tools/MailStore.sh Stop /Private/MailProfile
-bash Tools/MailStore.sh Start /Private/MailProfile
+HyperNet runtime services setup --directory /Private/MailService \
+  --configuration /Private/MailInputs --operator-key /Private/Operator.json \
+  --host-consent /Private/HostConsent.cbor \
+  --authority-directory /Private/Authority --clock-directory /Private/Clock
+HyperNet runtime services preview --directory /Private/MailService
+HyperNet runtime services consent --directory /Private/MailService \
+  --profile-digest REVIEWED_PROFILE_DIGEST
+HyperNet runtime services start --directory /Private/MailService \
+  --activation-request /Private/MailActivation.cbor
 ```
 
-The launcher preallocates every block of `MailState.bin` and assigns it to the
-subordinate UID used by `--userns=nomap`. Never change it to the login UID or add
-unrelated files. Only this single file is mounted writable. Landlock permits
-read/write on that file but denies truncation and directory creation;
-`RLIMIT_FSIZE` prevents growth beyond consent. Rootless OCI, read-only root,
-seccomp, no capabilities, no-new-privileges, private PID/IPC namespaces and cgroup
-limits remain mandatory. No architecture-specific virtual-machine dependency is
-introduced. Unsupported kernel or resource profiles fail closed.
+Start remains supervised in the foreground. The workload is PID1 under UID1000
+in its own subordinate user namespace. Rootless OCI, a read-only image, separate
+PID/IPC namespaces, no capabilities, no-new-privileges, seccomp, Landlock and
+signed resource limits remain mandatory. Unsupported confinement fails closed.
+The current activation deadline is enforced independently of new mail traffic.
 
-Consent `memoryBytes`, `cpuQuota`/`cpuPeriod`, and `pids` bound the worker. Protocol
-version 1 additionally consents to a fixed relay overhead of 128 MiB memory,
-0.5 CPU and 32 PIDs, with an 8 MiB volatile state limit. These are additional,
-not included in the worker numbers. The private state file alone is the signed
-persistent `stateBytes` bound. Small rotating runtime logs and private launcher
-configuration occupy separate operator-controlled profile storage; they contain
-no message bodies or inbox listings.
-
-Both worker and relay receive an external OCI runtime timeout equal to remaining
-consent. Expiry therefore terminates them even if the process is stopped with
-SIGSTOP. The worker also checks absolute expiry itself. An expired profile
-cannot restart. `Stop` and `Start` preserve acknowledged state while consent is
-valid. `Withdraw` persists a local no-restart marker, kills both processes and
-retains encrypted state:
+The service accepts only same-UID private Unix socket packets. A local operator
+can forward a bounded packet without exposing the subordinate-owned directory:
 
 ```sh
-bash Tools/MailStore.sh Withdraw /Private/MailProfile
+HyperNet runtime services exchange --directory /Private/MailService \
+  --packet /Private/MailPacket.cbor --receipt /Private/MailReceipt.cbor
 ```
 
-Local withdrawal does not claim that the authority or other copies have changed.
-Also submit `MailHostWithdraw` through an authorised client when reachable.
-For renewed consent, register the exact next generation and prepare a new private
-configuration directory with its signed consent and certificates. Run
-`bash Tools/MailStore.sh Renew /Private/MailProfile /Private/RenewedConfig`, then
-Start. Renew stops both processes and preserves the private state file. It
-requires the same network, host identity, authority signer, endpoints, listener
-port and state size. New worker limits and transport certificates require fresh
-signed consent. Renew explicitly clears a prior local withdrawal. An interrupted
-configuration replacement leaves `RenewalPending`; Start refuses until an
-operator restores a complete consistent configuration. Never clear that marker
-without resolving the interrupted replacement. The standard Initialise command
-refuses existing state so it cannot accidentally adopt another mailbox file.
-Export or erase
-retained files only under the owner's storage policy; no automatic destructive
-recovery command is provided. See [Private mail](Mail.md) before restoring backups.
+The client must verify the returned typed receipt independently. Exchange is not
+a public gateway. There is no automatic direct route or network fallback.
+
+## Persistence and withdrawal
+
+The requester and recipient journals separately retain quorum history and exact
+effect claims. The ciphertext file has two checksummed committed banks. A write
+syncs the new bank before success, then clears the obsolete bank. Deletion stores
+a tombstone until expiry; an exact replay cannot resurrect its ciphertext.
+Clock floors persist for reads as well as mutations.
+
+Stop preserves these files. Ordinary start never recreates a missing journal or
+adopts an arbitrary ciphertext file. Withdrawal first persists the local veto,
+then removes owned resources; cleanup failure cannot restore permission. Publish
+the separate restrictive domain withdrawal with `HyperNetSuite mail withdraw`.
+A withdrawn installation cannot be renewed in place.
+
+Healthy committee replacement requires stopping the service and explicitly
+sealing and activating both retained journals. They must accept the same verified
+successor before restart. A new control directory is chosen explicitly; it does
+not change the independently accepted network identity. See
+[AuthorityEpochs](AuthorityEpochs.md). Keep uncertain backup files offline rather
+than restoring them as a live service with rolled-back effects or deletion state.

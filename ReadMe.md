@@ -1,88 +1,61 @@
 # HyperNet
 
-HyperNet provides an initial permissioned network authority and confined hosting
-runtime. Device-bound invitations admit members; trusted voting authorities order
-grants and revocation. Host owners separately sign exact resource limits and can
-withdraw local consent without waiting for the network.
+HyperNet is private, permissioned network infrastructure with explicitly
+consenting hosts and independently verified authority results. HyperNetSuite is
+a separate terminal and command-line client; the infrastructure does not depend
+on that frontend.
 
-Rust implements transport, bounded protocol handling and durable authority
-integration. A narrow Ada/SPARK function evaluates permission intersections and
-expiry. A maintained etcd quorum supplies replicated administration. Ordinary
-hosts hold no voting or database credentials. TLS 1.3 and device signatures bind
-requests to a network identity.
+Four appointed authority replicas run permissioned Basic HotStuff. A result
+requires the protocol's ordered history, durable voting state and three valid
+replica signatures. Membership, administration, review, hosting and confidential
+access are separate capabilities. Operator consent binds exact software,
+resources, exposure and lifetime; local withdrawal remains effective without a
+quorum.
 
-Build with Rust, GNAT, protobuf's `protoc` and C linker tools:
+Rust implements protocol validation, cryptographic integration, journals and
+runtime management. A narrow Ada/SPARK boundary checks media extents without
+allocation or mutable state. Network transports use TLS1.3 and explicitly pinned
+identities. Service workloads run under rootless Podman, delegated cgroup v2,
+seccomp and Landlock. They share the host kernel.
+
+Build with Rust, GNAT and ordinary C linker tools. Select persistent output
+locations outside the source tree:
 
 ```sh
+export CARGO_TARGET_DIR=/Private/HyperNetBuild
 cargo build --locked --release
-bash Tools/PolicyCheck.sh /tmp/HyperNetPolicyProof
-bash Tools/Package.sh target/release /tmp/HyperNetPackage
+bash Tools/PolicyCheck.sh /Private/PolicyProof
+bash Tools/Package.sh "$CARGO_TARGET_DIR/release" /Private/HyperNetPackage
 ```
 
-Set `GNAT_GCC`, `GNATPROVE` and `PROTOC` when the corresponding tools are outside
-`PATH`. Build dependencies are locked in `Cargo.lock`. The confined Linux profile
-requires rootless Podman, delegated cgroup v2 limits and Landlock ABI 6 or later.
-Unsupported hosting profiles fail closed.
+Set `GNAT_GCC` and `GNATPROVE` when the tools are outside `PATH`. Dependencies are
+locked in `Cargo.lock`. See [Hosting](Documentation/Hosting.md) for supported
+confinement requirements and [Packages](Documentation/Packages.md) for independently
+verified installation. Installation does not start a service or grant authority.
 
-- [Native runtime](Documentation/Runtime.md): inert setup, exact local consent,
-  generation-checked lifecycle and redacted local status.
-- [Offline packages](Documentation/Packages.md): independently verified installation,
-  current-contract image updates and state-preserving removal.
-- [Native qualification](Documentation/Qualification.md): measured Linux confinement.
-- [Security reporting](Documentation/Security.md): private reporting and trust limits.
-- [Authority operation](Documentation/Authority.md): trust roots, voters,
-  membership, durable state and recovery.
-- [Confined hosting](Documentation/Hosting.md): signed consent, isolation,
-  resource limits, installation and local withdrawal.
-- [Pages](Documentation/Pages.md): inert components and exact-content approval.
-- [HyperPage](Documentation/HyperPage.md): bounded layout, colours and local controls.
-- [Static media](Documentation/PageMedia.md): consented raster/vector storage, review,
-  explicit access and independent media permissions.
-- [Federation](Documentation/Federation.md): bilateral treaties, author opt-in,
-  separate import review and signed freshness evidence.
-- [Confined bridges](Documentation/Bridge.md): dual-signed endpoint consent and
-  bounded outward-only transfer between independent networks.
-- [Private mail](Documentation/Mail.md): scoped mail identities, one-use device
-  key packages and persistent ciphertext only on selected hosts.
-- [Mail store operation](Documentation/MailStore.md): consent, bounded storage
-  and confinement.
-- [Encrypted file transfers](Documentation/Transfers.md): explicit acceptance,
-  selected stores, resumable upload and verified delivery.
-- [Transfer store operation](Documentation/TransferStore.md): consented resources
-  and durable bounded storage.
-- [SSH services](Documentation/SshServices.md): separate grants and supervised
-  OpenSSH endpoints.
-- [Scoped applications](Documentation/Applications.md): distinct page identities,
-  bounded delegation and explicit review policy.
-- [Authority protocol](Documentation/Protocol.md): independent client interface.
-- [Requirements](Documentation/Requirements.md): the broader product scope.
+- [Authority](Documentation/Authority.md): independent trust, explicit capabilities and durable results.
+- [Authority replicas](Documentation/AuthorityReplica.md): pinned peers and consensus operation.
+- [Runtime](Documentation/Runtime.md): setup, preview, local consent and authority lifecycle.
+- [Service runtime](Documentation/ServiceRuntime.md): exact hosting consent and serving activation.
+- [Authority epochs](Documentation/AuthorityEpochs.md): certified healthy replacement.
+- [Network recovery](Documentation/NetworkRecovery.md): exceptional recovery and independently accepted identity.
+- [Pages](Documentation/Pages.md): inert publication, manual review and current approval.
+- [HyperPage](Documentation/HyperPage.md): bounded layout, colour and client-side motion.
+- [Media](Documentation/PageMedia.md): exact raster/vector bytes and explicit disclosure.
+- [Federation](Documentation/Federation.md): bilateral consent, author opt-in and destination review.
+- [Bridges](Documentation/Bridge.md): confined exchanges between independent networks.
+- [Private mail](Documentation/Mail.md): separate identities and recipient-selected ciphertext storage.
+- [Transfers](Documentation/Transfers.md): explicit acceptance and durable encrypted delivery.
+- [SSH services](Documentation/SshServices.md): separately consented fixed-command OpenSSH services.
+- [Applications](Documentation/Applications.md): restricted independent credentials and review policy.
+- [Protocol](Documentation/Protocol.md): canonical signed objects and exact retries.
+- [Qualification](Documentation/Qualification.md): native checks and platform limits.
+- [Security](Documentation/Security.md): private reporting and trust boundaries.
 
-[HyperNetSuite](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite)
-is an independently built and packaged client. The daemon does not depend on it.
-This version maintains trusted membership, hosting readiness and manually approved
-Pages with scoped replication. Federation transfers exact author-approved native
-publications between explicitly consenting networks, with independent destination
-review. It grants no shared membership or administration and cannot re-export
-foreign imports. Local vetoes apply on fresh authority checks; remote vetoes and
-partitions stop new reads after at most five seconds of existing evidence.
-Private mail uses independent client end-to-end encryption and explicit selected
-storage. Encrypted file transfers require explicit recipient acceptance and
-selected storage. Separately consented OpenSSH services run a fixed command in
-an isolated account; current grants supervise their whole process lifetime.
-Arbitrary full-shell services are outside this initial profile.
-Scoped applications use independent request identities for selected native Pages.
-Optional review delegation binds exact resources, expiry and operator policy;
-manual review remains the default.
-
-The implementation is not yet a qualified production Internet release. The
-replication profile assumes trusted administrators and crash faults; it does not
-provide Byzantine consensus. Containers share the host kernel. See the operation
-manuals for the precise deployment and recovery limits.
-
-[Replacement network contracts](Documentation/Contracts.md) specify the 0.8.0
-authority, policy and runtime boundaries. Native runtime management prepares
-and operates the current trusted components. Full Byzantine authority and
-relay-only reader connections remain unimplemented; the native manager does not
-change that qualification boundary.
+The current interface uses explicit local authority and service control routes.
+These routes do not establish reader anonymity. Relay-only reader access,
+confidential publication and broader platform qualification remain separate
+requirements before production Internet use. Native AArch64, macOS and
+SELinux-enabled operation remain pending qualification.
 
 Licensed under the [MIT License](Licence.txt).

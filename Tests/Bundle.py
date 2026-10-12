@@ -18,7 +18,6 @@ from unittest.mock import patch
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'Tools'))
 import Bundle
-import Upgrade
 
 
 class Packages(unittest.TestCase):
@@ -40,15 +39,15 @@ class Packages(unittest.TestCase):
         self.counter = 0
         self.image = 'sha256:' + '1' * 64
         self.payload = {name: b'Package fixture\n' for name in (
-            'Bin/HyperNet', 'Licence.txt', 'ReadMe.md', 'Tools/Bundle.py', 'Tools/Qualify.py', 'Tools/Upgrade.py',
-            'Tools/Authority.sh', 'Tools/Lifecycle.sh', 'Tools/Seccomp.sh',
+            'Bin/HyperNet', 'Licence.txt', 'ReadMe.md', 'Tools/Bundle.py', 'Tools/Qualify.py',
+            'Tools/Seccomp.sh',
             'Documentation/ThirdPartyNotices.txt', 'Documentation/SystemLibraries.tsv',
             'Documentation/SystemLibraryNotices.txt', 'Images/HyperNetOci.tar')}
         self.payload['ImageId.txt'] = (self.image + '\n').encode()
         self.manifest = {'format': 1, 'product': 'HyperNet', 'version': '0.7.5',
                          'architecture': Bundle.architecture(), 'metadata': {
                              'imageId': self.image, 'imageArchive': 'Images/HyperNetOci.tar',
-                             'authoritySchema': 9,
+                             'authoritySchema': 1,
                              'hostRuntime': {'elfInterpreter': {'x86_64': '/lib64/ld-linux-x86-64.so.2', 'aarch64': '/lib/ld-linux-aarch64.so.1'}[Bundle.architecture()], 'neededLibraries': ['libc.so.6'], 'glibcMinimum': '2.34'},
                              'binaries': {'HyperNet': hashlib.sha256(self.payload['Bin/HyperNet']).hexdigest(), 'HyperNetGate': '3' * 64},
                              'prerequisites': ['Synthetic package contract fixture']},
@@ -207,26 +206,6 @@ class Packages(unittest.TestCase):
         with self.assertRaises(ValueError):
             Bundle.installed_manifest(args)
 
-    def test_upgrade_keeps_schema_and_stopped_container_boundaries(self):
-        metadata = self.manifest['metadata']
-        Upgrade.compatible(metadata, 9)
-        for schema in (0, 7, 8, 99):
-            with self.assertRaises(ValueError):
-                Upgrade.compatible(metadata, schema)
-        for maximum in (6, 99):
-            changed = dict(metadata, authoritySchema=maximum)
-            with self.assertRaises(ValueError):
-                Upgrade.compatible(changed, 9)
-        with patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)):
-            with self.assertRaises(ValueError):
-                Upgrade.stopped('HyperNetFixture', 'Authority')
-        with patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 125)):
-            with self.assertRaises(ValueError):
-                Upgrade.stopped('HyperNetFixture', 'Host')
-        with patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 1)) as calls:
-            Upgrade.stopped('HyperNetFixture', 'Bridge')
-            self.assertEqual(calls.call_count, 9)
-
     def test_inspected_image_accepts_only_exact_bare_or_prefixed_sha256(self):
         value = {'Os': 'linux', 'Architecture': Bundle.image_architecture(Bundle.architecture())}
         for identity in (self.image, self.image[7:]):
@@ -237,35 +216,6 @@ class Packages(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     Bundle.image_matches(self.manifest)
 
-    def test_upgrade_changes_only_expected_image_and_preserves_profile_state(self):
-        profile = self.directory / 'Profile'
-        profile.mkdir(mode=0o700)
-        old_image = 'sha256:' + '4' * 64
-        control = {'name': 'HyperNetAuthority' + hashlib.sha256(str(profile).encode()).hexdigest()[:16],
-                   'image': old_image, 'authority': {'consent': 'Retained'}}
-        path = profile / 'Control.json'
-        path.write_bytes(Bundle.encode(control))
-        path.chmod(0o600)
-        state = profile / 'State'
-        state.mkdir(mode=0o700)
-        (state / 'Canary').write_bytes(b'Unchanged persistent state')
-        args = argparse.Namespace(kind='Authority', profile=profile, installation=self.directory / 'Installed',
-                                  public_key=Path(str(self.key) + '.pub'), ssh_keygen='/usr/bin/ssh-keygen',
-                                  state_schema=9, expected_image=old_image)
-        with patch.object(Bundle, 'installed_manifest', return_value=(self.manifest, {}, set())), \
-                patch.object(Bundle, 'image_matches'), patch.object(Upgrade, 'stopped') as stopped:
-            result = Upgrade.switch(args)
-            stopped.assert_called_once_with(control['name'], 'Authority')
-            self.assertFalse(result['started'])
-            self.assertEqual(Bundle.decode(path.read_bytes()), dict(control, image=self.image))
-            self.assertEqual((state / 'Canary').read_bytes(), b'Unchanged persistent state')
-            saved = path.read_bytes()
-            with self.assertRaises(ValueError):
-                Upgrade.switch(args)
-            self.assertEqual(path.read_bytes(), saved)
-            args.kind = 'SshService'
-            with self.assertRaises(ValueError):
-                Upgrade.switch(args)
 
 
 if __name__ == '__main__':

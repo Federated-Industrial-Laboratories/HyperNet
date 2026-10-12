@@ -812,9 +812,11 @@ pub fn parse(body: &str) -> Result<Document, &'static str> {
         assets,
     })
 }
+#[cfg(test)]
 pub fn validate(body: &str) -> Result<(), &'static str> {
     parse(body).map(|_| ())
 }
+#[cfg(test)]
 pub fn validate_profile(profile: &str, body: &str) -> Result<(), &'static str> {
     if profile != PROFILE {
         return Err("InvalidPageProfile");
