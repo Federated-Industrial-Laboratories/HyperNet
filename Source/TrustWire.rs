@@ -85,7 +85,14 @@ fn header(kind: u8, value: u64, out: &mut Vec<u8>) {
 }
 
 pub fn encode(value: &Value) -> Result<Vec<u8>> {
-    fn append(value: &Value, depth: usize, out: &mut Vec<u8>) -> Result<()> {
+    encode_bounded(value, MAXIMUM)
+}
+/// Retained application state uses a separate bound from untrusted wire messages.
+pub fn encode_state(value: &Value) -> Result<Vec<u8>> {
+    encode_bounded(value, crate::authority_capacity::MAX_STATE_BYTES)
+}
+pub(crate) fn encode_bounded(value: &Value, maximum: usize) -> Result<Vec<u8>> {
+    fn append(value: &Value, depth: usize, out: &mut Vec<u8>, maximum: usize) -> Result<()> {
         ensure!(depth <= 16, "record nesting limit exceeded");
         match value {
             Value::Uint(v) => header(0, *v, out),
@@ -102,21 +109,28 @@ pub fn encode(value: &Value) -> Result<Vec<u8>> {
                 ensure!(v.len() <= 4096, "record array limit exceeded");
                 header(4, v.len() as u64, out);
                 for item in v {
-                    append(item, depth + 1, out)?;
+                    append(item, depth + 1, out, maximum)?;
                 }
             }
             Value::Bool(v) => out.push(if *v { 245 } else { 244 }),
             Value::Null => out.push(246),
         }
-        ensure!(out.len() <= MAXIMUM, "record size limit exceeded");
+        ensure!(out.len() <= maximum, "record size limit exceeded");
         Ok(())
     }
     let mut out = Vec::new();
-    append(value, 0, &mut out)?;
+    append(value, 0, &mut out, maximum)?;
     Ok(out)
 }
 
 pub fn decode(bytes: &[u8]) -> Result<Value> {
+    decode_bounded(bytes, MAXIMUM)
+}
+/// This entry point is for already bounded retained state and checkpoint assembly.
+pub fn decode_state(bytes: &[u8]) -> Result<Value> {
+    decode_bounded(bytes, crate::authority_capacity::MAX_STATE_BYTES)
+}
+pub(crate) fn decode_bounded(bytes: &[u8], maximum: usize) -> Result<Value> {
     fn item(data: &[u8], cursor: &mut usize, depth: usize) -> Result<Value> {
         ensure!(depth <= 16, "record nesting limit exceeded");
         let first = *data
@@ -187,7 +201,7 @@ pub fn decode(bytes: &[u8]) -> Result<Value> {
             Ok(Value::Bytes(part.to_vec()))
         }
     }
-    ensure!(bytes.len() <= MAXIMUM, "record size limit exceeded");
+    ensure!(bytes.len() <= maximum, "record size limit exceeded");
     let mut cursor = 0;
     let value = item(bytes, &mut cursor, 0)?;
     ensure!(cursor == bytes.len(), "trailing record bytes");
@@ -287,5 +301,25 @@ mod tests {
         let end = altered.len() - 1;
         altered[end] ^= 1;
         assert!(envelope(&altered, 1).is_err());
+    }
+}
+
+#[cfg(test)]
+mod state_capacity_tests {
+    use super::*;
+    #[test]
+    fn retained_state_bound_does_not_expand_wire_ingress() {
+        let value = Value::Array(vec![Value::Bytes(vec![7; MAXIMUM + 1])]);
+        assert!(encode(&value).is_err());
+        let bytes = encode_state(&value).unwrap();
+        assert!(decode(&bytes).is_err());
+        assert_eq!(decode_state(&bytes).unwrap(), value);
+        assert!(decode_state(&vec![0; crate::authority_capacity::MAX_STATE_BYTES + 1]).is_err());
+        assert!(
+            encode_state(&Value::Bytes(
+                vec![0; crate::authority_capacity::MAX_STATE_BYTES]
+            ))
+            .is_err()
+        );
     }
 }

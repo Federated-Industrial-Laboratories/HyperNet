@@ -1,251 +1,224 @@
-# Confined federation bridge
+# Bridge service
 
-A bridge transfers explicitly shared Pages between two independent networks.
-It has two dedicated service identities, each with grant mask 9, and no incoming
-listener. Both administrators accept the same one-way treaty. The source author
-must share each exact publication, and the destination administrator must review
-it before local members can read it. See [Federation.md](Federation.md) for the
-wire protocol, limits and authority configuration.
+A role7 bridge connects its own network's current authority to explicitly
+consented counterpart bridges. Install a separate service in each network.
+Never lend one network's member, authority or service key to the other.
+[Federation.md](Federation.md) defines bilateral acceptance, publication and
+canonical proof contracts.
 
-The bridge is separate from ordinary hosting. Ordinary host consent cannot enable
-federation. Bridge identities cannot publish Pages,
-review submissions or administer either network. Neither bridge identity is an
-authority voter or an authority attestation signer.
+Before each bilateral lease, the source Anchor exchange certifies the selected
+Page or bounded inventory metadata with its own role7 identity. This prepares a
+cold cache before destination Admission starts. Source Export then uses that
+prepared authenticated context, with current exact-dependency checks at commit;
+it does not issue another general agreement lookup inside the fresh proof chain.
+Page-specific destination Admission returns the agreed media hosts, their current
+consent and governance dependencies, namespace placement policy and any existing
+qualified import state. The Bridge verifies this certified context before Import,
+including after restart. It cannot supply unsigned records to fill its cache.
+Inventory packets bind the exact certified share IDs and their final cursor.
+Withdrawn rights or changed publications refuse the protected operation rather
+than reusing a historical export grant.
 
-## Boundary and resource consent
+Admission, Export, Import, grant-free media authorisation and media maintenance
+receipts use a fixed challenge budget of at most 15000 ms. Each dependent step
+inherits the earliest certified expiry. Ordinary reader and reviewer operations,
+context lookups and stream controls retain the 5000-ms budget. The longer
+maintenance profile allows serial decisions but increases the maximum interval
+before an unknown remote revocation stops an already issued permission. Known
+revocation and local withdrawal still refuse immediately. Retries never extend
+an existing signed challenge. A multi-Page sync obtains separate bounded chains
+for each Page or media extent; it has no single global freshness lease.
 
-The bridge requires the same rootless Podman, cgroup v2, subordinate UID mapping,
-seccomp and Landlock profile as [Hosting.md](Hosting.md). It refuses missing
-restrictions. Its image and configuration are read-only; writable state is a
-bounded, non-executable tmpfs. It mounts no home directory, runtime socket,
-display socket or host devices. Both signing identities and both client TLS
-credentials are loaded before filesystem confinement. Core dumps are disabled.
+## Prepare the service
 
-One private internal network connects the bridge to two fixed relays. Each relay
-accepts only the bridge's private address, and forwards only to its consented
-literal IP address and port. Each has an explicitly selected egress network.
-The relays have no signing, CA or TLS identity keys. Separate TLS clients verify
-each original authority DNS name against only that endpoint's pinned CA; they
-use TLS 1.3 and disable proxies, redirects and endpoint discovery. The consent
-also binds the SHA-256 digest of the exact CA PEM file bytes.
+Use a dedicated role7 service identity and operator-signed manifest. The manifest
+has one writable state volume, one explicit IPv4 TLS listener and literal
+counterpart endpoint addresses/ports. Each counterpart includes its service key,
+transport public key and exact TLS leaf. Ports are unprivileged. The profile
+names the exact accepted treaty IDs and digests, selected volume and physical
+state budget. Host admission, current manager26, registrar13 and local operator
+consent remain separate checks.
 
-The relays remain part of the isolation boundary. Their egress networks are not
-per-address kernel firewalls. Container isolation shares the host kernel and
-does not claim virtual machine isolation. A consenting bridge operator can
-observe transferred plaintext in its process memory.
+TLS is version1.3 with mutually verified certificates and exact consented leaves.
+Use a CA accepted for both endpoint certificates, or a bounded CA bundle accepted
+by both operators. Certificates must authenticate the literal endpoint addresses.
+The service has no proxy, redirect, DNS-discovered URL or Page-provided route.
+TLS private keys remain only in the service's own private configuration.
 
-Bridge consent is one exact document signed by both service identities. Its
-JSON object contains `payload`, `sourceSignature` and `destinationSignature`.
-The payload is unpadded base64url JSON. Both signatures cover
-`HyperNet/BridgeConsent/2`, a zero byte and the exact decoded payload bytes.
-Its profile is SHA-256 of the complete document file, including any final newline.
-Register that same file on both networks; do not reformat it afterward.
+Create a private configuration directory containing exactly:
 
-The payload is:
+```text
+Bootstrap.cbor
+BridgeProfile.cbor
+Certificate.pem
+CertificateAuthority.pem
+Manifest.cbor
+Service.key
+ServiceConfig.json
+Transport.key
+```
+
+`Service.key` is the raw32-byte role7 signing seed. `Bootstrap.cbor` is the
+independently accepted own-network bootstrap. The other keys are distinct
+according to the manifest's permanent role rules. ServiceConfig.json is:
 
 ```json
 {
-  "version": 2,
-  "service": "FederationPages",
-  "agreementId": "ReplaceWithTreatyAgreementId",
-  "treatyDigest": "ReplaceWithTypedTreatyDigest",
-  "mediaProfiles": [],
-  "mediaSourceHosts": [],
-  "mediaDestinationHosts": [],
-  "mediaMaxBytes": 0,
-  "mediaRequiredCopies": 0,
-  "media": [],
-  "sourceNamespace": "Public",
-  "destinationNamespace": "Guests",
-  "source": {
-    "network": "ReplaceWithSourceNetwork",
-    "deviceKey": "ReplaceWithSourceBridgePublicKey",
-    "authorityKey": "ReplaceWithSourceAuthoritySigningPublicKey",
-    "authorityEndpoint": "https://source.example:8443/",
-    "authorityAddress": "192.0.2.10:8443",
-    "caCertificateDigest": "ReplaceWithSourceCaPemSha256"
-  },
-  "destination": {
-    "network": "ReplaceWithDestinationNetwork",
-    "deviceKey": "ReplaceWithDestinationBridgePublicKey",
-    "authorityKey": "ReplaceWithDestinationAuthoritySigningPublicKey",
-    "authorityEndpoint": "https://destination.example:8443/",
-    "authorityAddress": "192.0.2.20:8443",
-    "caCertificateDigest": "ReplaceWithDestinationCaPemSha256"
-  },
-  "expires": 1,
-  "memoryBytes": 134217728,
-  "pids": 32,
-  "cpuQuota": 50000,
-  "cpuPeriod": 100000,
-  "stateBytes": 1048576
+  "bootstrapFile": "/Config/Bootstrap.cbor",
+  "manifestFile": "/Config/Manifest.cbor",
+  "profileFile": "/Config/BridgeProfile.cbor",
+  "identityFile": "/Config/Service.key",
+  "stateFile": "/State/BridgeState.bin",
+  "controlSocket": "/Authority/Control.sock",
+  "clockWitnessFile": "/Clock/ClockHealth.cbor",
+  "listenSocket": "/State/Control/Control.sock",
+  "certificateFile": "/Config/Certificate.pem",
+  "transportKeyFile": "/Config/Transport.key",
+  "certificateAuthorityFile": "/Config/CertificateAuthority.pem",
+  "mediaHosts": []
 }
 ```
 
-Replace the example identities, endpoint addresses and expiry. Network and key
-identities, CA digests and the treaty digest are 32-byte lowercase hexadecimal
-values; `agreementId` is 16 bytes. All four device and authority keys must differ.
-The networks must differ. Namespace labels begin with an ASCII letter, contain
-only ASCII letters and digits, and have at most 32 bytes. There are no wildcards.
-The exact treaty fixes both namespaces, both networks, all four keys, Pages as
-the service, `HyperNetPage/2` as the grammar, and the maximum expiry.
+For media, mediaHosts is a sorted list of lowercase32-byte local role2 service
+keys in hexadecimal. Each must have an explicit `--media-service
+HOSTKEY=INSTALLED_DIRECTORY` setup argument. Setup checks the exact installed
+role2 profile and own network/incarnation. The service receives only that
+store's isolated Control directory at `/Media/HOSTKEY/Control`; it receives no
+store state, member key or authority key. Generated MediaBindings.json binds the
+exact source directories/profile digests to local operator consent. Container
+fingerprints also bind the actual mounts.
 
-Consent expires within seven days and no later than the treaty or either service
-membership. The resource ranges are 64 MiB through 8 GiB of bridge memory, 16
-through 512 PIDs, CPU quota 1000 through 800000 microseconds per 100000-microsecond
-period, and 1 MiB through 256 MiB of writable tmpfs. Effective cgroup and tmpfs
-limits are checked against the signature. The bridge writes status only; it does
-not persist page bodies. It retains at most 32 descriptors in memory, with at
-most four page transfers in progress.
+Only the Bridge confinement profile admits these exact media Control directories.
+Parent directories, store state and substituted paths remain inaccessible. Other
+service profiles do not gain media mounts.
 
-Consent additionally selects two fixed relay allowances. Each relay receives
-128 MiB memory, 32 PIDs, half a CPU, 8 MiB tmpfs, 16 simultaneous connections and
-an aggregate 1 MiB/s byte rate in both directions. Each connection direction is
-limited to 16 MiB; idle reads expire after ten seconds and blocked writes after
-five seconds. The bridge specification above therefore permits 384 MiB total
-memory, 96 PIDs, one and a half CPUs and 17 MiB tmpfs across all three containers.
-Logs are capped at 1 MiB per container. Image and private configuration storage
-are installation overhead outside these runtime quotas.
+## Install, consent and activate
 
-Enabled media repeats the exact treaty's five media fields. Each `media` route
-contains `network`, `hostKey`, `endpoint`, `address`, `caDigest`,
-`certificateDigest` and `authoritySigner`, equal to the registered store consent.
-Provide `MediaCa0.pem` through `MediaCa5.pem` in consent-route order as needed.
-Each route adds a separately isolated relay with 128 MiB memory, 32 tasks, half a
-CPU and 8 MiB tmpfs. It permits four connections at 1 MiB/s and 128 KiB per
-connection direction. The helper generates runtime media route entries and pins
-their relay addresses. The bridge never receives unrestricted network egress.
+Use `HyperNet runtime services setup` with `--directory`, `--configuration`,
+`--operator-key`, `--host-consent`, `--authority-directory` and `--clock-directory`.
+The authority directory supplies only its private Control directory. The clock
+directory supplies the signed ClockHealth.cbor witness. Add the explicit media
+service mappings when applicable.
 
-## Sign and register
+Review `runtime services preview`. Consent to its exact profile digest using
+`runtime services consent`. Start with the manager's exact quorum activation
+request using `runtime services start --activation-request`. The service stays
+under foreground supervision. It opens no listener until local consent,
+confinement and activation succeed. `status`, `stop`, `withdraw`,
+`activation-receipt` and `withdrawal-receipt` use the same installed lifecycle as
+other finite services.
 
-Create separate Suite profiles for each bridge identity, including its network's
-client TLS certificate. Admit each identity with grant mask 9. Configure each
-broker's dedicated federation signing key and accept the exact treaty on both
-networks before registration.
+The rootless container uses a private network with the consented published
+listener, no shared host PID namespace, a read-only root, denied capabilities,
+seccomp and Landlock. Only role7 gets its explicit TCP egress. Its dedicated UID
+is1000, with private requester/recipient journals and fixed state paths. The
+bridge's own clock, local withdrawal and activation are rechecked throughout
+operation. Storage is physically preallocated; working memory includes the
+old/new bank and encoding budget.
 
-Use the independent Suite to inspect the treaty, sign local consent and register
-that exact document on each network:
+## Operate and recover
+
+The Suite `federation bridge sync` command asks the destination bridge to import
+shared Pages. The bridge issues current local Admission and remote Export,
+imports the exact bundle, fetches source media, checks the complete asset digest
+and decoder, then uploads to the treaty's destination stores. Each store returns
+its own whole-asset copy receipt. This leaves the Page pending local review.
+`federation inspect`, `review-sign`, `review`, `read` and `media inspect/read`
+retain the separate local participant's rights and exact inspected revision.
+
+The installed local operator exchange is:
+
+```text
+HyperNet runtime services exchange --directory SERVICE \
+  --packet PACKET --receipt RESPONSE
+```
+
+The bridge Control socket accepts these canonical packets:
+
+```text
+[200,1,"BridgeLease",agreementId,sourcePage16?,native141?,afterShareId?,
+ localTrust150Bytes,localFloor157Bytes,includeBundle]
+[200,1,"BridgeSync",agreementId,sourcePage16?]
+```
+
+Responses are respectively
+`[201,1,"BridgeLease",proofBytes,objectSidecar]` and
+`[201,1,"BridgeSync",qualifiedPageIds]`. The private socket requires the same
+UID and existing private-directory/socket checks. A lease is inert until the
+participant independently verifies it and its local authority permits the
+requested operation. No unsigned local packet grants member authority.
+
+Peer TLS accepts only finite Anchor, Export and Media packets from the treaty's
+exact counterpart. Destination coordination obtains an Admission before asking
+the source for Export; the source does not call back into the waiting destination.
+Every proof/effect has its own existing monotonic deadline. A multi-Page local
+sync is bounded by service consent validity, without replacing those per-effect
+freshness checks.
+
+The bridge retains authenticated metadata, exact immutable bundles, its requester
+stream and the current upload payload. A restart resumes the retained operation;
+it cannot skip an uncertain effect or silently choose another request. If its
+original rights or proof expire, inspect its exact requester state while stopped:
 
 ```sh
-HyperNetSuite federation treaty Treaty.json
-HyperNetSuite federation sign-consent --spec Specification.json \
-  --treaty Treaty.json --source-identity SourceIdentity.json \
-  --destination-identity DestinationIdentity.json --output Consent.json
-HyperNetSuite --config SourceDevice/Profile.json federation register \
-  --consent Consent.json --certificate SOURCE_CLIENT_DER_SHA256
-HyperNetSuite --config DestinationDevice/Profile.json federation register \
-  --consent Consent.json --certificate DESTINATION_CLIENT_DER_SHA256
+HyperNet runtime services stop --directory /Private/Bridge
+HyperNet runtime services requester-status --directory /Private/Bridge \
+  --output /Private/BridgeExpected.cbor
 ```
 
-The certificate argument hashes the DER-encoded client leaf certificate, while
-the consent's CA field hashes the exact CA PEM file. Their roles differ. The
-signing command is offline and reports the exact profile digest. Registration
-checks the document, current membership, treaty, transport binding and expiry;
-it cannot create a membership or enlarge the treaty.
-
-## Initialise and operate
-
-Prepare a private configuration directory with exactly these required files:
-
-| File | Content |
-| --- | --- |
-| `Bridge.json` | Runtime configuration below |
-| `Consent.json` | Exact dual-signed consent document |
-| `Treaty.json` | The accepted treaty |
-| `SourceIdentity.json`, `DestinationIdentity.json` | Separate Suite service identities |
-| `SourceCa.pem`, `DestinationCa.pem` | Each network's pinned CA certificate |
-| `SourceClient.pem`, `DestinationClient.pem` | Separate client TLS certificates |
-| `SourceClientKey.pem`, `DestinationClientKey.pem` | Corresponding TLS private keys |
-
-```json
-{
-  "consentFile": "/Config/Consent.json",
-  "treatyFile": "/Config/Treaty.json",
-  "stateDirectory": "/State",
-  "media": [],
-  "source": {
-    "network": "ReplaceWithSourceNetwork",
-    "endpoint": "https://source.example:8443/",
-    "identity": "/Config/SourceIdentity.json",
-    "caCertificate": "/Config/SourceCa.pem",
-    "clientCertificate": "/Config/SourceClient.pem",
-    "clientKey": "/Config/SourceClientKey.pem",
-    "relayAddress": "192.0.2.1:8443"
-  },
-  "destination": {
-    "network": "ReplaceWithDestinationNetwork",
-    "endpoint": "https://destination.example:8443/",
-    "identity": "/Config/DestinationIdentity.json",
-    "caCertificate": "/Config/DestinationCa.pem",
-    "clientCertificate": "/Config/DestinationClient.pem",
-    "clientKey": "/Config/DestinationClientKey.pem",
-    "relayAddress": "192.0.2.2:8443"
-  }
-}
-```
-
-`Initialise` copies only these named files, gives their staged copies to the
-subordinate container ID, and rewrites all paths and both internal relay
-addresses. The source directory stays under the operator's control. Use the
-immutable image ID produced by [Package.sh](../Tools/Package.sh).
+The status prints the current generation and original completion, when known.
+Its output file contains the complete certified canonical own-stream metadata.
+Review that exact snapshot before choosing to fence the old requester generation:
 
 ```sh
-bash Tools/Bridge.sh Initialise /Private/BridgeProfile /Private/BridgeConfig \
-  "$(cat /tmp/HyperNetPackage/ImageId.txt)" SourceEgress DestinationEgress
-bash Tools/Bridge.sh Start /Private/BridgeProfile
-bash Tools/Bridge.sh Status /Private/BridgeProfile
-bash Tools/Bridge.sh Stop /Private/BridgeProfile
-bash Tools/Bridge.sh Restart /Private/BridgeProfile
-bash Tools/Bridge.sh Withdraw /Private/BridgeProfile
+HyperNet runtime services requester-fence --directory /Private/Bridge \
+  --expected /Private/BridgeExpected.cbor --output /Private/BridgeFenced.cbor
 ```
 
-The egress arguments name existing Podman networks. The destination defaults to
-the source egress network; omitting both selects `podman`. Each must reach only
-its required authority destination for successful operation. Do not attach other
-workloads to the bridge's private internal network.
+The comparison includes the entire metadata, including the retained completion;
+the generation number alone is insufficient. Changed metadata refuses a new
+fence. Inspect it again and make a new explicit decision. If a fence response is
+lost, repeat the command with the same expected file: the journal retains the
+exact signed fence. A completed retry checks its exact certified predecessor
+instead of creating another generation.
 
-`Start` acknowledges container creation. `Status` reports the process state and
-its latest JSON status, including `active`, `code`, `objects`, `leaseExpires`,
-`sourceEpoch`, `destinationEpoch`, `agreementId`, `profile` and confinement
-measurements. Readiness requires a running process, `active` set to true and an
-unexpired `leaseExpires`. `objects` counts refreshed imports, including pending
-or suppressed items; it does not mean those objects have destination approval.
-An empty permitted inventory can be active with zero objects.
+Fencing permits a later request in a new generation. It does not establish
+whether an old operation occurred, repeat an effect, restore withdrawn rights,
+or extend a foreign proof. Unknown outcomes and known original Permits remain
+in the requester journal. Recipient claims, cached restrictions and immutable
+payloads remain intact. The exact signed request for an archived original
+Permit preserves authentication of its predecessor cache after an interrupted
+publication. Those references authenticate historical bytes only: current
+generation floors still reject stale results and permissions. Cache records
+without current or exact original-Permit authentication block fencing; preserve
+that state. Never delete journals or reset a service identity to bypass an
+uncertain outcome.
 
-Each round obtains a fresh bilateral inventory. Each group of at most four pages
-then obtains new destination permits and source exports concurrently. Imports
-are ordered by source authority revision to prevent rollback. An unchanged
-descriptor renews evidence without retransmitting its page bundle. Changes or
-restarts require full proof and bundle verification. The bridge waits half a
-second between rounds and bounds each HTTP operation to two seconds. A network
-must complete its selected page inventory within the signed freshness interval;
-higher latency or contention can reduce practical capacity below 32 pages.
-Readiness fails closed instead of extending an expired lease.
+These commands require current local consent and an initialised, stopped role7
+service. Their finite confined helper has no network attachment, media control
+mount, activation or listener. It signs only its own stream controls and checks
+the existing authority proofs, local withdrawal and clock bounds. A successful
+fence leaves the service stopped. Start it normally with its manager activation
+request before issuing another sync.
 
-Source exports and destination permits last at most five seconds. Both proofs
-bind the same exact consent profile. Importing and reading recheck current local
-permission and remote signed evidence. A broken path, consent withdrawal, quorum
-loss or invalid reply clears bridge readiness; previously imported content stops
-being readable when its evidence expires. Backwards wall-clock movement stops
-the process. Destination review remains independent, and imported content cannot
-be re-exported as native content. Already delivered bytes cannot be recalled.
+Historical bytes remain inert. Local `withdraw` prevents subsequent service work
+without needing an online counterpart.
 
-`Withdraw` serializes against startup, writes a local tombstone, kills all three
-containers and removes them without contacting either network. A withdrawn
-profile cannot restart. For remote withdrawal, use `federation withdraw-consent`
-with each service's Suite profile. Stop locally first when immediate termination
-is required. A normal stop and restart retains consent but discards volatile
-state and obtains fresh authority decisions before reporting readiness.
+Stop the service before `runtime services epoch retained/seal/activate`. Migrate
+both requester and recipient journals to the same certified own-network
+committee, then select that committee's exact private authority directory.
+Counterpart epoch adoption is a separate FederationForeignSeal/ForeignActivate
+operation over its own accepted150/157 state. A changed incarnation is a new
+independent trust decision.
 
-Remove a stopped profile's named internal network and private profile directory
-when no longer needed. Subordinate-owned configuration files may require
-`podman unshare` for removal. Remove the adjacent `Lifecycle` directory only when
-all lifecycle commands have exited. Do not remove the original identities or
-unrelated Podman images, networks or containers.
+TLS handshakes and frame reads run independently of the local coordinator. The
+admitted connection and concurrent-operation limits bound pending ingress; the
+remaining signed memory budget can reduce that count. One requester journal
+still serializes all authority effects. Waiting for the other bridge does not
+prevent an authenticated inbound request from reaching that journal.
 
-Container supervisors enforce the remaining signed consent lifetime for each
-process, including every relay. Relays also close their listeners and existing
-streams at the absolute expiry, or on backwards clock movement. A stopped,
-failed or unresponsive service cannot extend a sibling relay beyond its runtime
-limit. Existing profiles should be reinitialised to add the relay deadline;
-starting them with the updated launcher still applies the container timeout.
+The current media upload extent is committed inside the same physical two-bank
+state file before its request is retained. A restart uses those exact bytes and
+an explicit idempotent recipient reconciliation. A retry within one exchange
+keeps the original monotonic deadline. Reconciliation cannot extend an expired
+foreign proof or create another intent for an uncertain effect.

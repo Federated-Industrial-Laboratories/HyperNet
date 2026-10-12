@@ -1,140 +1,99 @@
-# Mail protocol version 1
+# Mail protocol
 
-Mail authority commands use the signed `/V1/Command` envelope documented in
-[Protocol](Protocol.md). All objects reject unknown and duplicate JSON fields.
-Hexadecimal identifiers are lowercase. Binary encodings are unpadded URL-safe
-base64. The authoritative field definitions are in `Source/MailTypes.rs` and
-`Source/Types.rs`; alternate clients must preserve exact signed payload bytes.
+Mail is a finite `AuthorityDomain` application over the canonical authority wire
+format. It uses ordinary requester streams, exact committed snapshots and
+independently verified quorum results. It has no separate online authority
+signer. Canonical definitions are in `AuthorityMailCommands.rs`,
+`AuthorityDomainMail.rs`, `AuthorityMailObjects.rs` and `AuthorityMailRequest.rs`.
 
-A `SignedMailObject` contains `network`, `publicKey`, `payload` and `signature`.
-The Ed25519 signature covers `domain || network[32] || publicKey[32] || payload`,
-with decoded binary keys/network and decoded exact payload JSON. Domains include
-the final NUL byte: `HyperNet/MailManifest/1`, `HyperNet/MailHost/1`,
-`HyperNet/MailOperation/1`, `HyperNet/MailPermission/1`, `HyperNet/MailPolicy/1`
-and `HyperNet/MailReceipt/1`. An object digest is SHA-256 of the same full
-purpose-separated signature input, not the outer JSON or signature bytes.
+## Owner-signed objects
 
-Address IDs are SHA-256 of `HyperNet/MailAddress/1\0 || network[32] || owner[32]`.
-Device IDs are SHA-256 of `HyperNet/MailDevice/1\0 || address[32] || requestKey[32]`.
-A manifest payload contains `version`, `network`, `addressId`, `ownerKey`,
-`generation`, `previousDigest`, `expires`, `devices`, `storageHosts`,
-`requiredCopies`, `retentionSeconds`, `deleted`. Each device contains `deviceId`,
-`requestKey`, `mlsSignatureKey`, `permissions`, `expires`. A deleted manifest has
-no devices or hosts and zero required copies. Every positive manifest selects
-at least one store and one device. New generations invalidate outstanding public
-packages and claims for the affected mailbox; admitted historical ciphertext
-retains its original signed manifests and permission.
+The mailbox envelope contains `network`, `publicKey`, `payload` and `signature`.
+The payload is canonical JSON encoded as unpadded URL-safe Base64; the signature
+is canonical lowercase hexadecimal Ed25519. Its input is
+`HyperNet/MailManifest/1\0 || network[32] || publicKey[32] || exactPayload`.
+The manifest digest hashes that same input. Address and device identifiers hash
+`HyperNet/MailAddress/1\0 || network || owner` and
+`HyperNet/MailDevice/1\0 || address || requestKey`, respectively.
 
-## Authority commands
+Manifest fields are `version`, `network`, `addressId`, `ownerKey`, `generation`,
+`previousDigest`, `expires`, `devices`, `storageHosts`, `requiredCopies`,
+`retentionSeconds`, `deleted`. Each device names its derived `deviceId`, separate
+`requestKey` and `mlsSignatureKey`, explicit `permissions` and `expires`.
+Unknown fields, invalid identities, repeated keys and noncanonical encodings are
+refused. Deleted manifests contain no devices or stores and require zero copies.
 
-| Command | Command fields | Actor and result |
-| --- | --- | --- |
-| MailAddressCreate | manifest | Ordinary admitted member; addressId, generation, manifestDigest |
-| MailAddressUpdate | addressId, expectedGeneration, manifest | Owner; same result |
-| MailAddressDelete | addressId, expectedGeneration, manifest | Owner; same result |
-| MailAddressGet | addressId | Admitted member/current mail child/owner; manifest, authorityRevision, validUntil |
-| MailHostRegister | consent | Dedicated admitted host with matching mTLS; hostKey, generation, consentDigest |
-| MailHostWithdraw | hostKey, expectedGeneration | Exact known host key; hostKey, generation, active:false |
-| MailHosts | none | Directory reader; hosts, authoritySigner, authorityRevision, validUntil |
-| MailKeyPackagesPublish | addressId, deviceId, manifestGeneration, packages | Read child; published, consumedReferences |
-| MailKeyPackagesClaim | senderAddress, senderDevice, recipientAddress, recipientManifestDigest, claimId, expires | Send child; claim |
-| MailKeyPackagesClaimStatus | senderAddress, senderDevice, claimId | Same Send child; claim or null |
-| MailAuthorise | hostKey, operation | Exact mTLS store; signed permission; genuinely read-only |
-| MailPolicySync | hostKey | Exact mTLS store; signed selected-address policy; genuinely read-only |
+The MLS ciphertext profile remains `HyperNetMailMls1`. A letter contains a route,
+its original signed sender and recipient manifests, an MLS Welcome and encrypted
+MLS application message. Message and claim identifiers are32-byte digests.
+Every message is bound to exactly one certified claim and one ciphertext digest.
+Clients verify native package signatures, canonical references, credentials,
+lifetimes and the complete owner-signed receiving set before encryption.
 
-Each public key package has `deviceId`, `reference`, `expires`, `package`; the
-last two binary fields represent an MLS reference and TLS-encoded KeyPackage.
-A claim includes `version`, `network`, `senderAddress`, `senderDevice`, `claimId`,
-`recipientAddress`, `recipientGeneration`, `recipientManifestDigest`, `expires`,
-`packages`. It includes exactly one package for every current Read device.
-Publishing byte-identical current packages is idempotent. `published` counts
-new inventory only; `consumedReferences` reports exact retries already consumed
-without restoring inventory. Rebinding consumed package bytes is rejected with
-`MailKeyPackageConsumed`. Clients retain the associated private packages.
+## Certified records
 
-Directory freshness comes from a current authenticated authority response with
-revision and validity bound. Manifests and host descriptors remain independently
-signed. Pin the authority signer during trusted provisioning; directory discovery
-alone must not silently replace an existing pin.
+| Kind | Meaning |
+| --- | --- |
+|136 | Operator-signed Mail service profile, admitted manager and grant, withdrawal |
+|137 | Exact owner-signed mailbox revision, admitted manager/grant and private policy |
+|138 | Immutable native package for an exact mailbox revision |
+|139 | One-use package claim, original evaluation time and immutable placement; optional single ciphertext binding |
 
-## Store requests
+Mailbox revisions advance consecutively. A claim begins at generation1 and its
+single ciphertext binding produces generation2. Packages remain reserved after
+claim expiry or abandonment. Reservations never silently evict identity or
+one-use history. Overall authority state and record admission limits apply.
 
-`POST /V1/Mail`, content type `application/json`, carries
-`{"operation":SignedMailObject,"payload":base64-or-null}`. The payload is present
-only for Put. Responses use `{ok,code,epoch:0,result}`; actual authority epoch and
-revision are in the signed admission. TLS 1.3 is required; signed mail child
-requests authenticate the user, while the store uses a separate mTLS identity
-when consulting the authority.
+Commands cover MailContext, MailRegister, MailWithdraw, MailService, MailServices,
+MailPublish, MailGet, MailPackage, MailInventory, MailClaim, MailClaimGet,
+MailBind and MailExecute. Each command's canonical array and exact optional
+fields are defined by `Command::value` and `Command::parse`; unknown commands or
+fields are refused. Mutation responses are independently re-evaluated against
+current certified domain and governance records by the requesting client.
 
-Every operation contains `version`, `network`, `operationId`, `issuedAt`,
-`hostKey`, `action`, `addressId`, `deviceId`, `messageId`, `manifestGeneration`,
-`manifestDigest`, `payloadDigest`, `payloadBytes`, `after`, `route`. Address and
-device always identify the acting mailbox (the sender for Put and Receipt).
-Non-applicable optional fields are null. Requests are valid for at most 60 seconds
-with up to 30 seconds future clock tolerance. Permissions have no future slack.
+`MailExecute` is
+`[name,address,service,effect,message|null,claim|null,bytes,digest|null,after|null]`.
+Put names both message and claim with the same identity and includes exact
+ciphertext size/digest. Fetch and Delete name a message. List accepts an optional
+exclusive message cursor. Nonapplicable fields must be null or zero as specified
+by the finite parser. The challenge recipient is the exact current selected
+role3 service, while the signed requester is the authorized device.
 
-| Action | Required operation fields beyond actor identity | Result |
-| --- | --- | --- |
-| Put | route, messageId, payloadDigest, payloadBytes > 0 | signed Stored receipt |
-| Receipt | original route, messageId, payloadDigest; payloadBytes 0 | receipt or null |
-| List | optional after cursor; payloadBytes 0 | up to 32 signed receipts, next cursor or null |
-| Fetch | messageId; payloadBytes 0 | payload, original signed operation, original signed admission, receipt |
-| Acknowledge | messageId, payloadDigest; payloadBytes 0 | signed Received receipt |
-| Delete | messageId, payloadDigest; payloadBytes 0 | signed Deleted receipt |
+## Local exchange and receipts
 
-Put/Receipt require Send; List/Fetch/Acknowledge require Read; Delete requires
-Delete. The owner can sign Delete with `deviceId == addressId`. No other owner
-operation bypasses child read or send permissions. Every operation verifies the
-current parent admission, actor manifest, scope, selected store and host consent.
-Put additionally requires the current recipient manifest and complete live claim.
+A packet is canonical CBOR
+`[200,1,"MailExchange",signedOrdinaryIntent,ciphertextBytes,reconcile]`.
+Only Put carries ciphertext. Reconciliation requires the recipient journal's
+exact retained uncertain effect; it is not a new permission. The service obtains
+its own fresh challenge and committed history through the private authority
+control socket, retains the effect claim, then accesses its confined store.
 
-A route contains `version:1`, `profile:"HyperNetMailMls1"`, `network`, `messageId`
-(16-byte hex), `replacement`, `senderAddress`, `senderDevice`, `recipientAddress`,
-`recipientGeneration`, `recipientManifestDigest`, `claimId` (16-byte hex),
-`expires`. A MailCiphertext JSON object contains `route`, `senderManifest`,
-`recipientManifest`, `welcome`, `message`. The last two values encode MLS bytes.
-The operation payload digest hashes the exact raw MailCiphertext JSON. The store
-checks its route and independently signed manifest bindings; the recipient also
-checks the original operation/admission, exact ciphertext digest, required MLS
-receiving set, sender identity and encrypted route binding before displaying text.
+The result is
+`[201,1,"MailEffect",address,service,effect,message|null,status,body]`.
+Stored and Deleted have empty bodies. Fetched contains the exact certified
+ciphertext. Listed contains up to16 sorted entries
+`[message,ciphertextDigest,bytes,expiresMs]`; the last ID is the next exclusive
+cursor when the page is full. A full page may be followed by an empty page.
 
-A signed permission contains `version`, `network`, `authorityEpoch`,
-`authorityRevision`, `hostKey`, `hostGeneration`, `operationDigest`, `addressId`,
-`manifestGeneration`, `manifestDigest`, `issuedAt`, `expires`. It lasts at most
-five seconds and is not reusable for a different operation. A receipt contains
-`version`, `network`, `hostKey`, `hostGeneration`, `messageId`, `replacement`,
-`payloadDigest`, `recipientAddress`, `recipientGeneration`, `status`, `recordedAt`,
-`expires`. Historical admission is verified at its recorded acceptance time,
-not presented as a current grant. Clients independently obtain current read
-permission through the store before fetching it.
+The typed Mail receipt includes the signed request, challenge, quorum result,
+committed history and the service's purpose-bound signed completion. The client
+validates all of these against its independent bootstrap and authenticated epoch
+archive, refreshes its own stream status, and retains the local result before
+acknowledging the remote completion. Historical receipts cannot authorize a new
+effect or lower a retained prefix.
 
-## Host consent and limits
+## Bounds and changes
 
-A host consent contains `version`, `network`, `hostKey`, `generation`,
-`services:["Mail"]`, `endpoint`, `address`, `caDigest`, `certificateDigest`,
-`authorityEndpoint`, `authorityAddress`, `authoritySigner`, `memoryBytes`, `pids`,
-`cpuQuota`, `cpuPeriod`, `stateBytes`, `expires`. Both endpoints are HTTPS origin
-URLs and addresses are fixed literal socket addresses. Resource values bound the
-worker with the fixed relay overhead specified in [MailStore](MailStore.md).
+A mailbox has at most eight devices and four explicitly selected stores.
+Inventory discovery pages contain at most eight available packages. Each native
+package is at most4096bytes; ciphertext is at most128KiB. A metadata response has
+at most23 domain records: two mailboxes, eight packages, twelve current or
+historical placement stores and one claim. Governance dependencies and complete
+encoded response bounds still apply; an excessive result is refused atomically.
 
-The profile permits 64 lifetime addresses, 16 lifetime hosts, eight devices and
-four stores per address. Public inventory permits 32 packages/device, 256 total,
-eight per publication and 4096 decoded bytes/package. There are at most 128 live
-claims, 16 per sender and 32 per recipient. Up to 4096 consumed package hashes
-and their binding metadata remain for seven days. The overall authority state
-limit of 1 MiB may be reached sooner. State never evicts safety history silently.
-
-A MailCiphertext is at most 128 KiB; a store request is at most 192 KiB. A store
-retains at most 512 records, 64 per recipient, including deletion tombstones.
-Its fixed state-file capacity may bind earlier. Retention is 60--604800 seconds;
-manifest, device, claim and host lifetimes are bounded to seven days by their
-signed parent policies. Expired data and confirmed removed placements are
-pruned; temporary authority loss does not trigger destructive cleanup.
-
-Clients must handle `MailUnavailable`, `MailPermissionDenied`, `MailOwnerMismatch`,
-`MailGenerationConflict`, `MailClaimConflict`, `MailKeyPackagesUnavailable`,
-`MailKeyPackageConsumed`, `MailQuotaExceeded`, `MailStaleOperation`,
-`MailInvalidObject`, `MailPlacementDenied` and `MailMessageConflict`. Transport or
-unavailable-authority responses never imply delivery. Preserve encrypted pending
-state, query original receipts and retry exact accepted objects within current
-permissions. Do not choose an unselected fallback host.
+Changing a mailbox invalidates its unconsumed public inventory for new claims.
+New publications racing with claims or binds are resolved by committed order.
+A bound claim cannot be delivered after either exact mailbox revision changes.
+Existing ciphertext may be fetched only through a currently selected, consented
+store and a current Read device. Its original recipient keys and signed manifests
+remain the cryptographic authority for decrypting the old letter.

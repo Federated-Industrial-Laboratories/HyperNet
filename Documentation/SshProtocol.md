@@ -1,111 +1,120 @@
 # SSH service protocol
 
-This profile uses the signed `POST /V1/Command` envelope from
-[Protocol](Protocol.md). Network and signing keys are 32-byte lowercase hex;
-grant IDs are 16-byte lowercase hex. Unknown object fields are refused. There is
-no cross-network permission inheritance. Native OpenSSH transports application
-I/O directly; the authority never proxies SSH sessions or receives private keys.
+SSH management uses the canonical authority request, challenge, ordered command
+and quorum-result envelopes in [WireContract](WireContract.md). It uses the
+`AuthorityDomain` action. Network, incarnation, service, session and native-key
+identifiers are 32-byte values. Times are Unix milliseconds. A three-of-four executed result
+is accepted only through the configured consensus proof and retained history.
+An individual authority signature does not authorise a session.
 
-## Signed objects
+Native OpenSSH carries the selected program's input and output. Pages cannot
+launch SSH or construct a remote command. The fixed command belongs to the
+locally consented image; its SHA256 is independently pinned by the operator.
+Reader connections remain subject to the required relay policy.
 
-Object signatures cover the ASCII domain (including its final NUL byte), network
-bytes, public key bytes and exact decoded JSON payload bytes, in that order.
-Payload encoding is unpadded base64url. Signatures use Ed25519. The outer envelope
-contains `network`, `publicKey`, `payload` and `signature`.
+## Finite domain state
 
-`HyperNet/SshConsent/1\0` signs the complete operator specification described in
-[SshServices](SshServices.md). Native host keys are canonical `ssh-ed25519 BASE64`
-strings with no options or comment. Command and image digests are bare SHA256 hex;
-`imageDigest` excludes the OCI `sha256:` prefix. `certificateDigest` hashes the
-operator mutual TLS leaf certificate in DER form. A changed specification requires
-a strictly newer generation. Authority and operator signers are distinct.
+The authority application's domain state is
+`[200,1,"AuthorityDomainState",network,incarnation,records,keyReservations]`.
+Records and reservations are sorted and unique. A reservation is
+`[class,nativeKey,owner]`: class0 is a native SSH host key owned by its service;
+class1 is a native SSH user key owned by its admitted member. Reservations survive
+withdrawal, revocation and expiry. They cannot be converted into member,
+operator, service, transport, monitor or authority credentials.
 
-A grant is an object with `grantId`, `serviceKey`, `serviceGeneration`, `memberKey`,
-`sshPublicKey`, `account`, `purpose`, `expires`, `accepted` and `revoked`.
-`sshPublicKey` is canonical, and `account` is `HyperNetService`. Expiry is an
-absolute Unix second. A grant request lasts at most the signed
-`maximumSessionSeconds`, which cannot exceed 300 seconds. Accepted and revoked
-are authority-managed fields. Creation verifies native key possession but does
-not reserve permanent key ownership. Only explicit operator acceptance reserves
-the key, after rechecking ownership conflicts. A revoked ID cannot be reused.
+Domain records have the common form
+`[kind,1,network,incarnation,generation,predecessor,id,payload]`.
+The first generation has a null predecessor; each subsequent record names the
+exact digest of its predecessor. The implemented SSH kinds are:
 
-`HyperNet/SshLease/1\0` is signed by the distinct service authority key. Its fields
-are `version` (1), `network`, `authorityEpoch`, `authorityRevision`, `serviceKey`,
-`serviceGeneration`, `consentDigest`, `issuedAt`, `expires` and `grant` (the complete
-accepted grant). `consentDigest` is SHA256 of the consent signing bytes; the
-signature itself is not included. A lease expires within five seconds and never
-later than its grant. The supervisor verifies all fields against its local grant
-and consent before starting or continuing a session.
+| Kind | Identifier | Payload |
+| --- | --- | --- |
+| 132 | service key | `[operatorProfile,managerKey,managementGrantRef,withdrawn]` |
+| 133 | session ID | `[serviceKey,serviceRef,memberKey,nativeUserKey,memberGrantRef,purpose,expiresMs,accepted,revoked,nativeProof,creationIntentDigest]` |
+
+A service starts at generation1 and withdrawal creates generation2. A session
+starts at generation1. Acceptance and revocation each advance it once. A revoked
+session cannot subsequently be accepted. Only one accepted, unrevoked, unexpired
+session can exist per service. A session's service reference is exact; it cannot
+silently acquire a different command, host key, endpoint or operator.
+
+The signed profile uses the common canonical Ed25519 envelope. Its payload is:
+
+```text
+[200,1,"AuthoritySshProfile",network,incarnation,deployment,
+ serviceKey,operatorKey,nativeHostKey,commandSha256,endpointId,
+ purpose,maximumSeconds,[notBeforeMs,expiresMs],deploymentProfileRef,consentRef]
+```
+
+`deploymentProfileRef` is kind117 and `consentRef` is kind105 for the same
+deployment. The profile's service must be the deployment's exact role8 identity.
+The endpoint must occur in its signed host consent. The operator signs the
+profile. `maximumSeconds` is1..300. The account is the fixed `HyperNetService`;
+profiles cannot select another operating-system account.
+
+## Commands and authority
+
+Parameters are
+`[200,1,"AuthorityDomain",grantRefOrNull,command,[point,expectedRefs]]`.
+The signed intent repeats the exact resource, mutation flag and snapshot floor.
+Mutations require the complete current dependency set and exact prior authority
+point. Inspection accepts a retained causal point, with no permission rollback.
+The operation-specific command arrays are:
+
+| Command | Fields after name | Required authority |
+| --- | --- | --- |
+| `SshContext` | action, scope kind, resource | Current explicit20 or deployment-scoped26 |
+| `SshServiceRegister` | signed profile | Current manager26, admitted registrar13, operator profile and exact host consent |
+| `SshServiceWithdraw` | service, expected generation | Its exact operator or service; restrictive, including after expiry |
+| `SshServiceGet` | service | Current member20, or intrinsic operator, service or recorded manager inspection |
+| `SshServices` | network, after key or null | Current network-scoped20; at most16 records per page |
+| `SshGrantCreate` | session, service, native user key, proof, purpose, expiry | Current member20 for the exact service and native-key possession |
+| `SshGrantAccept` | session | The exact service or operator; rechecks current member and management authority |
+| `SshGrantRevoke` | session | Session member, exact service or operator; restrictive, including after expiry |
+| `SshGrantGet` | session | Session member, exact service or operator |
+| `SshAuthorise` | service, session | Intrinsic maintenance by that registered role8 service only |
+
+Intrinsic maintenance grants no reader or governance capability to a service or
+operator key. `SshAuthorise` requires the accepted current session, member20,
+manager26, registrar13, exact registration, host consent and profile. Withdrawal,
+revoked capabilities and expired consent refuse the operation.
+
+A permit result is
+`[201,1,"AuthorityDomain",versionRefs,[commandName,domainRecords,governanceRecords,nextKeyOrNull]]`.
+Every returned reference must match its enclosed canonical record. The consumer
+independently evaluates the finite operation and compares the complete result.
+A refusal is `[201,1,"AuthorityDomain",[]]`. The recipient identity is the signed
+requester for all of these SSH commands; it cannot be redirected to another key.
 
 ## Native key possession
 
-`SshGrantCreate.sshKeyProof` is unpadded base64url encoding of a detached OpenSSH
-SSHSIG binary object, without its textual armor. This profile requires version 1,
-namespace `HyperNetSshKey1`, an empty reserved field, hash algorithm `sha512`, and
-an `ssh-ed25519` signature. The SSHSIG public key must exactly match the request's
-canonical native key. All fields are length-bounded and trailing bytes are refused.
+`nativeProof` is unpadded base64url containing one detached OpenSSH SSHSIG object,
+without textual armour. It requires version1, namespace `HyperNetSshKey1`, an
+empty reserved field, SHA512 and an `ssh-ed25519` signature. Its public key must
+match the request. Fields are bounded and trailing bytes are refused.
 
-The message supplied to OpenSSH signing is the exact concatenation of ASCII
-`HyperNet/SshKeyProof/1` followed by a NUL byte, decoded 32-byte network ID,
-decoded 32-byte requesting member key and decoded 32-byte native public key.
-The standard SSHSIG signing structure hashes this message with SHA512 and binds
-its namespace. The member's outer request signature separately covers the entire
-grant specification, including the proof. A proof for another member or network
-cannot be reused. The proof demonstrates private-key possession, not a grant or
-operator approval. It can be reused by the same member for the same native key.
+The signed message is ASCII `HyperNet/SshKeyProof/1` followed by a NUL byte,
+network bytes, member-key bytes and native-public-key bytes. The normal SSHSIG
+structure hashes this message and binds its namespace. The member's canonical
+intent also signs the complete request, including its proof. The proof confirms
+possession; operator acceptance and current authority remain separate checks.
 
-## Authority commands
+## Lease consumption
 
-All commands require a current signed request. Members can discover active
-services; only the grant's member or operator can inspect its grant. A dedicated
-operator has hosting rights and permanent role separation from other credentials.
-Operator registration and acceptance require its exact mutual TLS certificate.
+The service signs a fresh recipient challenge for its own immutable request.
+Its private requester store durably retains current consensus and generation
+floors, stream sequencing and effect claims. Starting or extending the SSH child
+uses `perform_once`: an uncertain claimed effect is not silently retried after a
+restart. The owner must resolve or explicitly fence that requester generation
+before starting new work. Neither ordinary opening nor a network response can
+recreate a missing floor.
 
-| Type | Additional fields | Result |
-| --- | --- | --- |
-| `SshServiceRegister` | `consent` signed object | service record |
-| `SshServiceWithdraw` | `serviceKey`, `expectedGeneration` | withdrawal result |
-| `SshServiceGet` | `serviceKey` | `service` record |
-| `SshServices` | none | `services` records |
-| `SshGrantCreate` | `grantId`, `serviceKey`, `serviceGeneration`, `sshPublicKey`, `account`, `purpose`, `expires`, `sshKeyProof` | `grant` |
-| `SshGrantAccept` | `grantId` | accepted `grant` |
-| `SshGrantRevoke` | `grantId` | revoked `grant` |
-| `SshGrantGet` | `grantId` | `grant` |
-| `SshAuthorise` | `serviceKey`, `grantId` | signed `lease` |
-
-The service record contains signed `consent`, `consentDigest`, decoded `body` and
-current `active` status. Clients must verify the signed object and equality with
-the decoded body. Directory discovery does not grant access.
-
-`SshAuthorise` is a read-only, linearizable authority operation. It requires the
-service's current hosting identity and matching mutual TLS certificate. It checks
-service consent, grant acceptance, member state, purpose, generation and expiry
-on each request. Lost quorum cannot issue fresh permission. Supervisors retain
-durable epoch/revision floors and use a monotonic deadline derived from each
-lease's absolute expiry. A general authenticated member cannot call this endpoint
-as an operator or create a server lease.
-
-Errors use the common `ok`, `epoch`, `result` and `code` reply envelope. Refused
-commands do not imply that a retry is safe with changed content. Keep the same
-immutable grant request when reconciling a lost creation response. After expiry,
-revocation or generation change, request and explicitly accept a new grant.
-
-## Native transport boundary
-
-The operator image fixes the account, executable, SSH host key and resource
-bounds. The runtime checks the command hash and restrictions before listening.
-OpenSSH authenticates only the exact native client key in the accepted grant.
-There is no password, agent, remote command, forwarding, shell or PTY entitlement.
-Independent clients must verify the current grant and consent, pin the native
-host key, disable ambient SSH configuration and enforce absolute expiry.
-Operators must retain the separate server supervision even when clients enforce
-these restrictions. Client-side checks cannot constrain a malicious client.
-
-Authority retains at most 32 unexpired grants per member and 256 globally.
-Revoked grants remain until their original absolute expiry. Afterwards their
-metadata can be pruned without reviving their signed expiry or old acceptance.
-Native key ownership and role history are permanent, with at most 4096 distinct
-native keys per network. The same admitted member can reuse its dedicated SSH
-client key for fresh, separately accepted grants after old grants expire. Another
-member cannot adopt that key. General membership, mail and authority identities
-cannot use a reserved native SSH key.
+Each challenge lasts at most five seconds. The service also checks its exact
+local profile, native user key, signed clock and live operator withdrawal before
+and after the protected effect. A suspend-aware kernel timer invokes a dedicated signal handler that exits every
+supervisor thread at the conservative lease deadline, including when the event
+loop is blocked. The explicit handler is required because namespace PID1 ignores
+default fatal timer signals. PID1 exit makes the kernel kill its descendants.
+A renewal must complete within the previous deadline. An old result cannot
+extend the timer. Loss of quorum, invalid proof, clock failure or withdrawal
+ends the session and all descendants.

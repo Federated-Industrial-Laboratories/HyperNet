@@ -1,129 +1,168 @@
 # Application authority protocol
 
-Use the signed version-1 Request and Envelope in [Protocol](Protocol.md) over the
-configured TLS authority endpoint. Exact payload bytes, public signing key and
-network are signed under the existing `HyperNet/Request/1` domain. Public keys
-are 32-byte lowercase hexadecimal Ed25519 keys. Request IDs are 16-byte lowercase
-hexadecimal values. Application commands use no bearer token or impersonated
-member identity. Unknown and duplicate fields are refused by the strict schema.
+Application operations use the canonical signed intent, fresh recipient challenge,
+ordered request, executed-result certificate and durable requester stream in
+[WireContract](WireContract.md). Three distinct eligible authority signatures
+certify an executed result. Transport authentication alone grants no authority.
+The lifecycle interface uses the explicit local authority control channel.
 
-## Consent and creation
+All identifiers and public keys below are nonzero32-byte values. VersionRef,
+Validity and Snapshot have their [PolicyContract](PolicyContract.md) meanings.
+N and I denote network and incarnation. Arrays have exact arity and canonical
+encoding. Unknown fields, actions, alternate encodings and duplicate signatures
+are refused. No legacy permission-string consent is accepted.
 
-An application signs this command in a normal fresh envelope:
+## Identity and agreement
 
-```json
-{
-  "type": "ApplicationConsent",
-  "ownerKey": "OwnerPublicKeyHex",
-  "expires": 2000000000,
-  "namespaces": ["Board"],
-  "pageIds": null,
-  "permissions": ["PagesRead", "PagesSubmit"],
-  "reviewPolicyDigest": null,
-  "reviewMode": null
-}
+```
+[127,1,N,I,1,null,ApplicationKey,OwnerKey,GrantVersionRef,Validity,Snapshot]
+[128,1,N,I,1,null,ApplicationAdmissionVersionRef,WithdrawerKey,Snapshot]
 ```
 
-`ApplicationConsent` is proof of possession and agreement, not an executable
-command. The owner signs `ApplicationGrantCreate { "consent": Envelope }`.
-The authority verifies both envelopes, both timestamps, network and exact owner.
-The consent signer must be a separate unassigned identity. Retained application
-records, existing roles and active pending invitations exclude key reuse.
-Configured authority signing keys also cannot become applications.
+Kind127 is ApplicationAdmission; kind128 is ApplicationWithdrawal. Both use the
+application key as lookup ID. Generation is1 with null previous. Both are
+create-only and retain exact signed mutation evidence. Identity classification
+and stream reservation survive expiry, withdrawal and grant revocation.
 
-`expires` is an integer Unix timestamp, later than authority time, at most seven
-days ahead and no later than current owner membership expiry. `namespaces` holds
-one to eight sorted, unique strings valid under the existing Pages namespace
-syntax. `pageIds` is null for all pages in those namespaces, or one to sixteen
-sorted, unique 16-byte lowercase hexadecimal IDs. Permission strings are unique,
-lexicographically sorted and drawn from:
+The inert acceptance payload is:
 
-| Permission | Commands |
-| --- | --- |
-| `PagesRead` | `PageList`, `PageRead` |
-| `PagesSubmit` | `PageSubmit`, own `PageWithdraw` |
-| `ReviewInspect` | `PageQueue`, `PageInspect` |
-| `ReviewDecide` | `PageReview` with Approve or Reject |
-| `MediaRead` | Explicit media Fetch through approved native page references |
-| `MediaSubmit` | Native media reservation, upload, receipt and selected replication |
-| `MediaInspect` | Quarantine media Fetch and explicit inspection attestation |
-
-`ReviewDecide` requires `ReviewInspect`, a canonical 32-byte hexadecimal
-`reviewPolicyDigest` and `reviewMode` equal to `Manual` or `Automatic`. Otherwise
-both policy fields are null. Review permissions and `MediaInspect` require an
-administrator owner. Any explicit media permission permits `PageMediaHosts` with
-results restricted to the grant namespaces. Page permissions alone disclose no
-media bytes. Media rights retain namespace and page-ID restrictions.
-
-A successful creation returns `result.application`:
-
-```text
-ApplicationRecord {
-  ownerKey, applicationKey, grant, grantDigest, expires,
-  namespaces, pageIds, permissions, reviewPolicyDigest, reviewMode, revoked
-}
+```
+[200,1,"AuthorityApplicationAcceptance",N,I,ApplicationKey,OwnerKey,
+ GrantVersionRef,ApplicationValidity,Nonce,AcceptanceValidity]
 ```
 
-`grant` is the exact owner's signed envelope, including the nested consent.
-`grantDigest` is its normal request digest. All remaining scope fields repeat
-that consent; `revoked` starts false. No private keys are returned.
+The exact owner and application signatures cover identical payload bytes. The
+complete signed envelope is at most1024bytes. Nonce is a nonzero32-byte value.
+ApplicationValidity spans at most604800000milliseconds within the accepted grant;
+AcceptanceValidity spans at most86400000milliseconds within application validity.
+Both must conservatively cover the original registration. Acceptance contains no
+mutable Snapshot or requester sequence.
 
-## Lifecycle
+The accepted kind102 grant has the application as subject, the owner as issuer,
+and an exact parent whose subject is that owner. It has zero remaining delegation
+depth and excludes DelegateGrant. The owner must currently hold DelegateGrant
+through that parent, including all ancestor, tier, scope, admission and revocation
+checks. No member, reserved role or existing application key can be reassigned.
 
-| Command | Fields | Caller and result |
-| --- | --- | --- |
-| `ApplicationGrantGet` | `applicationKey` | Recorded owner or application; `application`, `authorityRevision` |
-| `ApplicationGrantList` | `after` (key or null) | Current ordinary owner; `entries`, `next`, `authorityRevision` |
-| `ApplicationGrantRevoke` | `applicationKey` | Recorded owner or application; `applicationKey`, `revoked: true` |
+The offline offer is bounded to8192bytes:
 
-List includes only the caller's own records in application-key order, strictly
-after `after` when supplied. At most eight entries exist per owner, and each
-complete reply is bounded to 262144 bytes. Large retained proofs can require
-multiple pages. When more records remain, `next` is the last returned application's
-key; supply it as `after` for the next request. The final or empty page has
-`next: null`. Exact signed grant bytes are never rewritten to reduce a page. Get and revoke remain available after grant or owner
-expiry or revocation while the record exists. Applications cannot list grants,
-create another grant or delegate their access. There is no update command.
-
-Create and revoke use ordinary exact-request transaction receipts. Retrying the
-same signed request returns its receipt only to the authorised caller; a reused
-request ID with different bytes returns `RequestConflict`. Read operations create
-no mutation receipt. Every successful application command preserves schema 9.
-
-## Page integration
-
-Applications sign ordinary Page commands. List and queue require an explicit
-allowed namespace; returned entries additionally obey the page-ID restriction.
-ReviewInspect is required even for inspection of an application's own submission.
-PagesSubmit permits withdrawal only of that application's own page. It does not
-allow withdrawing an owner's or another application's page.
-
-An application `PageReview` includes these additional fields:
-
-```json
-{
-  "applicationPolicyDigest": "PolicySha256Hex",
-  "applicationReviewMode": "Automatic",
-  "reviewExpires": 2000000000
-}
+```
+[200,1,"AuthorityApplicationOffer",OfferEnvelope,GrantBytes]
 ```
 
-Policy and mode must exactly match the grant. `reviewExpires` is required for an
-application review, later than authority time and at most 300 seconds ahead. It
-is checked on admission and again immediately before the publication transaction.
-An ordinary human PageReview omits policy and mode; it may carry `reviewExpires`
-when a bounded external-review job supplies the recommendation.
-Existing page ID, expected version, revision, digest, profile, author, namespace,
-audience, submission digest and decision bindings remain mandatory and unchanged.
-PageDescriptor and PageBundle shapes remain unchanged; proofs retain the actual
-application author or reviewer key. Current authority permission is always checked
-separately from archived signature verification.
+Acceptance replaces the owner-only envelope with the exact dual-signed envelope;
+the grant bytes remain identical. An application authenticates its owner against
+an independently verified key pin or the accepted genesis administrator set.
 
-Typical refusals are `InvalidApplicationConsent`, `InvalidApplicationScope`,
-`SeparateApplicationIdentityRequired`, `ApplicationPermissionDenied`,
-`ApplicationNamespaceRequired`, `ApplicationReviewMismatch`,
-`ApplicationUnavailable`, `ApplicationQuotaExceeded`, `InvalidReviewExpiry`,
-`ApplicationReviewExpiryRequired`, `InvalidExpiry`,
-`StaleRequest` and `ClockRollback`. Common authority and Pages errors also apply.
-Errors do not commit partial state. Capacity and bounded-resource details are in
-[Applications](Applications.md).
+## Scoped delegation context
+
+```
+[200,1,"AuthorityDelegationContext",ParentGrantId,ChildTierId,
+ OwnedChildGrantIdOrNull,MinimumPoint,MinimumVersions]
+```
+
+The requester must currently own the parent and have DelegateGrant through it.
+InspectAudit is unnecessary. Optional child disclosure requires that exact child
+to be issued by the requester under that parent and tier. Missing or unrelated
+children share the same finite refusal.
+
+A permitted value is:
+
+```
+[201,1,"AuthorityDelegationContext",Versions,[RecordBytes]]
+```
+
+The result contains the exact selected dependency closure, selected tier and
+optional child, including policy dependencies, current admissions and relevant
+revocations. It is limited to64 references and98304 encoded bytes. Pinned bootstrap
+records may be supplied locally when constructing the typed view. This closure
+is complete for its named selectors, not a complete governance enumeration.
+Its private cache is separately typed and scoped.
+
+MinimumPoint supplies a causal floor. Relevant returned records must meet their
+retained generation minima, including equal-digest checks at equal generations.
+Unrelated retained minima are preserved without demanding their disclosure.
+The consumer verifies the quorum and ancestry and saves its protected floor
+before exposing the result or installing its cache.
+
+## Lifecycle operations
+
+```
+[200,1,"AuthorityApplicationRegister",ParentGrantVersionRef,
+ AcceptedEnvelope,Snapshot]
+[200,1,"AuthorityApplicationGet",ApplicationKey,MinimumVersions]
+[200,1,"AuthorityApplicationList",OwnerKey,MinimumVersions]
+[200,1,"AuthorityApplicationWithdraw",ApplicationAdmissionVersionRef,Snapshot]
+```
+
+Registration requires the current consenting owner. It atomically creates127,
+its exact signed mutation evidence, the application stream and the owner's
+completion receipt. Snapshot and expected dependencies name the exact pre-state.
+An inert grant alone creates no application identity or stream.
+
+Get permits only the recorded owner or application. List permits only the named
+owner, equal to the requester. Neither requires live DelegateGrant or InspectAudit.
+A permitted Get value is:
+
+```
+[201,1,"AuthorityApplicationGet",Versions,AdmissionBytes,
+ AcceptedGrantBytes,WithdrawalBytesOrNull]
+```
+
+A permitted List value is:
+
+```
+[201,1,"AuthorityApplicationList",Versions,
+ [[ApplicationKey,AdmissionVersionRef,GrantVersionRef,WithdrawalVersionRefOrNull]]]
+```
+
+List contains the complete owner's set, sorted by application key. There is no
+pagination or truncation. At most63 rows fit the64 permanent stream slots when
+the owner is distinct. Only this result permits up to192 returned version
+references; ordinary exact expectations and dependency closures remain limited
+to64. Get and List report lifecycle state, not current domain permission.
+
+Withdrawal permits the recorded owner or application even after grant or ordinary
+owner admission expiry or revocation. It is a restrictive consent veto through
+the caller's permanent stream; it does not require RevokeGrant. The exact target
+and current Snapshot are mandatory. The resulting128 record is permanent.
+
+Registration and withdrawal return:
+
+```
+[201,1,Action,DependenciesAndCreatedRecord,CreatedRecordBytes]
+```
+
+Every refusal is `[201,1,Action,[]]` with effect zero. A permit has effect one.
+There is no Pending result. Limits, invalid authority, stale Snapshot, expiry,
+identity conflict and capacity use the finite authority refusal codes. Refusal
+cannot commit a partial identity, stream, record or audit entry.
+
+## Retry and historical evidence
+
+The client retains the exact signed request before transmission. A lost reply
+resumes that request with a fresh challenge; it never invents a new registration
+or resets an application's advanced stream. A retained completed registration
+can be disclosed after acceptance expiry without reapplying it. Withdrawal is
+not cleared, and the original completion bytes and dependencies remain exact.
+
+The historical confirmation is bounded to65536bytes:
+
+```
+[201,1,"AuthorityApplicationConfirmation",SignedIntent,SignedChallenge,
+ OrderedRequest,OperationResult,ExecutedResultCertificate,CommittedNode]
+```
+
+The client reserves this output capacity before submission and saves the
+confirmation inside its protected completion workflow.
+
+Offline confirmation verifies the exact acceptance, ordered request, result,
+quorum certificate and committed node. It reports the certificate's height and
+`currentPermission: false`; this may be a later exact-disclosure height. It does
+not import a caller's floor or provide a current capability.
+
+Each domain operation still checks the exact grant named by127, no128, current
+application validity, grant/tier chain, revocations, owner and ancestor admission,
+and all domain object, consent, audience and route requirements. Another grant
+to the same application does not expand its accepted authority. Archived proof
+or successful lifecycle inspection cannot bypass these checks.

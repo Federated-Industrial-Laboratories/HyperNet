@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Publish only a complete durable workload tree; retain all existing voter data.
 use super::super::{files::*, model::Profile};
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use std::{fs, os::unix::fs::MetadataExt, path::Path};
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -105,6 +105,28 @@ pub fn prepare(root: &Path, p: &Profile) -> Result<()> {
         "Preparation intent differs from profile"
     );
     if preparation.inode.is_some() {
+        let location = if root.join("Launch").exists() {
+            root.join("Launch")
+        } else {
+            pending.clone()
+        };
+        for relative in ["State/Authority", "State/Control"] {
+            podman(&strings(&[
+                "unshare",
+                "/usr/bin/test",
+                "-d",
+                location.join(relative).to_str().unwrap(),
+            ]))
+            .context("Prepared authority layout differs; explicit offline migration is required")?;
+        }
+        podman(&strings(&[
+            "unshare",
+            "/usr/bin/test",
+            "!",
+            "-e",
+            location.join("State/Replica").to_str().unwrap(),
+        ]))
+        .context("Old prepared signer layout requires explicit offline migration")?;
         return publish_preparation(root, &preparation);
     }
     ensure!(
@@ -156,24 +178,32 @@ pub fn prepare(root: &Path, p: &Profile) -> Result<()> {
             files.insert(destination);
         }
     }
-    for i in 1..=3 {
-        let state = pending.join(format!("Voter{i}/State"));
-        ensure_directory(&state)?;
-        ensure!(
-            fs::read_dir(&state)?.next().is_none(),
-            "Unpublished voter data requires explicit recovery; no data removed"
-        );
-    }
-    let consent = pending.join("Host/Consent.json");
-    prepared_file(&consent, &read(&root.join("HostConsent.json"), 16384)?)?;
-    files.insert(consent);
+    let state = pending.join("State");
+    ensure_directory(&state)?;
+    ensure!(
+        fs::read_dir(&state)?
+            .all(|entry| entry
+                .is_ok_and(|e| e.file_name() == "Control" || e.file_name() == "Authority"))
+            && !state.join("Replica").exists(),
+        "Unpublished signer state requires explicit recovery; no data removed"
+    );
+    ensure_directory(&state.join("Authority"))?;
+    ensure!(
+        fs::read_dir(state.join("Authority"))?.next().is_none(),
+        "Unpublished authority directory contains signer state"
+    );
+    ensure_directory(&state.join("Control"))?;
+    ensure!(
+        fs::read_dir(state.join("Control"))?.next().is_none(),
+        "Unpublished control directory contains unowned data"
+    );
     sync_preparation(&pending, &files)?;
     podman(&strings(&[
         "unshare",
         "/usr/bin/chown",
         "-R",
         "-h",
-        "1:1",
+        "1001:1001",
         pending.to_str().unwrap(),
     ]))?;
     podman(&strings(&[

@@ -1,110 +1,101 @@
 # Private mail
 
-HyperNet 0.4.0 provides public mailbox discovery and opaque, persistent mail on
-explicitly selected hosts. HyperNetSuite is a separate client implementing the
-`HyperNetMailMls1` end-to-end encryption profile. The infrastructure does not
-parse MLS plaintext or hold mailbox decryption keys. File transfer, SSH and
-cross-network mail routing are not part of this profile.
+HyperNet certifies mailbox metadata and stores opaque encrypted letters on
+explicitly selected, consenting Mail services. HyperNetSuite implements the
+`HyperNetMailMls1` encryption profile using a fresh MLS group for each letter.
+Storage services never receive mailbox decryption keys or message plaintext.
 
-## Identities and authority
+## Identity and placement
 
-An admitted ordinary member registers an owner-signed mailbox manifest. Its
-address is derived from the network and a separate Ed25519 owner key. Each
-address has distinct child request keys and MLS signature keys; those children
-are not network members. The registering member's current admission remains a
-prerequisite for every child operation. Device scopes are `Read`, `Send` and
-`Delete`; the owner manages the device list, selected stores, retention and
-address deletion. An owner may delete letters but cannot read them through the
-owner key. Applications receive their own scoped child device, not an owner key.
+An admitted manager publishes an independently owner-signed mailbox manifest.
+Its address is derived from the network identity and the separate owner key.
+The owner signs the exact device roster, store list, copy count, retention and
+expiry. Updates require the consecutive generation and exact predecessor digest.
+An administrator cannot replace that owner or silently add storage locations.
 
-A manifest update compares the current generation and previous signed-manifest
-digest. Removed child keys cannot be enrolled again, even with another device
-name. Renewal is an explicit owner update; device expiry must also be renewed
-when needed. An admitted owner may retrieve its own expired or deleted manifest
-to resolve an uncertain update or deletion result. Revoking the registering
-member disables all its mailboxes. Administrators cannot expand owner-selected
-placement through a network default.
+A private mailbox selects exactly one store and one required copy. Other
+mailboxes may explicitly select up to four stores. Network defaults cannot
+expand either policy. The mailbox manager must retain the current SendMail and
+ReadMail capabilities. Revoking these grants prevents dependent operations.
 
-The authority requires a separate `mailSigningKey`. It must differ from its
-federation signer and all member, host, owner and child keys. A store verifies
-fresh authority permissions under the exact signer pinned in its consent.
-Historical delivery admission is retained with the ciphertext so a recipient
-can verify an original accepted letter after subsequent manifest changes.
+Each device has separate request and MLS signing keys. Its owner grants `Read`,
+`Send` or `Delete` individually. Publication atomically admits request streams
+for these devices without granting membership, hosting or governance authority.
+Their identities remain reserved after removal; removal does not make a key
+available for a different role. Keep application devices in separate vaults.
+Sharing an owner's vault also shares the private keys in that vault.
 
-Public authority state contains signed manifests, selected-host descriptors,
-public one-use key packages and their claims, plus the private association to the
-registering member. It contains no ciphertext, subject, body, inbox index or
-store receipt. `MailAuthorise` and `MailPolicySync` perform linearizable reads
-without creating authority request receipts or transactions. Their signed
-permissions expire within five seconds. Authority loss denies new operations.
+## Claims and delivery
 
-## Delivery and storage
+A sender obtains a certified claim naming one unexpired package for every current
+Read device. The complete set is consumed atomically. A missing device package
+prevents the claim; expired or abandoned claims never return packages to use.
+Clients independently verify each actual MLS package, reference, signature,
+credential and lifetime before encryption.
 
-Before encryption, a sender claims one unexpired public key package for every
-current receiving device in the recipient manifest. The complete set is removed
-atomically; a missing device prevents the whole claim. The client verifies the
-actual MLS package, lifetime, reference, signature key and mailbox binding.
-Each letter uses a fresh MLS group; this is not a continuously joined group
-conversation. Public claims do not prove delivery or reveal a store inbox.
+The claim then binds one exact ciphertext digest and size. This binding cannot be
+replaced. Every Put names the claim as its message identity and rechecks the
+current sender, recipient revision, selected service and operator consent.
+Recipient removal or another manifest update before binding or delivery refuses
+that operation. A client must preserve its pending state after a timeout and
+resume the exact request; a timeout is not evidence that delivery failed.
 
-A sender selects only stores in the recipient's signed manifest, verifies their
-consented certificate/root and obtains a durable signed receipt from each
-required copy. A store requires a fresh authority permission for each exact
-operation and ciphertext digest. An acknowledgement records receipt by a
-reading device; deletion clears the local payload and retains a bounded signed
-tombstone until the route expires. Repeating the same message ID, route and
-ciphertext is idempotent. A different ciphertext for an accepted ID is rejected,
-even when its replacement counter increases. Uncertain multi-store delivery
-must be resolved through receipts before the client constructs any replacement.
-There is no atomic commit across several selected hosts.
+Each selected service provides a signed effect receipt with the exact quorum
+result and committed history. The client independently verifies it and retains
+it before acknowledging completion. Delivery to several stores consists of
+separate operations; there is no atomic transaction across stores. `delivered`
+means the manifest's required number of stores supplied verified receipts. It
+never means a recipient read the letter.
 
-Each store runs with one preallocated 8--64 MiB state file. Two banks hold
-checksummed generations; the usable serialized state is less than half of the
-file size. A commit fsyncs the new bank before returning a receipt, then clears
-the old bank. Restart selects the newest valid committed bank and clears an
-incomplete alternate bank. A damaged file with no recoverable bank fails closed;
-it never silently becomes an empty mailbox. A failed write requires process
-restart and recovery before another commit. Capacity also has explicit per-store
-and per-address limits, so delivery can fail before the byte bound is reached.
+Fetch and Delete require current recipient device rights. Historical ciphertext
+is authenticated against its original signed manifests and certified claim time.
+A reader commits the plaintext archive and destruction of its consumed private
+package in one age-encrypted snapshot before displaying the letter. An exact
+repeat uses that archive instead of consuming another package. Delete removes
+one remote copy; local archives and other selected copies remain separate.
 
-Current signed policy removes expired mail and removes copies from a store no
-longer selected by the recipient. Narrowed retention applies from the original
-local acceptance time, including retained deletion metadata. Fresh policy is
-checked at startup and normally every two seconds while the service runs.
-An authority outage denies fresh operations. An already running worker and relay
-continue running, retain encrypted state and retry policy synchronisation; they
-do not terminate merely because quorum is unavailable. Startup still requires a
-fresh policy. Host consent expiry terminates both processes, including suspended
-processes, and retains their encrypted state. Neither condition destroys valid
-retained mail merely because a network is down. Cleanup resumes once a valid
-fresh policy is available. An offline or malicious
-former store cannot be forced to erase a copy, and filesystem deletion cannot
-prove erasure from snapshots, flash media or backups. End-to-end encryption
-limits the content exposed by such copies.
+## Storage and transport
+
+Mail uses the installed role3 service described in [MailStore](MailStore.md).
+Each service has separate retained requester and recipient journals, a bounded
+preallocated ciphertext file, and a private local control socket. The recipient
+journal retains the exact effect claim before storage changes. Two checksummed
+banks preserve committed ciphertext and deletion tombstones across interruption.
+A corrupted file with no recoverable bank fails closed. Successful reads also
+persist the clock floor; restart cannot reopen expired data by rolling back time.
+
+The fixed file size and signed resource admission determine usable storage.
+Claims reserve space for their exact selected placements, including deleted
+entries until their claim expiry. Expired storage entries are removed during a
+subsequent authorized storage operation. Placement changes do not migrate old
+letters or promise immediate deletion from a former store.
+
+There is no direct TCP reader route or public Mail proxy. Clients explicitly
+choose an existing private local service socket or the installed service's
+bounded exchange command. An unavailable compatible route fails closed. Network
+relay routing requires a separately qualified implementation.
 
 ## Privacy and recovery limits
 
-TLS protects transport. Selected stores and the authority can observe routing,
-public mailbox identities, device relationships, size and timing. A selected
-store sees encrypted letters and local receipts. This profile does not provide
-traffic-analysis resistance or hide public directory data from admitted clients.
-Mail attachment execution and terminal escape interpretation are not supported.
+The authority sees public mailbox, device, package and claim metadata, including
+the ciphertext digest and size. A storage service sees ciphertext, local inbox
+identifiers and timing. This profile does not hide recipients or protect against
+traffic analysis. Page scripts, mail attachment execution and terminal escape
+interpretation are not supported. CLI output serializes message text as JSON.
 
-Keep identity and private client-vault backups under the owner's control.
-Removing a device blocks new permission but cannot revoke keys or plaintext it
-already obtained. Lost consumed private MLS key packages cannot be recreated by
-republishing their public package. The client must retain private packages until
-all admitted letters using them have been processed or deliberately abandoned.
+Removing a device or store restricts future authorized operations. It cannot
+erase plaintext, keys or ciphertext already retained by that party. Preserve the
+current encrypted vault and its separate age identity. Replacing a live vault or
+service journal with an old backup can roll back consumption or effect history;
+no local check can detect replacement of every local witness and private file.
+Do not resume uncertain backups under an existing live identity. Recovery of a
+lost authority committee follows [AuthorityEpochs](AuthorityEpochs.md), and does
+not automatically transfer confidential keys or trust to a successor network.
 
-Store revision, epoch, host generation and time floors are durable in the state
-file. Restoring an old copy of the entire file also restores those local floors;
-this is not an external anti-rollback witness. Do not resume an uncertain backup
-under the old live service identity. Register a fresh dedicated host identity,
-obtain new host consent and explicit mailbox placement, and treat old ciphertext
-as an offline recovery archive. This avoids claiming that an old deletion or
-receipt history remains current. Recovery archives are not automatically copied
-into a live store. The network itself retains the authority disaster-recovery
-rules described in [Authority operation](Authority.md).
+See [MailProtocol](MailProtocol.md) for wire contracts and HyperNetSuite's
+`Documentation/PrivateMail.md` for client commands.
 
-See [Mail store operation](MailStore.md) for deployment and
-[Mail protocol](MailProtocol.md) for independent client integration.
+Serving verification combines the sparse certified governance closure with the
+independently accepted bootstrap records. Returned records must match their exact
+certified references and cannot roll back retained generations. Bootstrap data
+does not replace missing live consent, delegated grants or withdrawal records.

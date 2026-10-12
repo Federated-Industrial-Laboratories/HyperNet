@@ -118,7 +118,9 @@ native URI: `hypernet://NETWORK/AUTHOR/Namespace/PAGE`. NETWORK and AUTHOR are
 Targets are ASCII, have at most 512 bytes and contain no spaces or controls.
 HTTPS references are displayed as external references; they are not fetched or
 opened automatically. Native navigation requires the client's configured network
-or an explicitly authorised federation agreement and fresh verified content.
+and fresh verified content. The current native browser refuses foreign-network
+addresses. Use the separate explicit [Federation](Federation.md) workflow to read
+an imported publication; a Page link does not select that route.
 
 The compact `=> TARGET LABEL` line creates a navigation button. Its label follows
 the same bounds. A display label never substitutes for the actual destination.
@@ -237,9 +239,10 @@ page text does not. The complete signed page bundle still binds every source byt
 
 A form-bearing publication has a maximum 20 KiB serialized signed bundle. The
 infrastructure checks the actual complete bundle before publication and on proof
-verification. The author client reserves the maximum permitted 4 KiB approval
-before uploading a form draft. Local preview uses maximum submission metadata as
-well, so its bound is conservative. Ordinary pages retain their existing limits.
+verification, including the exact native author and reviewer statements. Local
+preview validates the source without fabricating those statements; successful
+preview alone does not establish that the eventual signed bundle fits. Ordinary
+pages retain their existing limits.
 Serialized typed values have an 8 KiB limit, including JSON escaping and keys.
 The submission client separately checks the complete 32 KiB encrypted-mail body.
 

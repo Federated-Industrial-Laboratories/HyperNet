@@ -1,14 +1,26 @@
 // SPDX-License-Identifier: MIT
-use super::model::save;
+//! Import one existing authority appointment without opening listeners or starting workloads.
 use super::{files::*, model::*};
-use anyhow::{Result, ensure};
+use crate::{
+    authority_clock_handoff::Source,
+    authority_files,
+    consensus::{peer, records::Configuration, runtime::Config},
+    runtime_authorization::{Manifest, Resources},
+};
+use anyhow::{Context, Result, ensure};
 use clap::Args;
 use ed25519_dalek::SigningKey;
+use serde::Deserialize;
 use serde_json::json;
+use sha2::Digest;
 use std::{
+    collections::BTreeMap,
     fs,
+    net::{Ipv4Addr, SocketAddr},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Args)]
 pub struct Setup {
@@ -17,127 +29,57 @@ pub struct Setup {
     #[arg(long)]
     pub image: String,
     #[arg(long)]
-    pub etcd: PathBuf,
+    pub bootstrap: PathBuf,
     #[arg(long)]
-    pub etcdctl: PathBuf,
+    pub bootstrap_digest: String,
+    /// Prepare a non-serving future committee; committed nomination and readiness are still required.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub future_epoch: Option<u64>,
     #[arg(long)]
-    pub bind: std::net::Ipv4Addr,
+    pub voter_key: PathBuf,
+    #[arg(long)]
+    pub replica_config: PathBuf,
+    #[arg(long, num_args = 4, required = true)]
+    pub peer_certificate: Vec<PathBuf>,
+    #[arg(long)]
+    pub bind: Ipv4Addr,
     #[arg(long)]
     pub port: u16,
     #[arg(long)]
-    pub voter_port_base: u16,
-    #[arg(long)]
-    pub subnet: std::net::Ipv4Addr,
+    pub subnet: Ipv4Addr,
+    #[arg(long, default_value_t = 536870912)]
+    pub memory_bytes: u64,
+    #[arg(long, default_value_t = 64)]
+    pub pids: u64,
+    #[arg(long, default_value_t = 100000)]
+    pub cpu_quota: u64,
+    #[arg(long, default_value_t = 1073741824)]
+    pub state_bytes: u64,
     #[arg(long, default_value_t = 3600)]
     pub lifetime_seconds: u64,
-    #[arg(long,value_parser=["Session"])]
+    #[arg(long, default_value = "Session", value_parser = ["Session"])]
     pub session_policy: String,
 }
-fn issuance(root: &Path, args: &[String]) -> Result<()> {
-    run(Path::new("/usr/bin/openssl"), args, 15)?;
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        if entry.file_type()?.is_file() {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o600))?;
-        }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct Identity {
+    public_key: String,
+    secret_key: String,
+}
+impl Drop for Identity {
+    fn drop(&mut self) {
+        self.secret_key.zeroize();
     }
-    Ok(())
 }
-fn ca(pki: &Path, name: &str) -> Result<()> {
-    issuance(
-        pki,
-        &strings(&[
-            "req",
-            "-config",
-            "/dev/null",
-            "-x509",
-            "-newkey",
-            "ed25519",
-            "-nodes",
-            "-days",
-            "8",
-            "-keyout",
-            pki.join(format!("{name}Key.pem")).to_str().unwrap(),
-            "-out",
-            pki.join(format!("{name}.pem")).to_str().unwrap(),
-            "-subj",
-            &format!("/CN={name}"),
-            "-addext",
-            "basicConstraints=critical,CA:TRUE",
-            "-addext",
-            "keyUsage=critical,keyCertSign,cRLSign",
-        ]),
-    )
-}
-fn certificate(
-    pki: &Path,
-    name: &str,
-    issuer: &str,
-    cn: &str,
-    san: &str,
-    usage: &str,
-) -> Result<()> {
-    issuance(
-        pki,
-        &strings(&[
-            "req",
-            "-config",
-            "/dev/null",
-            "-new",
-            "-newkey",
-            "ed25519",
-            "-nodes",
-            "-keyout",
-            pki.join(format!("{name}Key.pem")).to_str().unwrap(),
-            "-out",
-            pki.join(format!("{name}.csr")).to_str().unwrap(),
-            "-subj",
-            &format!("/CN={cn}"),
-        ]),
-    )?;
-    let extension = pki.join(format!("{name}Extensions.txt"));
-    let san = if san.is_empty() {
-        String::new()
-    } else {
-        format!("subjectAltName={san}\n")
-    };
-    create(&extension,format!("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage={usage}\n{san}").as_bytes())?;
-    issuance(
-        pki,
-        &strings(&[
-            "x509",
-            "-req",
-            "-in",
-            pki.join(format!("{name}.csr")).to_str().unwrap(),
-            "-CA",
-            pki.join(format!("{issuer}.pem")).to_str().unwrap(),
-            "-CAkey",
-            pki.join(format!("{issuer}Key.pem")).to_str().unwrap(),
-            "-set_serial",
-            &format!("0x{}", &random_id()[..30]),
-            "-days",
-            "8",
-            "-extfile",
-            extension.to_str().unwrap(),
-            "-out",
-            pki.join(format!("{name}.pem")).to_str().unwrap(),
-        ]),
-    )
-}
-fn identity(root: &Path, name: &str) -> Result<String> {
-    let key = SigningKey::generate(&mut rand::rngs::OsRng);
-    create(
-        &root.join("Keys").join(format!("{name}.key")),
-        &key.to_bytes(),
-    )?;
-    Ok(hex::encode(key.verifying_key().as_bytes()))
-}
-fn copy(root: &Path, name: &str, destination: &Path, new_name: &str) -> Result<()> {
-    create(
-        &destination.join(new_name),
-        &read(&root.join("Pki").join(name), 65536)?,
-    )
+fn voter(bytes: &[u8]) -> Result<SigningKey> {
+    let identity: Identity = serde_json::from_slice(bytes)?;
+    let private = Zeroizing::new(crate::trust_bootstrap::hex32(&identity.secret_key)?);
+    let key = SigningKey::from_bytes(&private);
+    ensure!(
+        hex::encode(key.verifying_key().to_bytes()) == identity.public_key,
+        "Voter public and private keys differ"
+    );
+    Ok(key)
 }
 fn remember(
     root: &Path,
@@ -165,191 +107,285 @@ fn remember(
     Ok(())
 }
 pub fn setup(args: Setup) -> Result<serde_json::Value> {
-    for path in [&args.directory, &args.etcd, &args.etcdctl] {
+    for path in [
+        &args.directory,
+        &args.bootstrap,
+        &args.voter_key,
+        &args.replica_config,
+    ] {
         safe_path(path)?;
     }
     ensure!(
-        args.directory.as_os_str().len() <= 88,
-        "Runtime path is too long for its management socket"
+        unsafe { libc::geteuid() } != 0,
+        "Runtime setup requires an ordinary local user"
     );
-    ensure!(unsafe { libc::geteuid() } != 0, "Use a non-root operator");
+    ensure!(
+        args.directory.is_absolute()
+            && args.directory.to_string_lossy().len() <= 88
+            && !args.directory.exists(),
+        "A new absolute runtime directory with space for its private socket is required"
+    );
+    let parent = args.directory.parent().context("Runtime parent required")?;
+    super::files::root(parent)?;
     ensure!(
         (30..=604800).contains(&args.lifetime_seconds),
-        "Lifetime must be thirty seconds through seven days"
+        "Consent lifetime must be 30 seconds through seven days"
     );
+    let bootstrap = read(&args.bootstrap, MAXIMUM)?;
     ensure!(
-        args.directory.is_absolute() && !args.directory.exists(),
-        "Select a new absolute runtime directory"
+        hex_digest(&bootstrap) == args.bootstrap_digest,
+        "Bootstrap differs from its independently authenticated digest"
     );
-    let parent = args
-        .directory
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("Missing parent"))?;
-    private_dir(parent)?;
-    ancestors(parent)?;
+    let verified = crate::trust_bootstrap::inspect(&bootstrap, true)?;
+    let mut configuration = Configuration::trusted(verified.descriptor().canonical())?;
+    let secret = Zeroizing::new(read(&args.voter_key, 4096)?);
+    let key = voter(&secret)?;
+    let mut config: Config = json(&args.replica_config)?;
+    let purpose = if let Some(epoch) = args.future_epoch {
+        config.peers.sort_by_key(|p| p.key);
+        let committee: Vec<_> = config.peers.iter().map(|p| p.key).collect();
+        ensure!(
+            committee.windows(2).all(|w| w[0] < w[1])
+                && committee
+                    .iter()
+                    .all(|k| !verified.reservations().iter().any(|(_, old)| old == k)),
+            "Future committee must use four distinct fresh voter identities"
+        );
+        configuration.voters = committee.clone().try_into().expect("four configured peers");
+        AuthorityPurpose::FutureAuthority {
+            epoch,
+            committee: committee.iter().map(hex::encode).collect(),
+        }
+    } else {
+        AuthorityPurpose::Appointed
+    };
+    configuration.member(&key.verifying_key().to_bytes())?;
+    for path in [
+        &config.tls.certificate,
+        &config.tls.private_key,
+        &config.tls.certificate_authority,
+    ] {
+        safe_path(path)?;
+        ensure!(
+            path.is_absolute(),
+            "Absolute transport input paths required"
+        );
+    }
+    // This verifies all four identities, certificate pins and local credentials without connecting.
+    peer::transport(
+        &configuration,
+        key.verifying_key().to_bytes(),
+        &config.peers,
+        &config.tls,
+    )?;
+    let mut tls = BTreeMap::new();
+    for (name, path, private) in [
+        ("Certificate.pem", &config.tls.certificate, false),
+        ("PrivateKey.pem", &config.tls.private_key, true),
+        ("Authority.pem", &config.tls.certificate_authority, false),
+    ] {
+        tls.insert(
+            name.to_string(),
+            authority_files::read_single(path, 65536, private)?,
+        );
+    }
+    let mut endpoint_leaves = BTreeMap::new();
+    for path in &args.peer_certificate {
+        use rustls::pki_types::pem::PemObject;
+        safe_path(path)?;
+        let pem = authority_files::read_single(path, 65536, false)?;
+        let certificates = rustls::pki_types::CertificateDer::pem_slice_iter(&pem)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ensure!(
+            certificates.len() == 1,
+            "One exact leaf per peer certificate input is required"
+        );
+        let leaf = certificates[0].as_ref();
+        let digest: [u8; 32] = sha2::Sha256::digest(leaf).into();
+        let peer = config
+            .peers
+            .iter()
+            .find(|peer| peer.certificate_sha256 == digest)
+            .context("Leaf does not match any configured peer pin")?;
+        let transport = crate::runtime_manifest::leaf_key(leaf)?;
+        ensure!(
+            if purpose.future() {
+                !verified
+                    .reservations()
+                    .iter()
+                    .any(|(_, old)| old == &transport)
+            } else {
+                verified
+                    .summary
+                    .authority_transports
+                    .get(&hex::encode(peer.key))
+                    == Some(&hex::encode(transport))
+            },
+            "Authority transport is not reserved by the accepted bootstrap"
+        );
+        ensure!(
+            endpoint_leaves
+                .insert(hex::encode(peer.key), hex::encode(leaf))
+                .is_none(),
+            "Repeated peer certificate"
+        );
+    }
     ensure!(
-        parent.canonicalize()? == parent,
-        "Parent cannot contain symbolic links"
+        endpoint_leaves.len() == 4,
+        "Complete peer certificate inputs required"
     );
-    let current = std::env::current_exe()?.canonicalize()?;
-    let mut profile = Profile {
+    for endpoint in &mut config.peers {
+        let url = reqwest::Url::parse(&endpoint.origin)?;
+        let address: std::net::IpAddr = url
+            .host_str()
+            .context("Peer address absent")?
+            .trim_matches(['[', ']'])
+            .parse()?;
+        endpoint.origin = format!(
+            "https://{}/",
+            SocketAddr::new(
+                address,
+                url.port_or_known_default().context("Peer port absent")?
+            )
+        );
+    }
+    let clock_directory = match &mut config.clock {
+        Source::Signed {
+            path, public_key, ..
+        } => {
+            ensure!(
+                verified.summary.clock_monitors.contains(public_key),
+                "Clock monitor is not reserved by the accepted bootstrap"
+            );
+            safe_path(path)?;
+            ensure!(path.is_absolute(), "Absolute signed clock path required");
+            let parent = path
+                .parent()
+                .context("Clock parent required")?
+                .to_path_buf();
+            ensure!(
+                parent.canonicalize()? == parent,
+                "Clock parent cannot contain symbolic links"
+            );
+            ancestors(&parent)?;
+            let name = path
+                .file_name()
+                .context("Clock export filename required")?
+                .to_owned();
+            *path = Path::new("/Clock").join(name);
+            parent
+        }
+        Source::Private { .. } => {
+            anyhow::bail!("Installed authority requires a separately signed clock export")
+        }
+    };
+    config.listen = SocketAddr::from((Ipv4Addr::UNSPECIFIED, args.port));
+    config.control_socket = "/State/Control/Control.sock".into();
+    config.tls.certificate = "/Config/Tls/Certificate.pem".into();
+    config.tls.private_key = "/Config/Tls/PrivateKey.pem".into();
+    config.tls.certificate_authority = "/Config/Tls/Authority.pem".into();
+    let created = now()?;
+    let operator = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+    let manifest = Manifest {
         version: 1,
         deployment: random_id(),
-        network: random_id(),
-        incarnation: random_id(),
-        software_digest: executable(&current)?,
+        network: hex::encode(configuration.scope.network),
+        incarnation: hex::encode(configuration.scope.incarnation),
+        operator: hex::encode(operator.verifying_key().to_bytes()),
+        signer: hex::encode(key.verifying_key().to_bytes()),
+        bootstrap_digest: args.bootstrap_digest,
+        software_digest: executable(&std::env::current_exe()?.canonicalize()?)?,
         image: args.image,
-        etcd: args.etcd.clone(),
-        etcd_digest: executable(&args.etcd)?,
-        etcdctl: args.etcdctl.clone(),
-        etcdctl_digest: executable(&args.etcdctl)?,
+        created,
+        expires: created
+            .checked_add(args.lifetime_seconds)
+            .context("Consent deadline overflow")?,
         bind: args.bind,
         port: args.port,
-        voter_port_base: args.voter_port_base,
         subnet: args.subnet,
-        expires: now()?
-            .checked_add(args.lifetime_seconds)
-            .ok_or_else(|| anyhow::anyhow!("Time overflow"))?,
-        created: now()?,
-        operator: random_id(),
-        administrator: random_id(),
-        host: random_id(),
+        resources: Resources {
+            memory_bytes: args.memory_bytes,
+            pids: args.pids,
+            cpu_quota: args.cpu_quota,
+            cpu_period: 100000,
+            state_bytes: args.state_bytes,
+        },
+        config,
+        tls_digests: tls
+            .iter()
+            .map(|(name, bytes)| (name.clone(), hex_digest(bytes)))
+            .collect(),
+        endpoint_leaves,
         session_policy: args.session_policy,
-        selinux_relabel: selinux_enabled()?,
-        root: args.directory.clone(),
-        artifacts: Default::default(),
     };
-    profile.validate(&args.directory)?;
-    ensure!(
-        profile.subnet.octets()[2] < 254,
-        "Subnet needs an adjacent private /24"
-    );
-    directory(&args.directory)?;
+    if purpose.future() {
+        manifest.verify_future_bootstrap(&verified)?;
+    } else {
+        manifest.verify_bootstrap(&verified)?;
+    }
     let root = &args.directory;
+    let mut profile = Profile {
+        version: 1,
+        purpose,
+        manifest,
+        selinux_relabel: selinux_enabled()?,
+        root: root.clone(),
+        clock_directory,
+        artifacts: BTreeMap::new(),
+    };
+    profile.validate(root)?;
+    directory(root)?;
     reserve(root)?;
-    for name in ["Keys", "Pki", "Work", "AuthorityState", "Diagnostics"] {
+    for name in [
+        "Keys",
+        "Work",
+        "Work/Config",
+        "Work/Config/Tls",
+        "Authorization",
+        "Diagnostics",
+    ] {
         directory(&root.join(name))?;
     }
-    profile.operator = identity(root, "Operator")?;
-    profile.administrator = identity(root, "Administrator")?;
-    profile.host = identity(root, "Host")?;
+    fs::set_permissions(
+        root.join("Authorization"),
+        fs::Permissions::from_mode(0o755),
+    )?;
+    create(&root.join("Keys/Operator.key"), &operator.to_bytes())?;
+    create(&root.join("Work/Config/Bootstrap.cbor"), &bootstrap)?;
+    create(&root.join("Work/Config/Identity.json"), &secret)?;
     create(
-        &root.join("Keys/Invitation.secret"),
-        &rand::random::<[u8; 32]>(),
+        &root.join("Work/Config/ReplicaConfig.json"),
+        &serde_json::to_vec(&profile.config)?,
     )?;
-    let pki = root.join("Pki");
-    for name in ["NetworkCa", "HostCa", "VoterCa", "PeerCa"] {
-        ca(&pki, name)?;
+    for (name, bytes) in tls {
+        create(&root.join("Work/Config/Tls").join(name), &bytes)?;
     }
-    certificate(&pki, "Root", "VoterCa", "root", "", "clientAuth")?;
-    certificate(
-        &pki,
-        "BrokerStore",
-        "VoterCa",
-        "HyperNetBroker",
-        "",
-        "clientAuth",
-    )?;
-    certificate(
-        &pki,
-        "Authority",
-        "NetworkCa",
-        "HyperNetAuthority",
-        &format!("DNS:HyperNetAuthority,IP:{}", profile.bind),
-        "serverAuth",
-    )?;
-    certificate(&pki, "Host", "HostCa", "HyperNetHost", "", "clientAuth")?;
-    for i in 1..=3 {
-        let name = format!("Voter{i}");
-        certificate(
-            &pki,
-            &name,
-            "VoterCa",
-            &name,
-            &format!("DNS:HyperNetVoter,IP:127.0.0.1,IP:{}", profile.ip(10 + i)),
-            "serverAuth",
-        )?;
-        certificate(
-            &pki,
-            &format!("{name}Peer"),
-            "PeerCa",
-            "HyperNetVoter",
-            &format!("IP:{}", profile.ip(10 + i)),
-            "serverAuth,clientAuth",
-        )?;
-        let dir = root.join("Work").join(&name);
-        directory(&dir)?;
-        directory(&dir.join("Config"))?;
-        directory(&dir.join("State"))?;
-        for file in [
-            format!("{name}.pem"),
-            format!("{name}Key.pem"),
-            format!("{name}Peer.pem"),
-            format!("{name}PeerKey.pem"),
-            "VoterCa.pem".into(),
-            "PeerCa.pem".into(),
-        ] {
-            copy(root, &file, &dir.join("Config"), &file)?;
-        }
-    }
-    let authority = root.join("Work/Authority");
-    directory(&authority)?;
-    for (from, to) in [
-        ("Authority.pem", "AuthorityCertificate.pem"),
-        ("AuthorityKey.pem", "AuthorityKey.pem"),
-        ("HostCa.pem", "HostingCa.pem"),
-        ("VoterCa.pem", "VoterCa.pem"),
-        ("BrokerStore.pem", "BrokerCertificate.pem"),
-        ("BrokerStoreKey.pem", "BrokerKey.pem"),
-    ] {
-        copy(root, from, &authority, to)?;
-    }
-    let config = json!({"network":profile.network,"listen":"0.0.0.0:8443","stateDirectory":"/State","certificate":"/Config/AuthorityCertificate.pem","privateKey":"/Config/AuthorityKey.pem","clientCa":"/Config/HostingCa.pem","etcdEndpoints":(1..=3).map(|i|format!("https://{}:2379",profile.ip(10+i))).collect::<Vec<_>>(),"etcdCa":"/Config/VoterCa.pem","etcdCertificate":"/Config/BrokerCertificate.pem","etcdKey":"/Config/BrokerKey.pem","etcdServerName":"HyperNetVoter"});
-    super::files::save(&authority.join("Authority.json"), &config)?;
-    let mut initial = config;
-    initial["stateDirectory"] = json!(root.join("AuthorityState"));
-    initial["etcdEndpoints"] = json!(
-        (0..3)
-            .map(|i| format!("https://127.0.0.1:{}", profile.voter_port_base + i))
-            .collect::<Vec<_>>()
+    super::files::save(&root.join("Seccomp.json"), &seccomp()?)?;
+    remember(root, "Keys", &mut profile.artifacts)?;
+    remember(root, "Work", &mut profile.artifacts)?;
+    profile.artifacts.insert(
+        "Seccomp.json".into(),
+        hex_digest(&read(&root.join("Seccomp.json"), MAXIMUM)?),
     );
-    for (field, file) in [
-        ("certificate", "Authority.pem"),
-        ("privateKey", "AuthorityKey.pem"),
-        ("clientCa", "HostCa.pem"),
-        ("etcdCa", "VoterCa.pem"),
-        ("etcdCertificate", "BrokerStore.pem"),
-        ("etcdKey", "BrokerStoreKey.pem"),
+    profile.validate(root)?;
+    super::files::save(&root.join("Profile.json"), &profile)?;
+    for (name, bytes) in [
+        ("Manifest.cbor", profile.manifest.canonical()?.encode()?),
+        ("DesiredProfile.cbor", desired(&profile)?),
+        ("Withdrawal.json", b"0".to_vec()),
     ] {
-        initial[field] = json!(pki.join(file));
+        publish_public(&root.join("Authorization").join(name), &bytes)?;
     }
-    super::files::save(&root.join("Bootstrap.json"), &initial)?;
-    let host = root.join("Work/Host");
-    directory(&host)?;
-    for (from, to) in [
-        ("NetworkCa.pem", "Ca.pem"),
-        ("Host.pem", "Client.pem"),
-        ("HostKey.pem", "ClientKey.pem"),
-    ] {
-        copy(root, from, &host, to)?;
-    }
-    let host_key = key(root, "Host")?;
-    super::files::save(
-        &host.join("Identity.json"),
-        &json!({"secretKey":hex::encode(host_key.to_bytes()),"publicKey":profile.host}),
-    )?;
-    let octets = profile.subnet.octets();
-    let gate = format!("{}.{}.{}.3:8443", octets[0], octets[1], octets[2] + 1);
-    super::files::save(
-        &host.join("Host.json"),
-        &json!({"network":profile.network,"endpoint":"https://HyperNetAuthority:8443","stateDirectory":"/State","identity":"/Config/Identity.json","caCertificate":"/Config/Ca.pem","clientCertificate":"/Config/Client.pem","clientKey":"/Config/ClientKey.pem","consentFile":"/Config/Consent.json","relayAddress":gate}),
-    )?;
-    let gate_dir = root.join("Work/Gate");
-    directory(&gate_dir)?;
-    super::files::save(
-        &gate_dir.join("Gate.json"),
-        &json!({"listen":gate,"destination":format!("{}:8443",profile.ip(20)),"allowedSource":format!("{}.{}.{}.2",octets[0],octets[1],octets[2]+1),"expires":profile.expires,"bytesPerSecond":1048576,"maximumConnections":16,"maximumConnectionBytes":16777216}),
-    )?;
+    super::files::save(&root.join("Generation.json"), &1u64)?;
+    super::files::save(&root.join("SignerGeneration.json"), &1u64)?;
+    let state = State::new(&profile)?;
+    super::model::save(root, &state)?;
+    Ok(
+        json!({"status":"AwaitingConsent","generation":state.generation,"profileDigest":state.profile_digest,"deployment":profile.deployment,"signer":profile.signer,"expires":profile.expires,"backend":"BasicHotStuff","networkServing":false,"minimumSignerGeneration":1}),
+    )
+}
+
+pub(super) fn seccomp() -> Result<serde_json::Value> {
     let upstream = fs::read("/usr/share/containers/seccomp.json")?;
     ensure!(upstream.len() <= MAXIMUM, "Seccomp profile exceeds bound");
     let mut seccomp: serde_json::Value = serde_json::from_slice(&upstream)?;
@@ -375,22 +411,5 @@ pub fn setup(args: Setup) -> Result<serde_json::Value> {
             calls.push(json!({"names":["socket"],"action":"SCMP_ACT_ALLOW","args":[{"index":0,"value":family,"op":"SCMP_CMP_EQ"},{"index":1,"value":15,"valueTwo":1,"op":"SCMP_CMP_MASKED_EQ"},{"index":2,"value":protocol,"op":"SCMP_CMP_EQ"}]}));
         }
     }
-    super::files::save(&root.join("Seccomp.json"), &seccomp)?;
-    remember(root, "Pki", &mut profile.artifacts)?;
-    remember(root, "Keys", &mut profile.artifacts)?;
-    remember(root, "Work", &mut profile.artifacts)?;
-    for name in ["Bootstrap.json", "Seccomp.json"] {
-        profile
-            .artifacts
-            .insert(name.into(), hex_digest(&read(&root.join(name), MAXIMUM)?));
-    }
-    super::files::save(&root.join("Profile.json"), &profile)?;
-    create(&root.join("DesiredProfile.cbor"), &desired(&profile)?)?;
-    super::files::save(&root.join("Withdrawal.json"), &0u64)?;
-    super::files::save(&root.join("Generation.json"), &1u64)?;
-    let state = State::new(&profile)?;
-    save(root, &state)?;
-    Ok(
-        json!({"status":"AwaitingConsent","generation":state.generation,"profileDigest":state.profile_digest,"deployment":profile.deployment,"expires":profile.expires,"backend":"TrustedCrashFault","networkServing":false,"byzantineQualified":false}),
-    )
+    Ok(seccomp)
 }

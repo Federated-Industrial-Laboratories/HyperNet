@@ -1,11 +1,11 @@
 # Runtime and connection contract
 
-This is the HyperNet 0.8.0 replacement contract. Native runtime management and
-offline client preparation implement a bounded subset; their operation manuals
-state the current capabilities. The remaining authority and routing requirements
-are not an installed Byzantine-network claim. Policy, wire and authority requirements remain
-mandatory when these workflows are implemented. Runtime preparation can precede
-network availability; it cannot relax privacy or authority requirements.
+This is the HyperNet 0.8.0 replacement contract. The operation manuals describe
+the implemented native runtime, authority, serving and offline preparation
+workflows. Requirements below also cover remaining reader routes and deployment
+qualification; their presence here is not a claim that every workflow is ready.
+Policy, wire and authority requirements remain mandatory. Runtime preparation can
+precede network availability; it cannot relax privacy or authority requirements.
 
 ## Local management boundary
 

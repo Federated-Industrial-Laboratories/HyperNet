@@ -1,10 +1,11 @@
 # HyperNet 0.8.0 contracts
 
-These documents define the replacement network contract. Native runtime management
-and offline trust preparation implement the subsets stated in their operation
-manuals. The current serving authority retains its documented trusted crash-fault
-model. These specifications do not establish Byzantine consensus, relay privacy,
-sealed publication or complete replacement-network qualification.
+These documents define the replacement network contract. Native authority commands
+use the four-replica consensus protocol and require three matching executed-result
+signatures. The operation manuals describe current requester, serving-recipient,
+committee-replacement and recovery workflows. Specification and implementation
+alone do not establish deployment qualification. Complete relay coverage, sealed
+publication and the remaining platform qualification are separate requirements.
 
 | Contract | Defines |
 | --- | --- |
@@ -32,12 +33,15 @@ contribution and computational work confer no additional privilege. Configuratio
 cannot disable signature verification, quorum rules, local consent, user placement
 vetoes, exact approval, bounded parsing or client privacy minima.
 
-Basic HotStuff remains the fixed-committee specification. Complete synchroniser,
-crash-safe integration, certified state transfer, actual clock-health assurance
-and safe lost-key committee replacement require implementation qualification.
-The fixed-committee model does not supply a dynamic-membership protocol. Unknown
-or unsafe replacement paths must refuse rather than reconstruct authority from
-a convenient set of three signatures.
+Each epoch uses a fixed four-member Basic HotStuff committee. The installed
+replacement workflow terminates the old epoch and requires its certified handoff,
+complete retained state and successor readiness quorum. Its supported boundary
+is four fresh authority identities on distinct admitted deployments; it does not
+permit arbitrary overlapping membership changes. Missing old authority requires
+exceptional new-network recovery and independent acceptance. See
+[committee replacement](AuthorityEpochs.md) and [network recovery](NetworkRecovery.md).
+Clock-health assurance, persistence and installed interoperability must be
+qualified for the actual deployment; signatures alone cannot establish them.
 
 Online client joining requires the same approved relay connector used for all
 other reader requests. Offline provisioning alone does not grant membership.

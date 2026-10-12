@@ -8,35 +8,14 @@ package Policy with SPARK_Mode, Pure is
    use type Interfaces.Unsigned_64;
    use type Interfaces.C.unsigned;
 
-   function Effective
-     (Requested, Network, User, Host, Application : Mask;
-      Now, Expires, Current_Epoch, Minimum_Epoch : Mask;
-      Host_Active : Flag) return Mask
+   function Media_Range (Total, Offset, Count : Mask) return Flag
    with
-     Export, Convention => C, External_Name => "HyperNetEffectivePolicy",
+     Export, Convention => C, External_Name => "HyperNetMediaRange",
      Global => null,
-     Depends => (Effective'Result =>
-       (Requested, Network, User, Host, Application, Now, Expires,
-        Current_Epoch, Minimum_Epoch, Host_Active)),
-     Post =>
-       (if Host_Active /= 1 or else Now >= Expires
-           or else Current_Epoch < Minimum_Epoch
-        then Effective'Result = 0
-        else Effective'Result =
-          (Requested and Network and User and Host and Application))
-       and then (Effective'Result and not Requested) = 0
-       and then (Effective'Result and not Network) = 0
-       and then (Effective'Result and not User) = 0
-       and then (Effective'Result and not Host) = 0
-       and then (Effective'Result and not Application) = 0;
-   function Media_Chunk (Total, Offset, Count : Mask) return Flag
-   with
-     Export, Convention => C, External_Name => "HyperNetMediaChunk",
-     Global => null,
-     Depends => (Media_Chunk'Result => (Total, Offset, Count)),
-     Post => (Media_Chunk'Result <= 1)
-       and then (if Media_Chunk'Result = 1 then
+     Depends => (Media_Range'Result => (Total, Offset, Count)),
+     Post => (Media_Range'Result <= 1)
+       and then (if Media_Range'Result = 1 then
          Total > 0 and then Total <= 786432 and then Offset < Total
-         and then Offset mod 32768 = 0 and then Count > 0
-         and then Count <= 32768 and then Count <= Total - Offset);
+         and then Count > 0 and then Count <= 32768
+         and then Count <= Total - Offset);
 end Policy;

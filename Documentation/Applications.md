@@ -1,93 +1,80 @@
 # Scoped applications
 
-An application uses its own Ed25519 request key. A member approves its exact
-signed consent. The application never receives the member's private key and
-never becomes a member. Independent clients use the same TLS request endpoint
-and envelope as HyperNetSuite; the daemon has no client or model dependency.
+An application uses its own Ed25519 identity and a separately retained authority
+floor. Its owner and the application approve the same exact grant. Neither
+receives the other's private key. Registration establishes an application class;
+it does not make the application a member, host, reviewer or voter.
 
-The profile delegates native Pages and separately consented static media. A grant explicitly intersects
-permissions, one to eight exact namespaces and optionally one to sixteen page
-identifiers. There are no wildcards, namespace inheritance, updates or
-subdelegation. A changed grant requires a new application key. Mail's existing
-separate device grants remain independent. Application grants confer no mail,
-transfer, SSH, hosting, replica, imported-page, federation or membership access.
+The owner needs current DelegateGrant authority through the exact parent grant.
+InspectAudit is not required. A scoped delegation context reveals only that
+parent's dependencies, the selected tier and an optional child issued by the
+owner. It cannot enumerate other owners' applications or audit records.
 
-Media bytes require separate `MediaRead`, `MediaSubmit` or `MediaInspect` rights.
-Adding images to a page does not expand a text review or model disclosure grant.
-`MediaInspect` requires a current administrator owner and explicit acknowledgement
-after independent byte validation and static inspection.
+## Consent and registration
 
-Manual page review remains the default. `ReviewInspect` permits queue inspection.
-`ReviewDecide` additionally permits exact pending approval or rejection and
-requires `ReviewInspect`, a policy digest and an explicit `Manual` or `Automatic`
-mode. Both review permissions require the owner to remain a current administrator.
-Manual mode records an explicit client-selected decision; it is not cryptographic
-evidence that a person was present. A program holding that credential can sign
-Manual decisions. A policy digest identifies operator-selected policy bytes; it
-does not prove that a model applied that policy correctly. An Automatic grant is an explicit delegation
-of consequential review authority. Isolate its private key from untrusted content
-and model tools, and give it the smallest useful namespace and expiry.
+1. Initialise separate owner and application profiles from an independently
+   accepted bootstrap. Independently authenticate the owner's public key.
+2. Obtain the owner's scoped delegation context and create the exact child grant.
+   It is inert until the application is registered.
+3. Prepare an offer containing that grant and the owner's signed acceptance.
+   The application inspects the offer and signs the identical acceptance bytes.
+4. Refresh the owner's context and submit registration. Retain the signed request
+   and the resulting historical confirmation for interruption recovery.
+5. Initialise or reopen the application's own floor, obtain its stream status and
+   inspect its lifecycle record. Never import the owner's cache or floor.
 
-## Provisioning and use
+Grant actions and scopes use [PolicyContract](PolicyContract.md). The application
+grant cannot include DelegateGrant or further delegation depth. Its validity is
+at most seven days and lies within the accepted grant's validity. Changed rights
+require a new application key. Acceptance has a separate interval of at most
+24 hours and binds the exact network, incarnation, parties, grant and validity.
+A later unrelated authority operation does not alter this agreement.
 
-1. Provision every broker under the current authority state-9 contract. Preserve
-   authority floors, voter credentials and retained security history. Application
-   commands preserve that exact schema; no earlier state format is accepted.
-2. Provision a distinct application Ed25519 identity and the network's normal TLS
-   trust. Keep the identity file private. Do not reuse a membership, authority,
-   mail device, mail address owner or native SSH key.
-3. Have the application sign `ApplicationConsent` with the exact owner's public
-   key, expiry, resource lists and permissions. Send this proof privately to the
-   owner. Both the proof and owner's approval must meet request freshness limits.
-4. Have the owner sign `ApplicationGrantCreate` containing that exact envelope.
-   Check the returned record and preserve the exact request for an uncertain retry.
-5. The application checks `ApplicationGrantGet`, then signs permitted ordinary
-   Page commands with its own key. List and queue requests must specify an allowed
-   namespace. Specific-page operations must also match any page-ID restriction.
-6. For review, inspect the pending submission, verify its signed bytes and send
-   the existing exact-content `PageReview` fields. Supply the grant's policy digest
-   and mode from trusted local configuration, plus a signed `reviewExpires` at most
-   300 seconds ahead. Bound it to the review job's own expiry. Neither content nor output
-   selects keys, policy, endpoints, permissions or executable commands.
-7. The owner or application can sign `ApplicationGrantRevoke`. Check its confirmed
-   response. Revocation remains available after owner or grant expiry or revocation.
+Every domain use must verify the exact grant named by ApplicationAdmission,
+the application's current validity, absence of withdrawal, the full grant chain,
+current owner and ancestor admission, tiers, revocations and domain restrictions.
+An unrelated grant addressed to the same application cannot add permissions.
+Registration and historical confirmation alone never authorise a domain action.
+Mail, files, SSH, hosting, media and publication retain their own consent rules.
 
-[Application protocol](ApplicationProtocol.md) defines the independent wire API.
-[Page protocol](Protocol.md) defines the content and publication proofs.
-HyperNetSuite supplies application commands and a bounded private review-file
-exchange. Other clients may implement the same contract. Provision credentials to
-clients explicitly; a grant response contains public evidence, never private keys.
+## Inspection and withdrawal
 
-## Lifetime and recovery
+The owner or application can inspect its retained admission, accepted grant and
+withdrawal. The owner can list its complete application set as bounded metadata.
+These operations report lifecycle records, not current permission to use a domain.
+They remain available after ordinary grant expiry or revocation.
 
-A grant lasts at most seven days and never exceeds its owner's membership expiry.
-Each operation checks the current owner, resource scope, grant expiry and
-revocation. Review scope also checks current administrator status. A revoked or
-expired application cannot replay an old successful page mutation to bypass these
-checks. The owner can read or revoke their retained grant after losing membership;
-this permits inspection and attenuation, not new access or delegation.
+Either party can withdraw consent through its own permanent request stream.
+Withdrawal is restrictive and does not require RevokeGrant or a still-current
+delegation grant. It creates an immutable ApplicationWithdrawal record. Neither
+an old acceptance nor an exact registration retry clears that record.
 
-Published author and reviewer keys remain the actual signing identities. A page
-signed by an application becomes unavailable if that application's grant or owner
-loses the required permission. Authority and replica freshness is bounded to five
-seconds and ends sooner at grant or owner expiry. Archived signatures prove exact
-bytes, not current authorisation. Federation preserves this rule for a human
-publication reviewed by an application; application authors cannot opt into
-federation because their grants confer no federation-sharing permission.
+Revoking the accepted grant or any ancestor also removes its effective authority.
+Revoking only an owner's initial reader grant does not revoke that membership
+or unrelated grants. Previous disclosure cannot be undone: withdrawal does not
+erase plaintext or other bytes already retained by an authorised recipient.
 
-The authority retains at most eight application records per owner and 64 globally.
-Owner listing uses byte-bounded pages because exact signed proofs can be large.
-Follow each returned `next` key as `after` until `next` is null; the complete reply
-is at most 262144 bytes, and every admitted individual record fits one page.
-Expired records without page, live replica-ticket or mutation-receipt references
-are reclaimed when creating a grant. Revoked records remain until their original
-expiry. Referenced records reserve their keys, including page ownership tombstones;
-revocation does not erase publication history or copied content. Live receipts can
-retain an otherwise expired record for the normal request retry period. Capacity
-failure does not partly create a grant. Avoid unnecessary identity churn and plan
-long-lived authored pages around these documented record bounds.
+## Persistence and bounds
 
-State 8 retains service role histories, transaction receipts and clock floors. Application reclamation refuses any backward authority time;
-page application checks use at least the saved clock floor. Restore state only
-through the normal authority recovery procedure. Do not remove referenced grants,
-reset the schema or discard floors to downgrade a network.
+ApplicationAdmission and ApplicationWithdrawal are create-only records with
+exact signed mutation evidence. Application keys remain reserved after expiry
+or withdrawal. Streams are permanent; admission never resets a fenced stream.
+The authority supports 64 total requester streams, including root subjects and
+ordinary members, and 512 governance records. Capacity refusal creates no partial
+admission, stream or mutation evidence. No expiry-based reclamation is performed.
+
+Owner listing returns the complete sorted metadata set without pagination or
+truncation. With a distinct owner, at most 63 application entries can exist.
+Full grant bodies are available through individual inspection. Ordinary request
+dependencies retain their 64-reference bound; listing uses a separate bound.
+
+Retries preserve the exact durable request and completion. A fresh certificate
+can prove an earlier registration after its acceptance expires; that historical
+proof does not restore access. Keep each profile's private journal, causal floor,
+generation minima and pending request together. Do not reset them to recover
+from an uncertain outcome.
+
+[ApplicationProtocol](ApplicationProtocol.md) defines the wire records and
+operations. The independent HyperNetSuite application commands provide the local
+consent and lifecycle workflow. They do not start a model, provider or domain
+service on the application's behalf.

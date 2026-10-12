@@ -1,143 +1,96 @@
-# Static page media
+# Static Page media
 
-Page media uses dedicated hosts, permissions and storage. An approved page binds
-each asset's profile, dimensions, exact byte length, digest, host identities and
-required copies. The page also binds alternative text and local motion presets.
-The network transfers static assets. Viewers generate all animation frames locally.
+Page media consists of approved static assets on explicitly consented media
+hosts. A Page binds each asset's profile, dimensions, exact byte length, SHA-256
+digest, selected host identities and required copies. It also binds alternative
+text and finite local motion parameters. Viewers generate animation frames
+locally; the network transfers the static asset.
 
-`HyperNetRaster/1` contains exact row-major RGB bytes. `HyperNetVector/1` contains
-bounded typed geometry. The [HyperPage contract](HyperPage.md) defines both profiles.
-Media stores validate the complete canonical object before sealing it. They never
-parse image codecs, SVG, XML, fonts, stylesheets or executable content.
+`HyperNetRaster/1` contains row-major RGB bytes. `HyperNetVector/1` contains
+bounded typed geometry. The [HyperPage contract](HyperPage.md) defines both
+profiles. Media consumers validate these canonical objects and do not interpret
+SVG, XML, fonts, stylesheets or executable content. Importing an external format
+is a separate local conversion step and cannot extend the accepted wire grammar.
 
-## Authority configuration
+## Host and placement authority
 
-Use current authority state schema 9. Existing schemas are rejected. Every broker
-that serves media needs a `pageMediaSigningKey` configuration path. Its Ed25519
-identity must differ from membership, TLS, federation, mail and service identities.
-The isolated authority helper expects `PageMediaSigningKey.json` beside its config.
-Media permissions never accept a mail, transfer or page-read signing domain.
+Media hosting uses the admitted deployment's dedicated role 2 service identity.
+Page bundle hosting uses role 1 and does not inherit media storage rights. The
+operator signs an `AuthorityPageHostProfile` that embeds the exact deployment
+manifest and selects its role, service key, writable volume, namespaces, state
+admission, maximum asset bytes and retention. Those values must fit the admitted
+role and volume consent. Retention is at most seven days.
 
-The administrator sets `PageMediaPolicySet {minimumCopies}` to a value from 1 to 3.
-The default is 1. A submitted manifest must require at least this floor. Approval
-requires both the manifest count and the current administrator floor. Counts are
-host identities; two hosts on one physical machine do not prove independent uptime.
+`PageHostRegister` records this profile under current runtime management and
+hosting capabilities. The authority separately checks the exact deployment,
+operator consent, service registration, registrar and manager. `PageHostWithdraw`
+advances the host record to a withdrawn state. Possessing a service key, a member
+identity or an old signed profile cannot restore current hosting rights.
 
-## Host consent and isolation
+`PageMediaPolicy` requires `AdministerPlacement` (21) for the named namespace.
+It sets a minimum of one through three distinct selected host identities. With
+no explicit policy, the minimum is one. Approval requires the greatest of the
+Page manifest count, its retained reservation count and the current namespace
+minimum. Distinct identities alone do not prove independent physical machines
+or availability.
 
-A separate member identity with exactly `Member | Host` registers a signed
-`PageMediaHostRegister {consent}` request over its registered mutual TLS identity.
-Renewal cannot reduce capacity, namespace scope or retention below outstanding
-reservations. Withdraw the host consent to stop service before those limits end.
-The consent uses domain `HyperNet/PageMediaHost/1`, one zero byte, the network
-identity, signer identity and exact payload bytes, as defined for service objects.
-Its strict camelCase fields are:
+## Submission and review
 
-- `version: 1`, `network`, `hostKey`, `generation`, `services: ["PageMedia"]`.
-- `endpoint`, `address`, `caDigest`, `certificateDigest` for the store listener.
-- `authorityEndpoint`, `authorityAddress`, `authoritySigner` for its fixed broker.
-- `memoryBytes`, `pids`, `cpuQuota`, `cpuPeriod`, `stateBytes`, `expires`.
-- `namespaces`, a sorted nonempty list of at most 16 page namespaces.
-- `retentionSeconds`, from 1 through 604800 seconds, measured from reservation.
+Submitting a Page reserves every declared asset against exact current media
+host versions. Each selected host is charged the complete declared byte length and a
+conservative canonical encoding of its exact asset, host reference and complete
+copy receipt. The physical state admission covers two banks and their headers;
+only the usable serialized capacity of one bank admits live reservations.
+Existing unexpired reservations count against this same budget. The publisher's current signed limits and
+the canonical record and state budgets also apply. There is no additional fixed
+per-author asset-count quota.
 
-Endpoints are HTTPS roots. The signing identity differs from its TLS key. State
-capacity is 8 through 64 MiB in 4096-byte units. Resource bounds match the confined
-transfer store. Consent expires within seven days. Renewal increments generation;
-previous generation receipts do not satisfy approval until the objects are checked
-again at the renewed host.
+An asset reservation binds its immutable Page revision, descriptor, selected
+hosts, copy requirement, upload deadline and expiry. Upload ends within 24 hours
+and no later than the reservation expiry. Retention ends at the earliest author
+statement, deployment or selected host retention deadline. A changed source
+creates a different revision and new reservations; old bytes cannot silently
+be reassigned to it.
 
-`Tools/PageMediaStore.sh` provides Initialise, Start, Stop, Restart, Status, Renew
-and Withdraw operations. It creates one restricted worker and a fixed-destination
-broker relay. The worker has a read-only root, no capabilities, private namespaces,
-resource limits, seccomp and Landlock. Only `/State/PageMediaState.bin` is writable.
-Configuration is loaded before confinement. The preallocated state file is private,
-owned, not linked, locked and exactly the consented size. A two-bank checksum and
-fsync protocol recovers the last committed state without accepting damaged storage
-as a new empty store.
+A media host's copy receipt signs the network and incarnation, exact asset and
+host versions, request digest, complete object digest, byte length and recording
+time. `PageMediaReceipt` commits that receipt only for the current pending
+revision and selected live host. The host or the authorised publisher may
+submit it. The receipt demonstrates the host's assertion of an exact complete
+copy; it is not a review decision.
 
-The configuration file is `PageMediaStore.json`:
+A reviewer must independently retrieve and validate the complete asset, inspect
+its static representation, then issue `PageMediaInspect` naming the retained
+copy receipt. The authority binds this acknowledgement to the reviewer's exact
+grant, application policy if applicable, request and short expiry. Final Page
+approval requires this reviewer's current inspection of every asset and enough
+current consenting hosts with matching complete-copy receipts. Copy receipts
+alone cannot approve content. Approval of text cannot omit its declared media.
 
-```json
-{"network":"NETWORK_HEX","identity":"/Config/Identity.json","consentFile":"/Config/Consent.json","authorityCa":"/Config/AuthorityCa.pem","certificate":"/Config/Client.pem","privateKey":"/Config/ClientKey.pem","caCertificate":"/Config/Ca.pem","stateFile":"/State/PageMediaState.bin","listen":"0.0.0.0:8443","relayAddress":"192.0.2.1:8443"}
-```
+## Finite media effects
 
-The helper pins all mounted names and supplies the actual isolated relay address.
-Its authority relay overhead is separately bounded at 128 MiB memory, 32 tasks
-and 0.5 CPU. `pageMediaCacheBytes` in ordinary page-host consent stays zero: those
-workers do not receive media storage rights. A PageMedia identity is required.
+`PageMediaAuthorise` names one exact asset, host, operation, offset and byte
+count. Upload also binds the exact chunk digest. A request handles one through
+32768 bytes and must remain within the declared object. Upload is restricted to
+the current pending author; inspection requires the pending revision and review
+rights; read requires its current approved publication. The selected service is
+the only permitted effect recipient.
 
-## Upload, review and read
+The service verifies the quorum result and its durable recipient state before
+an effect. Its signed effect receipt reports the exact certified request and
+completion; importing a receipt cannot authorise another effect. The receipt
+also permits the requester to resolve an interrupted operation without repeating
+an uncertain effect. Authority or host withdrawal denies fresh permissions.
+Previously downloaded copies cannot be erased remotely.
 
-`PageSubmit` atomically reserves the manifest against live namespace-scoped hosts.
-No payload enters authority metadata. Each reservation charges its full logical
-bytes plus 4096 bytes of metadata allowance to every selected host. The aggregate
-allowance is at most one quarter of the host file capacity minus 64 KiB. This
-leaves room for base64, receipts, metadata and two durable banks. No deduplication
-reduces a logical charge. Each author has at most eight pending assets and 8 MiB
-reserved pending bytes. The authority tracks at most 256 active asset references.
+Native applications require explicit `MediaSubmit`, `MediaInspect` or
+`MediaRead` in their dual-signed Page application policy, intersected with the
+current native grant, namespace and optional Page scope. An asset digest, Page
+read permission or general application admission grants no independent upload
+or review authority.
 
-Unfinished uploads expire within 24 hours. All media expires by the shortest
-consented retention or selected host expiry. A new source revision needs a new
-reservation. An expired or withdrawn reference cannot silently revive through a
-fresh upload request.
-
-The store accepts only `POST /V1/PageMedia`, with JSON `{operation,payload}`.
-`operation` is a signed envelope in domain `HyperNet/PageMediaOperation/1`.
-`payload` is unpadded base64url for Put, and null for other actions. The operation
-contains these strict fields:
-
-```text
-version, network, operationId, issuedAt, hostKey, agreementId, admission,
-pageId, revision, assetId, sourceDigest, action, offset, chunkBytes, chunkDigest
-```
-
-Native references use null `agreementId` and `admission`. Put and Fetch use aligned
-32768-byte chunks; only the final chunk may be shorter. Status and Seal require
-zero offset and count and null chunk digest. Put binds its exact chunk digest.
-Each request obtains a fresh authority permission for this exact signed operation.
-A permission lives at most five seconds and is bounded by every applicable consent,
-reference and membership deadline. The SPARK policy checks chunk range arithmetic.
-
-Status supports resume. Repeating the same offset with the same bytes succeeds;
-changing those bytes fails. Seal checks exact length, dimensions, profile and SHA-256
-before returning a durable Complete receipt. Receipts use the independent domain
-`HyperNet/PageMediaReceipt/1`; permissions and cleanup policies use their respective
-`HyperNet/PageMediaPermission/1` and `HyperNet/PageMediaPolicy/1` domains.
-
-The author registers a sealed receipt with `PageMediaReceipt`, binding agreement,
-page, revision and asset. Before approval, a reviewer retrieves every asset, verifies
-all bytes independently, examines its static representation and registers a Fetch
-receipt in a signed `PageMediaReceipt` command. That command is the reviewer's
-attestation of inspection. The final chunk receipt alone is not proof that a human
-examined the content. Applications need explicit `MediaInspect` consent in addition
-to page review rights. A storage receipt by itself cannot approve content.
-
-Readers need a currently approved referring revision. Applications need explicit
-`MediaRead`; publishers need `MediaSubmit`. A digest by itself grants no access.
-The original author can explicitly fill another selected host for an approved
-revision, under the reserved quota. Ordinary readers cannot upload replicas.
-Withdrawal denies fresh permission immediately. Existing leases are at most five
-seconds and end sooner at a pending upload deadline or a publication signer's
-membership, application or application-owner expiry. Foreign publication access
-also ends at the local reviewer's expiry and the source export deadline.
-Downloaded or hostile copies cannot be erased remotely. Cleanup retains
-an object only while its exact referring revision remains valid and unexpired.
-Authority outages deny reads and uploads without treating them as deletion consent.
-
-## Federation
-
-Federation treaty version 2 and bridge consent version 2 explicitly name media
-profiles, source and destination host identities, per-page bytes and required
-copies. Empty media scope grants no media rights. The source page manifest remains
-unchanged; destination placements are separately bound by the treaty. Each media
-route pins its network, host identity, HTTPS endpoint, address, CA, certificate and
-media authority signer. The bridge uses an isolated fixed relay for each route.
-
-Source Fetch requires current source publication, author sharing consent, bridge
-consent and a fresh destination admission. Destination Put and Seal require the
-current imported revision and its fresh source export proof. The bridge transfers
-bounded static chunks and independently validates complete bytes before upload.
-Destination approval requires its own complete copies and moderator inspection.
-A source outage or withdrawal makes the destination reference unavailable after
-its short export lease; retained physical bytes do not become independently public.
-Neither treaty nor bridge consent version 1 acquires these permissions.
+Page metadata and object delivery use the ordered authority contract described
+in [Pages](Pages.md). Bulk media bodies stay with the consented hosts. Federation
+and reader relay routes have separate admission and privacy contracts; these
+native media records do not authorise a direct Internet reader route or a
+foreign publication.

@@ -22,7 +22,10 @@ The transient kinds are 106, 115, 116 and 119-124. Every other kind below is a
 persistent generation-controlled record, including immutable publication records.
 Signatures cover the purpose-separated exact canonical record bytes using the
 common envelope. A signature cannot be moved between record kinds or networks.
-Only initial NetworkPolicy, RecoveryPolicy, TierPolicy and root Grant records
+Local105/117/118 artifacts bind signed local lifecycle state and have no mutable
+Snapshot field. Their ordered admission carries its own Snapshot. Immutable131
+is authenticated genesis state without a Snapshot. Only initial NetworkPolicy,
+RecoveryPolicy, TierPolicy and root Grant records
 inside the exact descriptor-pinned GenesisGovernance bundle have null
 expectedSnapshot. Its finite contents, initial administrator admission and
 reference checks are defined in WireContract.md. These records have generation
@@ -34,7 +37,8 @@ Record lookup IDs are fixed, not supplied as alternate aliases: kinds 100 and
 114 use network; 101 uses tier; 102 uses grant; 103 uses client; 104 uses object;
 105,117,118 use deployment; 107 uses member; 108 uses device; 109 uses the exact
 referenced DeviceBinding record digest; 110 uses audience; 111-113 use publication.
-All transient kinds use operation. A VersionRef must match this lookup ID, kind,
+125 uses member;126 uses the referenced Grant lookup ID;127/128 use application;
+129/130 use deployment;131 uses network. All transient kinds use operation. A VersionRef must match this lookup ID, kind,
 generation and exact record digest together. Conflicting aliases are refused.
 
 In JSON vector presentation, unsigned 64-bit values are canonical decimal
@@ -215,6 +219,103 @@ turn denial into permission. For privacy assurance take the stronger requirement
 for accepted sets take intersection; for upper resource limits take minimum;
 for expiry take earliest. Mandatory signature, quorum, exact approval, freshness,
 placement-veto and confinement checks have no configurable false value.
+
+### Permanent grant revocation
+
+`GrantRevocation` is persistent kind 126. It has the common six-field prefix
+and the exact body `[grant, revoker, expectedSnapshot]`. Grant is a VersionRef
+to kind 102; revoker is an Ed25519Key; expectedSnapshot is a non-null Snapshot.
+Its lookup ID is `grant.id`, not the revoker key or the referenced record digest.
+The revocation record has its own generation and digest and is included in
+certified VersionRefs and exact expected-version checks.
+
+Ordered insertion must verify that the referenced grant generation and digest
+existed, the revoker has the applicable current RevokeGrant authority, and the
+complete expected snapshot still applies. A signature or syntactically valid
+record alone does not establish that authority. Parsing already authenticated
+committed state does not repeat this historical insertion check: its current
+grant generation must be at least the referenced generation, with exact digest
+equality when the generations are equal.
+
+Once committed, this record is a permanent tombstone for the grant ID. Every
+capability check denies a grant if that grant or any ancestor has a tombstone.
+Later grant generations, changed keys or subjects, and newly delegated descendants
+cannot restore authority through the revoked ID. Grant IDs cannot be reused.
+State transitions, compaction and recovery must retain the tombstone; deletion
+or a replacement record that restores the grant is forbidden. Retaining a
+reference to an older grant generation does not invalidate its revocation.
+
+## Membership admission
+
+`MemberAdmission` is persistent kind 125. Its body is
+`[member, signingKey, validity, revoked, readerGrant, expectedSnapshot]`.
+Member is Id, signingKey is Ed25519Key, validity is Validity, revoked is Bool,
+readerGrant is an exact VersionRef to a Grant for that signing key, and
+expectedSnapshot is non-null Snapshot. Signing keys occur in at most one
+current membership record. Admission requires the explicit AdmitMember
+capability and commits the particular reader grant; membership does not
+imply its scopes, validity, limits or any other action. Grant validation
+continues to apply independently at use. Revocation is a new generation and
+cannot be undone by resubmitting an earlier invitation or admission.
+
+The exact root subjects in the descriptor-pinned GenesisGovernance receive
+only its initial governance admission. They do not require an invented genesis
+MemberAdmission record. Ordinary membership, host consent and recipient-device
+admission remain separate.
+
+Member creation requires an administrator offer and the candidate's signature
+over the same immutable acceptance payload. It binds the network, incarnation,
+member ID, signing key, exact reader grant and bounded validity. The final ordered
+request adds its current Snapshot after acceptance. A later state change does
+not alter what the candidate signed; changed membership semantics require new
+acceptance. The full signed intent survives in bounded canonical mutation evidence.
+
+Delegation and admission are separate capabilities. A reader grant may exist
+before admission, but it confers no usable authority on an unadmitted candidate.
+Admission creates one permanent request-stream entry. It does not grant
+InspectAudit, host consent, review, voting or a confidential publication audience.
+Reserved voter, recovery, transport and genesis administrator keys cannot become
+ordinary members. Applications and services must use their own admission classes.
+
+The current member transaction is create-only. Grant revocation removes that
+grant and its descendants, including a revoked initial reader grant. It does not
+revoke the membership record or an unrelated separately granted capability.
+
+## Application identities and withdrawal
+
+`ApplicationAdmission` (127) uses the persistent common prefix and body
+`[applicationKey, ownerKey, grantVersionRef, validity, snapshot]`.
+The application key is its lookup ID. The owner is an admitted root subject or
+ordinary member with current DelegateGrant authority through the exact parent.
+The accepted grant names that application as subject and the owner as issuer;
+its parent names the owner as subject. The grant has zero delegation depth and
+excludes DelegateGrant. Application validity is at most seven days and lies
+inside the exact grant validity.
+
+`ApplicationWithdrawal` (128) uses the persistent common prefix and body
+`[applicationAdmissionVersionRef, withdrawerKey, snapshot]`.
+Its lookup ID is the referenced application's key. Only the recorded owner or
+application can withdraw. This restrictive consent operation remains available
+after grant or ordinary admission expiry, through the caller's permanent stream.
+It does not imply RevokeGrant or authority over any other identity.
+
+Both records are create-only generation1 with null previous. Their signed
+mutation intents remain in canonical evidence. Application keys and streams
+remain reserved after expiry, revocation or withdrawal. A member or dedicated
+service role cannot reuse one. Applications cannot own applications or delegate.
+
+Current capability use binds the exact accepted grant, application validity,
+absence of128, complete grant/tier chain, relevant revocations and current owner
+and ancestor admission. Another grant naming the application is insufficient.
+Each domain must also enforce its own object, audience, consent and route checks.
+A historical registration receipt proves creation, not current permission.
+
+The owner and application sign identical acceptance bytes naming their keys,
+network/incarnation, exact grant, application validity and bounded consent window.
+A mutable Snapshot is added only to the final ordered registration request.
+The consent window is at most24hours and stays within application validity.
+Neither an expired acceptance nor a lost reply permits resetting a prior stream
+or removing withdrawal. Exact completion retry preserves its original result.
 
 ## Preview and compare-and-commit
 
@@ -450,10 +551,16 @@ digest and expected withdrawalGeneration. No general filesystem/network grant
 or arbitrary runtime arguments exist in these records.
 
 `DesiredProfile` (117) body is `[deployment, softwareDigest, stateContract,
-roles, volumes, exposure, limits, placement, expectedLocalGeneration]`.
+roles, volumes, exposure, limits, placement, resourceManifestDigest,
+expectedLocalGeneration]`.
 StateContract is U64 value 1, identifying HyperNetRuntime/1; it does not
 identify or accept a previous deployment's authority database schema; other types match HostConsent.
-Hash the profile first, then obtain consent for that exact digest. The profile
+ResourceManifestDigest is RecordDigest of the canonical CBOR RuntimeManifest. JSON is
+input and display only. The manifest binds software, images, exact peer leaf
+certificates and transport identities, signed clock binding, owned exposure and
+resources. Exposure contains only owned bind endpoints; outbound references do
+not grant local ownership.
+The previous profile arity is refused. Hash the profile first, then obtain consent for that exact digest. The profile
 contains no consent reference. A client-only profile has no roles, volumes or
 exposure and needs no hosting consent. Each separately optional role needs its
 own applicable authority and local consent; joining never enables a listener.
@@ -558,3 +665,42 @@ Installed authority tests must execute recipient and recovery ordering. Storage
 checks cover sealed and placement transitions; lifecycle checks cover races;
 route checks observe all network paths; search checks observe disclosure and
 cursor behaviour. Each uses these record identities and refusal semantics.
+
+## Deployment admission and withdrawal
+
+DeploymentAdmission129 body is `[deployment,host,operator,serviceBindings,
+transportBindings,monitorKey,profileRef117,consentRef105,registrar,grantRef102,
+expectedSnapshot]`. DeploymentWithdrawal130 body is `[deployment,admissionRef129,
+operator,withdrawalGeneration,expectedSnapshot]`. Both are create-only generation1.
+Bindings are sorted `[role,serviceKey]` and `[ownedServiceKey,transportKey]` lists.
+The exact canonical manifest and operator-signed105 derive117 and consent105.
+Current RegisterService13 over the deployment authorises admission. Each service,
+owned TLS key and monitor must supply independent purpose-bound possession.
+
+Operators and monitor keys may own several deployments within their own class.
+Services and transports belong permanently to one deployment. All classes remain
+distinct from ordinary grants, members, applications and bootstrap reservations;
+the exact appointed Authority0 voter/transport mapping is the narrow exception.
+Registration grants no reader, administrative, hosting or voting capability.
+
+Withdrawal is the exact operator's intrinsic restrictive operation, even after
+consent or registrar expiry/revocation. The local withdrawal floor precedes its
+network publication and can never be cleared by a network result. The Suite
+requires a signed local withdrawal assertion; an incomplete cleanup flag still
+permits publication of the restriction. Known-deployment Get permits the operator
+or current13 and returns authenticated metadata without operational permission.
+Non-authority serving activation requires its separately qualified domain consumer.
+
+## Federated publication contract
+
+[Federation](Federation.md) defines canonical records150..157,
+the finite authority commands and complete foreign result proof. Bilateral trust
+and explicit source sharing never create foreign membership or a local Mail
+recipient. Imported content retains its source network/incarnation and exact
+sharing generation; destination publication requires its own review.
+
+Foreign-floor advancement and local domain state commit together. Each current
+read, review or media effect requires a fresh bilateral proof; immutable byte
+receipts do not advance authority. Healthy epoch adoption retains prior floors
+and verifies the complete terminal/Ready chain. Exceptional recovery creates a
+new identity requiring independent trust acceptance.

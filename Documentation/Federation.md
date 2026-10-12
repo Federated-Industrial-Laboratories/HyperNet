@@ -1,285 +1,259 @@
 # Federation
 
-Federation transfers explicitly shared, approved Pages between two independent
-networks. Both administrators accept the same one-way treaty. The original
-author opts in to sharing each exact publication, and a destination administrator
-reviews the imported bytes before local members can read them. Imported Pages
-remain separate from native Pages and cannot be exported onward. Reverse sharing
-requires a separate treaty, author consent and destination review.
+Federation copies explicitly shared native Pages between two independently
+administered HyperNets. Each network accepts the other's complete bootstrap
+through an independently authenticated channel and admits its own role7 bridge.
+Both administrators accept the identical treaty. The source author shares one
+exact approved revision; the destination reviews that imported revision before
+local reading. Federation grants no foreign membership, local administration,
+reviewer capability or onward export authority.
 
-A treaty is not shared membership or shared administration. Neither network can
-invite users, set permissions or approve native Pages on the other. Existing
-`Members` publication alone never permits export. Trust in the remote authority
-is explicit and limited to its treaty's native namespace and page profile.
+Use the Suite `federation` commands for trust, treaties, bridge profiles, author
+sharing, local review and reading. [Bridge.md](Bridge.md) describes installation.
+The only network transport in this contract connects the two consented bridges.
+Local operator control does not provide a remote reader route.
 
-## Establish the agreement
+## Acceptance and publication
 
-Provision both networks using [Authority.md](Authority.md), including their
-dedicated online Federation signers and separate Federation storage prefixes.
-Generate two further, distinct device identities for the bridge. Invite one to
-each network with grant mask 9. Keep all four signing keys distinct. Bridge keys
-must not be ordinary reader, author, administrator or replica credentials.
+1. Exchange each network ID, incarnation, bootstrap file SHA256 and bootstrap
+   fingerprint independently. `trust inspect` verifies the accepted recovery
+   signatures and reports these distinct pins. `trust accept` requires current
+   local capability22. A bootstrap naming a different incarnation is a new trust
+   decision, not an epoch update.
+2. Create one treaty with source/destination bootstrap identities, distinct
+   bridge keys, exact namespaces, expiry and media placement consent. Each
+   administrator accepts the same canonical bytes with capability22. Each
+   bridge remains an intrinsic service identity in its own network.
+3. Admit the dedicated role7 manifest and register its operator-signed bridge
+   profile. Registration requires both the current manager capability26 and
+   the original deployment admission. Local runtime consent and activation are
+   separate requirements.
+4. The source author signs `FederationShareStatement` for the current native
+   publication142 and revision141. Ordering `FederationShare` requires the
+   current author, capability4 and applicable application restrictions.
+5. The source bridge first obtains certified metadata for the exact shared Page
+   or bounded inventory window. The destination bridge then obtains its own
+   certified Admission and a certified source Export. It verifies the complete quorum, current accepted foreign
+   floor, exact treaty and current source sharing. Import preserves the native
+   source bundle and creates qualified records154/155. Media is copied through
+   separately consented role2 stores and decoded again there.
+6. A destination reviewer inspects the exact imported bundle and any media.
+   A saved review decision binds immutable155, reviewer capability, application
+   mode and policy. Submitting the decision obtains a new bilateral lease for
+   the same native141. Human review has no five-second reading deadline.
+7. Read, listing and media effects obtain fresh bilateral evidence and recheck
+   current local rights. An imported bundle or historical approval alone never
+   grants current access.
 
-Exchange the network identities, authority signing public keys, bridge public
-keys, intended namespaces, TLS names and CA fingerprints through an independently
-authenticated channel. Do not accept trust roots obtained from page content,
-discovery responses or redirects.
+Removing a share, grant, agreement, host consent or trust stops subsequent
+protected effects. It cannot erase bytes previously disclosed to an authorised
+reader or host. Re-sharing the same native revision uses a new sharing153
+reference and therefore a new155 identity requiring local review again.
 
-Prepare a UTF-8 JSON treaty with these fields, in this serialization order:
+## Canonical records
 
-```text
-version, agreementId, sourceNetwork, destinationNetwork, sourceAuthorityKey,
-destinationAuthorityKey, sourceBridgeKey, destinationBridgeKey, sourceNamespace,
-destinationNamespace, service, mediaProfiles, mediaSourceHosts,
-mediaDestinationHosts, mediaMaxBytes, mediaRequiredCopies, profile, expires
-```
+The canonical encoding, signed Intent20, VersionRef and domain result201 follow
+[WireContract.md](WireContract.md) and [PolicyContract.md](PolicyContract.md).
+`B32` means exactly32 bytes, `Page16` exactly16 bytes, `RefK` a VersionRef of kindK,
+`Bytes` a CBOR byte string and `?` a value or CBOR null. No JSON compatibility
+representation substitutes for the canonical record bytes.
 
-`version` is 2. `agreementId` is 16 random bytes in lowercase hexadecimal.
-Network identities and public keys are 32-byte lowercase hexadecimal values.
-The networks differ. Namespace labels use `[A-Za-z][A-Za-z0-9]{0,31}`.
-`service` is `Pages`; `profile` is exactly `HyperNetPage/2`. Source sharing and
-export require the approved descriptor profile to equal the treaty profile. `expires` is a Unix timestamp
-in the next seven days. The treaty digest is SHA-256 of ASCII
-`HyperNet/FederationTreaty/2`, one zero byte, and the compact typed JSON bytes in
-the field order above. The serializer emits unsigned decimal integers and no
-whitespace; validated strings contain no characters requiring JSON escapes.
-
-Media scope is explicit. With no media, use empty profile and host lists and zero
-byte/copy limits. Enabled media names sorted supported profile strings, one to
-three source and destination host keys, at most 4 MiB per page and one to three
-required destination copies. Host identities and namespace consent are checked
-separately. [Page media](PageMedia.md) defines storage, review and transfer bounds.
-
-An administrator of each network submits `FederationAccept` with the identical
-`treaty` object. Each authority checks that its configured signer equals the
-pinned local authority key. Agreement identifiers are immutable. Acceptance of
-identical active terms is idempotent; withdrawal cannot be reversed. Changed
-terms or a later expiry need a new agreement identifier and new explicit consent.
-
-The bridge owner signs a single bounded resource and endpoint consent document
-with both bridge keys. Register its exact bytes and transport-certificate
-fingerprints in both networks. Both registrations must have the same profile
-digest. Start the separate confined bridge using [Bridge.md](Bridge.md).
-Changing endpoints, CA bytes, identities, namespaces or resource limits requires
-new owner consent and registration. Neither authority can widen that consent.
-
-## Share, review and read
-
-The author first publishes through the ordinary native Pages review procedure.
-The author then submits `FederationShare` with the agreement ID and digest, the
-page ID, exact publication version, descriptor digest, `expectedGeneration` and
-`allow: true`. Read the current generation with `FederationShareStatus`. The
-authority checks current author membership and ownership. An administrator
-cannot substitute for this author signature. The descriptor digest is SHA-256
-of ASCII `HyperNet/FederationPage/1`, one zero byte, and compact typed
-`PageDescriptor` JSON in the order defined in [Protocol.md](Protocol.md).
-
-`FederationUnshare` removes permission independently of publication approval.
-It binds `agreementId`, `pageId` and `expectedGeneration`, requires current author
-membership and immutable native ownership, and works with an expired or inactive
-treaty, a withdrawn native publication or an unavailable reviewer. It does not
-accept a revoked key or let an administrator withdraw another author's consent.
-`allow: false` is refused; use the dedicated withdrawal command.
-
-Each grant or withdrawal advances a persistent share generation. Both commands
-compare the expected generation before changing permission. A withdrawal retains
-a tombstone and `lastWithdrawalGeneration`, including when no grant existed.
-A delayed grant cannot cross that barrier. Re-sharing requires explicit fresh
-consent against the current generation and a currently approved publication.
-Reviewer restoration and broker restart cannot undo the tombstone.
-
-A retry whose expected generation precedes `lastWithdrawalGeneration` succeeds
-without changing permission. Its response reports the current `allowed` value,
-`generation` and `lastWithdrawalGeneration`; a later explicit grant may already
-have superseded that withdrawal. Never present this as currently withdrawn when
-`allowed` is true. Receipt expiry does not remove the withdrawal barrier.
-Generation conflicts require reading current state and explicitly selecting a
-new expected generation; do not silently renew an old positive grant.
-
-Withdrawal is confirmed only after the quorum commits it. During an outage, a
-client may retain a private pending request, but must not claim global success.
-An intent created without an observed generation must require explicit generation
-confirmation before later submission. Previously issued destination permissions
-expire within five seconds after committed withdrawal; an offline intention does
-not start that bound and cannot stop an authority that has not received it.
-
-The bridge obtains a destination permit, fetches only the approved and explicitly
-shared source inventory, and imports each verified proof bundle into destination
-quarantine. `FederationQueue` lists pending metadata. `FederationInspect` returns
-the original source signatures, author share and exact descriptor for manual
-inspection. Inspection may expose an expired pending import to administrators;
-it is labelled with its source evidence expiry and is never an ordinary read.
-
-`FederationReview` binds the exact agreement, page, local version and descriptor
-digest. `Approve` makes that descriptor readable while both networks remain
-freshly authorised. `Reject` suppresses it. `FederationPageWithdraw` removes local
-publication and pending review. Repeated imports of an unchanged descriptor only
-refresh its evidence; they do not undo rejection or withdrawal, advance the page
-version, consume mutation receipts or require another review. A changed source
-publication requires a new author share and a new destination review. Until that
-review succeeds, the replacement is unavailable to destination readers.
-
-`FederationRead` returns the original native bundle, author share, destination
-approval and both authority attestations. Clients verify all signatures, exact
-descriptor bindings, local network, treaty and evidence expiry before rendering.
-Display the source network and namespace separately from the local destination
-namespace. Links never create a treaty or import content automatically.
-
-The author can stop export with `FederationUnshare` for the
-current sharing generation. Withdrawing the native publication, removing its
-author or reviewer, or withdrawing the source treaty also stops new exports.
-A destination administrator can withdraw its treaty or imported publication;
-the bridge owner can withdraw consent locally or in either authority. Stop the
-local bridge first when immediate local resource withdrawal is required.
-
-## Commands
-
-All commands use the signed `Request/1` envelope from [Protocol.md](Protocol.md).
-The discriminator is `type`; the table lists the remaining fields. Optional
-fields can be omitted or null. Read and review clients use ordinary membership;
-bridge service calls also require their registered mTLS certificate.
-
-| Command | Fields | Caller and result |
-| --- | --- | --- |
-| `FederationAccept` | `treaty` | Local administrator; immutable accepted terms |
-| `FederationWithdraw` | `agreementId`, `expectedVersion` | Local administrator; permanent inactive agreement |
-| `FederationAgreements` | None | Member; `entries`, local `authorityKey`, `authorityRevision` |
-| `BridgeConsent` | `agreementId`, `profile`, `expires`, `certificate`, `document` | Named local bridge; registers dual-signed exact document |
-| `BridgeWithdraw` | None | Own member, including revoked membership; disables local bridge consent |
-| `FederationShare` | `agreementId`, `agreementDigest`, `pageId`, `publicationVersion`, `descriptorDigest`, `allow: true`, `expectedGeneration` | Original author; exact current publication opt-in |
-| `FederationShareStatus` | `agreementId`, `pageId` | Original author; `allowed`, `generation`, `lastWithdrawalGeneration` |
-| `FederationUnshare` | `agreementId`, `pageId`, `expectedGeneration` | Original author; durable withdrawal or current result of a previously committed withdrawal |
-| `FederationPermit` | `agreementId`, `profile` | Destination bridge; signed `admission` |
-| `FederationExport` | `agreementId`, `profile`, `admission`, optional `pageId`, `includeBundle` | Source bridge; inventory or exact signed export |
-| `FederationImport` | `agreementId`, `profile`, `admission`, `export`, optional `bundle`, optional `authorShare` | Destination bridge; imported page ID, local version and state |
-| `FederationQueue` | `agreementId`, optional `after` | Local administrator; pending descriptors and versions |
-| `FederationInspect` | `agreementId`, `pageId` | Local administrator; exact retained review object |
-| `FederationReview` | `agreementId`, `pageId`, `expectedVersion`, `descriptorDigest`, `decision` | Local administrator; `Approve` or `Reject` |
-| `FederationPageWithdraw` | `agreementId`, `pageId`, `expectedVersion` | Local administrator; suppresses exact current import |
-| `FederationList` | `agreementId`, optional `after` | Local reader; fresh approved descriptors |
-| `FederationRead` | `agreementId`, `pageId` | Local reader; independently verifiable fresh publication |
-
-Agreement entries contain `treaty`, `digest`, `version`, `active` and the observed
-`sourceRevision` floor. Service credentials see only their named treaties.
-`FederationExport` without a page ID returns `entries`, `authorityRevision` and
-`validUntil`. With a page ID it returns `descriptor`, `authorShare`, `bundle`
-(null unless requested) and `export`. New or changed imports require both
-`bundle` and `authorShare`; unchanged imports can omit them.
-
-Queue and list results contain `entries`, `next`, `authorityRevision` and
-`validUntil`. `after` is an exclusive page-ID cursor, with up to 32 entries per
-reply. Queue entries include `pageId`, local `version`, `descriptor` and
-`descriptorDigest`; list entries are source descriptors. Inspection returns
-`treaty`, `agreementDigest`, `pageId`, local `version`, optional `pending`,
-optional `published` and `sourceValidUntil`. Pending content contains
-`descriptor`, `descriptorDigest`, `bundle` and `authorShare`.
-
-Read results contain `treaty`, `agreementDigest`, `descriptor`, `bundle`,
-`authorShare`, `approval`, `admission`, `export`, `authorityRevision` and
-`validUntil`. `authorShare` is the original positive `FederationShare` envelope;
-`approval` is the destination administrator's exact `FederationReview` envelope.
-Their digests use the ordinary signed-request message defined in Protocol.md.
-
-## Freshness and authority evidence
-
-Each authority evidence object has `publicKey`, `payload` and `signature`.
-`payload` is unpadded base64url encoding of strict JSON bytes. The Ed25519
-signature is lowercase hexadecimal over a purpose domain followed by those
-exact decoded bytes. Unknown fields, duplicate fields and trailing data fail.
-The public key must equal the treaty's pinned authority key. Evidence digests
-are SHA-256 of that domain plus payload, without signature bytes.
-
-Admission uses ASCII `HyperNet/FederationAdmission/1` plus one zero byte. Its
-payload fields, in serialization order, are:
+Every domain record uses:
 
 ```text
-version, agreementDigest, sourceNetwork, destinationNetwork, sourceBridgeKey,
-destinationBridgeKey, destinationProfile, requestId, authorityRevision,
-issuedAt, validUntil
+[kind,1,networkB32,incarnationB32,generation,previousDigest?,idB32,payload]
 ```
 
-The destination issues it only after checking its own current treaty, bridge
-membership, consent, certificate and quorum. Its lifetime is at most five
-seconds, bounded further by the treaty, bridge membership and consent expiry.
-`destinationProfile` binds the exact dual-signed consent file. `requestId` binds
-the permit request. Version is 1; timestamps are Unix seconds.
+The following are payloads in exact field order:
 
-Export uses ASCII `HyperNet/FederationExport/1` plus one zero byte. Its payload
-fields, in serialization order, are:
+| Kind | Name | Payload |
+|---|---|---|
+|150|Foreign trust|`[bootstrapBytes,networkIdentity,approverKey,grant102,withdrawn]`|
+|151|Agreement|`[treaty,foreign150,approverKey,grant102,withdrawn]`|
+|152|Bridge|`[signedProfileBytes,managerKey,grant102,withdrawn]`|
+|153|Author share|`[agreementId,Page16,publication142,revision141,authorKey,grant102,statementBytes,allowed,withdrawalGeneration]`|
+|154|Qualified Page|`[agreementId,sourceIdentity,Page16,observed141,sourceShare153,pending155?,published156?,withdrawn]`|
+|155|Imported revision|`[qualifiedPageId,agreementId,sourceIdentity,native141,share153,bundle203,importedAtMs,exportProofDigest,nativeRevisionPayload]`|
+|156|Local review|`[revision155,reviewerKey,grant102,application148?,approve,statementBytes,decidedAtMs,mode,policyDigest?]`|
+|157|Foreign floor|`[trustId,activatedEpochsJsonBytes,retainedJsonBytes,sealJsonBytes?]`|
+
+`networkIdentity` is `[network,incarnation,bootstrapFileSha256,bootstrapFingerprint]`.
+The file digest is raw SHA256; the fingerprint and record digests use the
+purpose-separated wire digest. The JSON byte strings in157 use the existing
+strict epoch archive schemas and canonical reserialization. They are not
+unverified descriptor replacements. A157 resolves the accepted initial
+bootstrap through each validated healthy transition, then verifies its retained
+quorum/checkpoint and optional terminal seal.
+
+The treaty is:
 
 ```text
-version, agreementDigest, admissionDigest, descriptor, authorShareDigest,
-sourceProfile, authorityRevision, issuedAt, validUntil
+[200,1,"FederationTreaty",agreementId,sourceIdentity,destinationIdentity,
+ sourceBridge,destinationBridge,sourceNamespace,destinationNamespace,
+ "HyperNetPage/2",
+ [mediaProfiles,sourceHostKeys,destinationHostKeys,mediaBytes,copies],expiresMs]
 ```
 
-The source verifies the admission and its own fresh treaty, bridge permission,
-consent, certificate, approved native publication and exact author share.
-`sourceProfile` must equal `destinationProfile`. It signs no later expiry than
-the admission, source bridge consent, or relevant source membership. Evidence
-is returned only after the same authoritative compare-and-swap commit succeeds.
-The destination verifies both attestations and the proof bundle before import.
-Import rejects source authority revision rollback and publication rollback.
+The bridge profile's operator-signed payload is:
 
-Every ordinary read rechecks current local membership, treaty, bridge consent,
-local reviewer and both evidence leases. The destination cannot extend the
-source expiry. A local veto applies to subsequent reads immediately at the
-authority check. A remote veto or partition stops fresh exports; existing
-evidence expires within five seconds. Already delivered bytes cannot be recalled.
-Trustworthy synchronized clocks are required. Future-issued evidence is rejected
-without clock slack; latency or clock disagreement fails closed.
-
-The bridge never holds voter credentials or an authority signing key. A bridge
-compromise can withhold or replay still-valid evidence but cannot approve new
-bytes or renew authority evidence. Each network trusts its own authority and
-the explicitly pinned remote signer for these claims; the protocol does not
-protect against a compromised authority signing key or malicious trusted quorum.
-
-## Storage and limits
-
-Federation uses the current authority state 9. Its authority metadata and source revision floors share
-the ordinary quorum and compare-and-swap history. Foreign bundles use
-`/HyperNet/<network>/Federation/Foreign/`; author share envelopes use
-`/HyperNet/<network>/Federation/Share/`. Native and imported objects remain
-separate. Object reads use the exact authority snapshot revision; state and
-blob writes commit atomically.
-
-Each network supports eight lifetime treaty identifiers, 32 lifetime source
-page IDs shared per treaty, 256 lifetime author share records across treaties,
-32 lifetime foreign page IDs per treaty and 128 across all
-treaties. Inactive agreements, suppressed page records and service history are
-retained to prevent resurrection. Each foreign proof blob is at most 64 KiB;
-the aggregate foreign-blob bound is 8 MiB. The existing 1 MiB authority metadata
-bound and request/response limits also apply, so the first reached limit wins.
-These are logical bounds, independent of etcd's historical MVCC disk usage.
-Configure backend quota, compaction, backup retention and storage encryption.
-Deleting or suppressing publication is not secure erasure from backups.
-
-Configure every broker for the current state-9 contract before enabling Federation,
-extend its database role, and preserve its rollback floor. Host consent uses
-version 3 with explicit services. Share records require retained generation and
-withdrawal fields; new grants must include `expectedGeneration`. There is no
-migration from older records or supported downgrade to an obsolete contract.
-See Authority.md for new-network recovery when authoritative state or trust roots
-are lost.
-
-## Installed verification
-
-`Tests/FederationWorkflow.py` provisions two isolated three-voter TLS authority
-clusters, a confined bridge and independent installed clients. It requires
-rootless Podman, OpenSSL, Python cryptography and local etcd tools:
-
-```sh
-python3 -B Tests/FederationWorkflow.py --suite /Suite/Bin/HyperNetSuite \
-  --node /Build/HyperNet --image IMAGE_ID --etcd-directory /Etcd \
-  --seccomp /Package/Seccomp.json --output /Results/Federation.json
+```text
+[200,1,"AuthorityBridgeProfile",manifestBytes,serviceKey,volumeId,
+ [[agreementId,treatyDigest],...],physicalStateBytes]
 ```
 
-The fixture uses synthetic identities and content, then removes its containers,
-networks and private files. It checks sharing, review, navigation, partition,
-recovery and withdrawal. Add `--expiry-only` to focus on actual host and bridge
-process termination, including processes deliberately stopped with a signal.
-Use `--withdrawal-only` to check reviewer loss, private pending retry, quorum
-loss, broker restart and rejection of a snapshot containing older positive grants.
-Public Internet qualification requires separately authorised external routing;
-the local fixture alone does not establish Internet or remote failure-domain
-coverage.
+Agreement/profile lists are sorted and unique. Empty media consent uses empty
+profile/host lists and zero media bytes/copies. Native media limits and exact
+signed physical storage limits still apply.
+
+Qualified Page IDs hash `"FederatedPage"` plus agreement, source network,
+source incarnation and Page16 through the canonical domain identity function.
+Imported revision IDs hash `"FederatedRevision"` plus qualified Page ID,
+exact native141 and exact sharing153 references. Immutable155 has generation1.
+The original source141 metadata, author statement, approved bundle and asset
+SHA256 remain unchanged. Destination placement is separate local metadata.
+
+## Finite operations
+
+All operations are ordinary signed `AuthorityDomain` Intents. Their parameters
+remain `[200,1,"AuthorityDomain",grant102?,command,snapshot]`. The following
+command arrays give the exact fields after the string command name:
+
+| Command name | Remaining fields |
+|---|---|
+|FederationContext|`action,resource,namespace?`|
+|FederationSourceContext|`agreementId,Page16?,afterShareId?`|
+|FederationInventoryContext|`agreementId,action`|
+|FederationPageContext|`agreementId,Page16,action`|
+|FederationTrustAccept|`bootstrapBytes,networkIdentity`|
+|FederationTrustGet|`trustId`|
+|FederationTrustWithdraw|`trust150`|
+|FederationAccept|`treaty,foreign150`|
+|FederationGet|`agreementId`|
+|FederationAgreements|`afterId?`|
+|FederationWithdraw|`agreement151`|
+|FederationBridgeRegister|`signedProfileBytes`|
+|FederationBridgeGet|`serviceKey`|
+|FederationBridgeWithdraw|`bridge152`|
+|FederationShare|`sharePayload`|
+|FederationShareStatus|`agreementId,Page16`|
+|FederationUnshare|`share153`|
+|FederationAdmission|`agreement151,bridge152,Page16?,exchangeNonce,native141?,afterShareId?`|
+|FederationExport|`agreement151,bridge152,admissionProofBytes,includeBundle,inventorySelection?`|
+|FederationImport|`agreement151,bridge152,exportProofBytes,bundle203`|
+|FederationQueue|`agreementId,afterId?`|
+|FederationInspect|`qualifiedPageId,exportProofBytes`|
+|FederationReview|`reviewPayload,exportProofBytes`|
+|FederationList|`agreementId,exportProofBytes`|
+|FederationRead|`qualifiedPageId,exportProofBytes`|
+|FederationPageWithdraw|`page154`|
+|FederationMediaGet|`asset144,proofBytes`|
+|FederationMediaAuthorise|`asset144,host143,effect,offset,count,rawChunkSha256?,proofBytes`|
+|FederationMediaReceipt|`copyReceiptBytes,proofBytes`|
+|FederationMediaInspect|`asset144,copyReceiptBytes,expiresMs,proofBytes`|
+|FederationForeignSeal|`trust150,floor157,terminalEvidenceBytes,historyBytes`|
+|FederationForeignActivate|`trust150,floor157,readyBytes`|
+
+SourceContext is metadata-only maintenance by the exact current source role7
+bridge. It selects either one Page or an inventory after-cursor and returns the
+current agreement, bridge, accepted trust, foreign floor, native publication,
+author share and all relevant rights and media metadata. It accepts no borrowed
+member capability. It requires no immutable input and releases no Page body.
+Export obtains an approved bundle sidecar only after its quorum result permits it.
+
+An inventory Export signs `inventorySelection = [throughShareId?, [shareId,...]]`.
+The IDs are the exact sorted unique selection returned by SourceContext, each
+strictly after Admission's cursor. The end equals the final selected ID; both
+are empty/null for an empty selection. A Page Export requires null selection.
+Export evaluates only those IDs against current authority and exact dependencies.
+Its actual result budget, including the successor157, may select a smaller
+complete prefix. Nonempty results continue at the last admitted ID; an empty
+round terminates discovery. A cached, omitted share cannot expand the selection.
+The context verifier reconstructs this result from its exact returned records
+and independently checked governance, then merges verified records into the
+cache without removing omitted records or lowering retained versions.
+
+InventoryContext supports read0 or review3 in the destination namespace.
+PageContext supports read0, review/withdrawal3 or source share4. These operations
+return required metadata only. Destination Page context includes the selected
+revision's media placements, retained copy and inspection evidence, relevant host
+authority and namespace placement policy. This lets a cold reviewer or reader
+prepare the next exact operation from certified records. Metadata does not grant
+media access or publication approval; those operations recheck current authority,
+host consent, required copies and exact inspections.
+A grantless restrictive metadata lookup is
+limited to the exact recorded owner; it does not expose Page bodies or create
+new permission. Bridge maintenance has no member grant and must match its
+current registered role7 and treaty. Broad membership never implies these rights.
+
+Admission selects either an exact Page, optionally exact141, or an inventory
+cursor; the two selectors cannot be mixed. Page-specific Admission also selects
+the agreed destination media hosts and their current consent and governance,
+namespace placement policy, and retained state for that exact qualified Page.
+Its certified result supplies a cold Bridge cache with the dependencies needed
+for first import and subsequent synchronisation. Inventory Admission does not
+export unrelated imported Pages. Existing result and proof size limits apply.
+Inventory continuation is derived
+from the actual encoded result and its64-version budget. A complex item does
+not bypass proof closure, and an unfit first item is unavailable rather than
+silently skipped. A refused domain result retains its usual finite refusal
+schema and cannot carry a renderable object sidecar.
+
+## Portable proofs and freshness
+
+The proof envelope is:
+
+```text
+[200,1,"FederationProof",localTrust150,localFloor157,exactLocal157Bytes,
+ remoteOrdered22Bytes,remoteResult24Bytes,remoteExecutedQuorumEnvelope,
+ ancestryNodeBytes,checkpointProofBytes?,historyProofBytes?,
+ exactRemotePredecessor157RecordBytes]
+```
+
+Only an Admission leaf and an Export containing that leaf are legal. Arbitrary
+recursive proofs or another action label fail before recursive evaluation.
+The accepted local150 selects the foreign initial bootstrap. Actual local157
+selects its current descriptor and retained prefix. Verification checks the
+executed quorum, ordinary request/result/challenge binding, current epoch,
+ancestry or checkpoint/history continuity, exact predecessor references,
+complete returned dependency records and independently evaluated finite result.
+Three detached signatures are insufficient.
+
+Each protected operation uses the existing bounded monotonic challenge and
+conservative clock uncertainty. Parsing or fetching bytes cannot extend that
+deadline. A stale cached lease cannot authorise review, reading or media. Exact
+original-result recovery can recognise only the immediate correctly derived157
+successor; an arbitrary newer floor never repairs a stale signed precondition.
+
+Healthy foreign replacement uses explicit ForeignSeal and ForeignActivate with
+terminal history and Ready evidence. Exceptional recovery changing network or
+incarnation requires independently accepted new trust. An old bootstrap pin or
+same public key does not establish continuity automatically.
+
+## Media and persistence
+
+A foreign asset144 refers to immutable155 instead of native141. Its original
+canonical media descriptor still binds source bytes with raw SHA256. Destination
+host references must come from the exact treaty and current role2 consent.
+Source fetch requires a fresh exact destination Admission and current source
+share. Destination upload and copy receipts require a fresh source Export and
+current pending155. Local inspection and reading also check their respective
+current local capability/application rules.
+
+`FederationMediaAuthorise` uses the existing typed MediaRequest, recipient
+challenge, claimed single effect, complete decoder and signed MediaReceipt.
+Normalization selects only the finite media effect; the signed operation stays
+FederationMediaAuthorise and its157 mutation is independently verified. The
+recipient is the exact currently registered host143 service, never a caller
+selected arbitrary key. Media receipt recovery retains only certified monotone
+metadata from the exact original request before publishing its cache and
+acknowledging completion.
+
+Consensus retains PageSource/PageBundle objects and exact metadata/receipt
+closure. Bitmap/vector bodies and animation frames do not enter consensus.
+Bridge storage uses a preallocated two-bank file within its signed physical
+budget. Pending source bundles remain pinned until their requester operation is
+resolved; optional cache entries may expire or be evicted. Upload payloads are
+retained before preparing their exact outgoing request. Uncertain effects retain
+that request for explicit reconciliation; they do not allocate a new stream or
+silently substitute a new proof. Local activation consent, withdrawal and clock
+health continue to apply to every new action and service loop.

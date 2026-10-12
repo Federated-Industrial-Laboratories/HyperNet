@@ -125,7 +125,7 @@ def validate_manifest(value):
     require(isinstance(metadata['imageId'], str) and re.fullmatch(r'sha256:[a-f0-9]{64}', metadata['imageId']), 'Invalid immutable image identity')
     require(metadata['imageArchive'] == 'Images/HyperNetOci.tar', 'Unexpected image path')
     require(isinstance(metadata['binaries'], dict) and set(metadata['binaries']) == {'HyperNet', 'HyperNetGate'} and all(isinstance(v, str) and HEX.fullmatch(v) for v in metadata['binaries'].values()), 'Invalid binary inventory')
-    require(type(metadata['authoritySchema']) is int and metadata['authoritySchema'] == 9, 'Invalid authority schema')
+    require(type(metadata['authoritySchema']) is int and metadata['authoritySchema'] == 1, 'Invalid authority schema')
     require(isinstance(metadata['prerequisites'], list) and len(metadata['prerequisites']) <= 32 and all(isinstance(v, str) and len(v) <= 256 for v in metadata['prerequisites']), 'Invalid prerequisites')
     host = metadata['hostRuntime']
     require(isinstance(host, dict) and set(host) == {'elfInterpreter', 'neededLibraries', 'glibcMinimum'}, 'Invalid native runtime metadata')
@@ -148,7 +148,7 @@ def validate_manifest(value):
         paths.append(name)
         total += item['size']
     require(paths == sorted(set(paths)) and total <= MAX_ARCHIVE, 'Duplicate, unordered or oversized inventory')
-    require({'Bin/HyperNet', 'Images/HyperNetOci.tar', 'ImageId.txt', 'Licence.txt', 'ReadMe.md', 'Tools/Bundle.py', 'Tools/Qualify.py', 'Tools/Upgrade.py', 'Tools/Authority.sh', 'Tools/Lifecycle.sh', 'Tools/Seccomp.sh', 'Documentation/ThirdPartyNotices.txt', 'Documentation/SystemLibraries.tsv', 'Documentation/SystemLibraryNotices.txt'}.issubset(paths), 'Required package files are missing')
+    require({'Bin/HyperNet', 'Images/HyperNetOci.tar', 'ImageId.txt', 'Licence.txt', 'ReadMe.md', 'Tools/Bundle.py', 'Tools/Qualify.py', 'Tools/Seccomp.sh', 'Documentation/ThirdPartyNotices.txt', 'Documentation/SystemLibraries.tsv', 'Documentation/SystemLibraryNotices.txt'}.issubset(paths), 'Required package files are missing')
     native = next(item for item in files if item['path'] == 'Bin/HyperNet')
     require(native['sha256'] == metadata['binaries']['HyperNet'], 'Native and confined runtime identities differ')
     return value
@@ -472,9 +472,9 @@ def create(args):
                 files['Documentation/' + path.name] = path
         manifest = {'format': 1, 'product': PRODUCT, 'version': runtime_version, 'architecture': machine,
                     'metadata': {'imageId': image_id, 'imageArchive': 'Images/HyperNetOci.tar',
-                    'authoritySchema': 9, 'hostRuntime': binary_metadata(package / 'RootFs/HyperNet'),
+                    'authoritySchema': 1, 'hostRuntime': binary_metadata(package / 'RootFs/HyperNet'),
                     'binaries': {name: digest_file(package / 'RootFs' / name) for name in ('HyperNet', 'HyperNetGate')},
-                    'prerequisites': ['Linux; package architecture must match the native processor', 'Python 3.11+, OpenSSH ssh-keygen Ed25519 SSHSIG, Bash, GNU coreutils, jq and flock', 'Rootless Podman with a maintained OCI runtime, nomap and subordinate UID/GID mappings', 'Delegated cgroup v2 CPU, memory and PID controllers; seccomp; Landlock ABI 6+', 'Confined GNU/Linux libraries and their loader are carried inside the OCI image', 'Native Bin/HyperNet requires the declared host GNU libc ABI, ELF loader and maintained shared libraries', 'OpenSSL 3 and explicitly selected etcd/etcdctl binaries are required for native runtime setup', 'The build packager uses Debian-format library inventory; runtime hosts do not require dpkg']},
+                    'prerequisites': ['Linux; package architecture must match the native processor', 'Python 3.11+, OpenSSH ssh-keygen Ed25519 SSHSIG, Bash, GNU coreutils, jq and flock', 'Rootless Podman with a maintained OCI runtime, nomap and subordinate UID/GID mappings', 'Delegated cgroup v2 CPU, memory and PID controllers; seccomp; Landlock ABI 6+', 'Confined GNU/Linux libraries and their loader are carried inside the OCI image', 'Native Bin/HyperNet requires the declared host GNU libc ABI, ELF loader and maintained shared libraries', 'An independently verified accepted bootstrap, appointed voter identity, pinned TLS inputs and signed healthy clock export are required for authority runtime setup', 'The build packager uses Debian-format library inventory; runtime hosts do not require dpkg']},
                     'files': [{'path': name, 'size': path.stat().st_size, 'mode': file_mode(name), 'sha256': digest_file(path)} for name, path in sorted(files.items())]}
         validate_manifest(manifest)
         image_matches(manifest)

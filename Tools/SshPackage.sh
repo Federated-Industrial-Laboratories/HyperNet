@@ -16,7 +16,6 @@ podman image exists "$base" || fail 'Base image is not installed'
 [[ ! -e "$output" && -f "$command_binary" && -x "$command_binary" && -f "$command_licence" ]] || fail 'Select an executable command, its licence and a new output directory'
 [[ $("$ssh_source/ssh" -V 2>&1) == OpenSSH_10.6p1,* ]] || fail 'OpenSSH version differs from the qualified profile'
 mkdir -p "$output/RootFs/OpenSSH/"{bin,sbin,Libexec} "$output/RootFs/"{Service,Documentation,Work,Empty,etc,bin,State}
-: > "$output/RootFs/State/SshState.bin"
 chmod 0755 "$output/RootFs/State"
 for file in ssh-keygen; do install -m 0555 "$ssh_source/$file" "$output/RootFs/OpenSSH/bin/$file"; done
 install -m 0555 "$ssh_source/sshd" "$output/RootFs/OpenSSH/sbin/sshd"

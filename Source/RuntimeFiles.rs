@@ -110,6 +110,62 @@ pub fn create(path: &Path, bytes: &[u8]) -> Result<()> {
     File::open(path.parent().context("Parent required")?)?.sync_all()?;
     Ok(())
 }
+/// Publish public consent metadata inside the private deployment, including
+/// atomic replacements observed through a read-only directory mount.
+pub fn publish_public(path: &Path, bytes: &[u8]) -> Result<()> {
+    ensure!(
+        bytes.len() <= MAXIMUM,
+        "Runtime authorization exceeds its bound"
+    );
+    let parent = path.parent().context("Authorization parent required")?;
+    let metadata = fs::symlink_metadata(parent)?;
+    ensure!(
+        metadata.is_dir()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o022 == 0,
+        "Authorization directory must be owned and not writable by others"
+    );
+    let pending = parent.join(format!("Pending{}", random_id()));
+    let result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&pending)?;
+        file.write_all(bytes)?;
+        file.set_permissions(fs::Permissions::from_mode(0o444))?;
+        file.sync_all()?;
+        fs::rename(&pending, path)?;
+        File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() && pending.exists() {
+        let _ = fs::remove_file(&pending);
+    }
+    result
+}
+pub fn public_read(path: &Path, maximum: usize) -> Result<Vec<u8>> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.nlink() == 1
+            && metadata.mode() & 0o022 == 0,
+        "Invalid owned public authorization file"
+    );
+    let mut bytes = Vec::new();
+    file.take(maximum as u64 + 1).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() <= maximum,
+        "Authorization file exceeds its bound"
+    );
+    Ok(bytes)
+}
 pub fn save<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
     ensure!(bytes.len() <= MAXIMUM, "Runtime state exceeds its bound");
@@ -277,7 +333,38 @@ pub fn executable(path: &Path) -> Result<String> {
     Ok(hex::encode(digest.finalize()))
 }
 pub fn run(program: &Path, arguments: &[String], timeout: u64) -> Result<Vec<u8>> {
+    Ok(capture(program, arguments, timeout, MAXIMUM, MAXIMUM)?.0)
+}
+pub fn capture(
+    program: &Path,
+    arguments: &[String],
+    timeout: u64,
+    maximum_output: usize,
+    maximum_error: usize,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    capture_input(
+        program,
+        arguments,
+        timeout,
+        maximum_output,
+        maximum_error,
+        None,
+    )
+}
+/// Pass bounded opaque request bytes without a shell, environment secret or temporary mount.
+pub fn capture_input(
+    program: &Path,
+    arguments: &[String],
+    timeout: u64,
+    maximum_output: usize,
+    maximum_error: usize,
+    input: Option<&[u8]>,
+) -> Result<(Vec<u8>, Vec<u8>)> {
     ensure!(program.is_absolute(), "Absolute executable required");
+    ensure!(
+        input.is_none_or(|v| v.len() <= MAXIMUM),
+        "Runtime dependency input exceeded its bound"
+    );
     let mut command = Command::new(program);
     command
         .args(arguments)
@@ -292,13 +379,25 @@ pub fn run(program: &Path, arguments: &[String], timeout: u64) -> Result<Vec<u8>
     use std::os::unix::process::CommandExt;
     command.process_group(0);
     let mut child = command
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
     let mut stdout = child.stdout.take().context("Missing command output")?;
     let mut stderr = child.stderr.take().context("Missing command error")?;
-    for fd in [stdout.as_raw_fd(), stderr.as_raw_fd()] {
+    let mut stdin = child.stdin.take();
+    for fd in [
+        Some(stdout.as_raw_fd()),
+        Some(stderr.as_raw_fd()),
+        stdin.as_ref().map(AsRawFd::as_raw_fd),
+    ]
+    .into_iter()
+    .flatten()
+    {
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
         ensure!(
             flags >= 0 && unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } >= 0,
@@ -309,12 +408,41 @@ pub fn run(program: &Path, arguments: &[String], timeout: u64) -> Result<Vec<u8>
     let mut errors = Vec::new();
     let mut out_closed = false;
     let mut err_closed = false;
+    let mut sent = 0usize;
     let deadline = Instant::now() + Duration::from_secs(timeout);
     let outcome = (|| -> Result<_> {
         loop {
-            for (pipe, output, closed) in [
-                (&mut stdout as &mut dyn Read, &mut bytes, &mut out_closed),
-                (&mut stderr as &mut dyn Read, &mut errors, &mut err_closed),
+            if let Some(pipe) = stdin.as_mut() {
+                let input = input.context("Unexpected dependency input pipe")?;
+                if sent < input.len() {
+                    match pipe.write(&input[sent..]) {
+                        Ok(0) => anyhow::bail!("Runtime dependency closed its input"),
+                        Ok(n) => sent += n,
+                        Err(e)
+                            if matches!(
+                                e.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                            ) => {}
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+                if sent == input.len() {
+                    stdin.take();
+                }
+            }
+            for (pipe, output, closed, maximum) in [
+                (
+                    &mut stdout as &mut dyn Read,
+                    &mut bytes,
+                    &mut out_closed,
+                    maximum_output,
+                ),
+                (
+                    &mut stderr as &mut dyn Read,
+                    &mut errors,
+                    &mut err_closed,
+                    maximum_error,
+                ),
             ] {
                 let mut buffer = [0u8; 8192];
                 loop {
@@ -325,7 +453,7 @@ pub fn run(program: &Path, arguments: &[String], timeout: u64) -> Result<Vec<u8>
                         }
                         Ok(n) => {
                             ensure!(
-                                output.len() + n <= MAXIMUM,
+                                output.len() + n <= maximum,
                                 "Runtime dependency output exceeded its bound"
                             );
                             output.extend_from_slice(&buffer[..n]);
@@ -354,12 +482,26 @@ pub fn run(program: &Path, arguments: &[String], timeout: u64) -> Result<Vec<u8>
     let status = outcome?;
     ensure!(
         status.success(),
-        "{} {} refused operation ({})",
+        "{} {} refused operation ({}): {}",
         program.file_name().unwrap_or_default().to_string_lossy(),
         arguments.first().map_or("", String::as_str),
-        status
+        status,
+        diagnostic(&errors)
     );
-    Ok(bytes)
+    Ok((bytes, errors))
+}
+fn diagnostic(errors: &[u8]) -> String {
+    // Child diagnostics are untrusted terminal text. Never include its stdout or input.
+    let mut text: String = errors
+        .iter()
+        .take(1024)
+        .flat_map(|v| v.escape_ascii())
+        .map(char::from)
+        .collect();
+    if errors.len() > 1024 {
+        text.push_str(" [truncated]");
+    }
+    text
 }
 pub fn podman(arguments: &[String]) -> Result<Vec<u8>> {
     run(Path::new("/usr/bin/podman"), arguments, 45)
@@ -371,6 +513,58 @@ pub fn strings(items: &[&str]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn failed_child_reports_bounded_escaped_stderr_without_stdout() {
+        let error = capture(
+            Path::new("/usr/bin/sh"),
+            &strings(&[
+                "-c",
+                "printf 'private output'; printf '\\033[31mhelper failed\\n' >&2; exit 7",
+            ]),
+            5,
+            1024,
+            1024,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("helper failed"));
+        assert!(error.contains("exit status: 7"));
+        assert!(error.contains("\\x1b[31m"));
+        assert!(!error.contains("private output"));
+        assert!(!error.chars().any(char::is_control));
+        let long = diagnostic(&[0x1b; 1025]);
+        assert_eq!(long.len(), 4096 + " [truncated]".len());
+        assert!(long.ends_with(" [truncated]"));
+    }
+    #[test]
+    fn bounded_exchange_drains_input_and_output_without_pipe_deadlock() {
+        let packet = (0..MAXIMUM).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+        let (output, errors) = capture_input(
+            Path::new("/usr/bin/cat"),
+            &[],
+            5,
+            MAXIMUM,
+            1024,
+            Some(&packet),
+        )
+        .unwrap();
+        assert_eq!(output, packet);
+        assert!(errors.is_empty());
+        assert!(
+            capture_input(Path::new("/usr/bin/cat"), &[], 5, 1024, 1024, Some(&packet)).is_err()
+        );
+        assert!(
+            capture_input(
+                Path::new("/usr/bin/cat"),
+                &[],
+                5,
+                MAXIMUM,
+                1024,
+                Some(&vec![0; MAXIMUM + 1])
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn private_reads_refuse_links_and_special_files() {
         let root = std::env::temp_dir().join(format!("HyperNetRuntimeFiles{}", random_id()));

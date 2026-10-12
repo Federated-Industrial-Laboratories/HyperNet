@@ -11,7 +11,6 @@ use std::{
 #[derive(Clone, ValueEnum)]
 pub enum Kind {
     Authority,
-    Voter,
 }
 static STOP: AtomicBool = AtomicBool::new(false);
 extern "C" fn terminate(_: libc::c_int) {
@@ -42,40 +41,52 @@ pub fn run(kind: Kind, expires: u64, arguments: Vec<String>) -> Result<()> {
     let deadline = boottime()?
         .checked_add(expires - now)
         .context("Deadline overflow")?;
-    let (program, args) = match kind {
+    let authorization = std::path::Path::new("/Authorization");
+    let manifest = crate::runtime_authorization::Manifest::read(authorization)?;
+    crate::runtime_authorization::verify(
+        authorization,
+        &manifest.config_digest()?,
+        &manifest.signer,
+        &manifest.bootstrap_digest,
+    )?;
+    ensure!(
+        expires == manifest.expires,
+        "Guard deadline differs from consent"
+    );
+    let floor = match kind {
         Kind::Authority => {
             ensure!(
-                arguments.is_empty(),
-                "Authority guard accepts no extra arguments"
+                arguments.len() == 1,
+                "Authority guard requires one signer floor"
             );
-            (
-                "/HyperNet",
-                vec![
-                    "authority".into(),
-                    "--config".into(),
-                    "/Config/Authority.json".into(),
-                ],
-            )
-        }
-        Kind::Voter => {
+            let value = arguments[0]
+                .strip_prefix("--minimum-generation=")
+                .context("Invalid signer floor argument")?;
+            let floor: u64 = value.parse()?;
             ensure!(
-                !arguments.is_empty()
-                    && arguments.len() <= 32
-                    && arguments.iter().all(|a| a.len() <= 2048
-                        && a.starts_with("--")
-                        && !a.contains(['\n', '\r', '\0'])),
-                "Invalid voter arguments"
+                floor > 0 && value == floor.to_string(),
+                "Invalid signer floor"
             );
-            ("/Etcd", arguments)
+            floor
         }
     };
+    let args = vec![
+        "authority-replica".to_string(),
+        "run".into(),
+        "--directory".into(),
+        "/State/Replica".into(),
+        "--minimum-generation".into(),
+        floor.to_string(),
+        "--authorization".into(),
+        "/Authorization".into(),
+    ];
     STOP.store(false, Ordering::Relaxed);
     unsafe {
         libc::signal(libc::SIGTERM, terminate as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT, terminate as *const () as libc::sighandler_t);
         libc::signal(libc::SIGHUP, terminate as *const () as libc::sighandler_t);
     }
-    let mut child = Command::new(program)
+    let mut child = Command::new("/HyperNet")
         .args(args)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -90,7 +101,16 @@ pub fn run(kind: Kind, expires: u64, arguments: Vec<String>) -> Result<()> {
                 return Ok(());
             }
             let wall = crate::store::now()?;
+            let consent_current = (|| -> Result<bool> {
+                let bytes = crate::runtime_authorization::public_read(
+                    &authorization.join("Withdrawal.json"),
+                    64,
+                )?;
+                Ok(serde_json::from_slice::<u64>(&bytes)? == 0)
+            })()
+            .unwrap_or(false);
             if STOP.load(Ordering::Relaxed)
+                || !consent_current
                 || expired(previous, wall, expires, boottime()?, deadline)
             {
                 return Ok(());
@@ -99,7 +119,23 @@ pub fn run(kind: Kind, expires: u64, arguments: Vec<String>) -> Result<()> {
             std::thread::sleep(Duration::from_millis(100));
         }
     })();
-    let _ = child.kill();
+    if child.try_wait()?.is_some() {
+        return result;
+    }
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGTERM);
+    }
+    let grace = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        if std::time::Instant::now() >= grace {
+            let _ = child.kill();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let _ = child.wait();
     result
 }
