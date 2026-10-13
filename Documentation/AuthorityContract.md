@@ -375,6 +375,11 @@ fencing nor a refusal proves that an earlier external effect did not happen.
 
 Long streams revalidate before another protected chunk is released and close or
 pause at the earlier deadline. Bytes already released cannot be recalled.
+Private routes establish authenticated transport and current endpoint readiness
+before an application challenge is issued. Submission, polling and history share
+that finite channel. Transit and endpoint permission are revalidated with their
+own fresh challenges; they do not replace or extend application freshness.
+A renewal cannot restore an expired proof, a closed connection or spent budget.
 Committed revocation stops new permits; a permit already issued before an
 unknown revocation can survive only its original remaining bound. Local host
 withdrawal stops immediately without waiting for consensus. No global
@@ -440,7 +445,13 @@ The root excludes receipt state, which advances when pages are requested.
 The client requires contiguous indices, the same root/count on all pages, and
 null only at the exact total. It validates the completed root and all retained
 version minima before publishing a complete context. The latest independently
-verified certified point supplies a subsequent mutation's exact Snapshot.
+verified certified point supplies a subsequent mutation's Snapshot. Delegation,
+member admission, application/deployment registration and withdrawal, and grant
+revocation use that point as a same-epoch causal floor. They require the complete
+exact relevant dependency set and current authority at execution; an equal-height
+point must still match the state digest. Creation results retain their original
+certified creation height on exact replay. Reconfiguration retains its own
+explicitly defined snapshot requirements.
 
 The client retains bounded private pages and resumes immutable requests after
 interruption. An explicit discovery restart cannot clear an unresolved request,

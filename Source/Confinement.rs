@@ -246,14 +246,28 @@ fn confined_path(path: &Path, root: &Path) -> Result<PathBuf> {
     Ok(canonical)
 }
 
-fn read_root(path: &Path, authority: bool, bridge: bool) -> Result<&Path> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputMounts {
+    None,
+    Bridge,
+    Route,
+}
+
+fn read_root(path: &Path, authority: bool, mounts: InputMounts) -> Result<&Path> {
     if authority {
         for root in ["/Clock", "/Authorization", "/Authority"] {
             if path == Path::new(root) {
                 return Ok(Path::new(root));
             }
         }
-        if bridge
+        if mounts == InputMounts::Route {
+            for root in ["/Egress", "/Application"] {
+                if path == Path::new(root) {
+                    return Ok(Path::new(root));
+                }
+            }
+        }
+        if mounts == InputMounts::Bridge
             && let Some(host) = path
                 .to_str()
                 .and_then(|s| s.strip_prefix("/Media/"))
@@ -307,7 +321,7 @@ pub fn enter(
         connect_ports,
         false,
         false,
-        false,
+        InputMounts::None,
     )
 }
 
@@ -326,7 +340,7 @@ pub fn enter_authority(
         connect_ports,
         false,
         true,
-        false,
+        InputMounts::None,
     )
 }
 
@@ -345,7 +359,21 @@ pub fn enter_bridge(
         connect_ports,
         false,
         true,
+        InputMounts::Bridge,
+    )
+}
+
+/// Routes add only the fixed egress and selected application socket directories.
+#[allow(dead_code)] // The standalone confinement checker has no route mounts.
+pub fn enter_route(state: &Path, read_paths: &[PathBuf], bind_ports: &[u16]) -> Result<Profile> {
+    enter_state(
+        state,
+        read_paths,
+        bind_ports,
+        &[],
+        false,
         true,
+        InputMounts::Route,
     )
 }
 
@@ -364,7 +392,15 @@ pub fn enter_mail(
         unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &limit) } == 0,
         "mail file size limit could not be enforced"
     );
-    enter_state(state, &[], bind_ports, connect_ports, true, false, false)
+    enter_state(
+        state,
+        &[],
+        bind_ports,
+        connect_ports,
+        true,
+        false,
+        InputMounts::None,
+    )
 }
 
 fn enter_state(
@@ -374,7 +410,7 @@ fn enter_state(
     connect_ports: &[u16],
     single_file: bool,
     authority_clock: bool,
-    bridge: bool,
+    mounts: InputMounts,
 ) -> Result<Profile> {
     let mut profile = preflight()?;
     let state = confined_path(state, Path::new("/State"))?;
@@ -420,7 +456,7 @@ fn enter_state(
         path_rule(&ruleset, &control, STATE_ACCESS | MAKE_SOCK)?;
     }
     for path in read_paths {
-        let root = read_root(path, authority_clock, bridge)?;
+        let root = read_root(path, authority_clock, mounts)?;
         let path = confined_path(path, root)?;
         if root != Path::new("/Config") {
             ensure!(
@@ -634,14 +670,19 @@ mod tests {
     fn authority_read_roots_do_not_expand_other_roles_or_arbitrary_paths() {
         for root in ["/Clock", "/Authorization", "/Authority"] {
             assert_eq!(
-                read_root(Path::new(root), true, false).unwrap(),
+                read_root(Path::new(root), true, InputMounts::None).unwrap(),
                 Path::new(root)
             );
-            assert!(read_root(Path::new(root), false, false).is_err());
+            assert!(read_root(Path::new(root), false, InputMounts::None).is_err());
         }
         for authority in [false, true] {
             assert_eq!(
-                read_root(Path::new("/Config/Tls/Certificate.pem"), authority, false).unwrap(),
+                read_root(
+                    Path::new("/Config/Tls/Certificate.pem"),
+                    authority,
+                    InputMounts::None
+                )
+                .unwrap(),
                 Path::new("/Config")
             );
             for rejected in [
@@ -656,7 +697,7 @@ mod tests {
                 "Config/Tls",
             ] {
                 assert!(
-                    read_root(Path::new(rejected), authority, false).is_err(),
+                    read_root(Path::new(rejected), authority, InputMounts::None).is_err(),
                     "{rejected}"
                 );
             }
@@ -666,10 +707,13 @@ mod tests {
     fn bridge_media_access_requires_an_exact_control_directory_and_role() {
         let host = "ab".repeat(32);
         let selected = PathBuf::from(format!("/Media/{host}/Control"));
-        assert_eq!(read_root(&selected, true, true).unwrap(), selected);
-        assert!(read_root(&selected, true, false).is_err());
-        assert!(read_root(&selected, false, false).is_err());
-        assert!(read_root(&selected, false, true).is_err());
+        assert_eq!(
+            read_root(&selected, true, InputMounts::Bridge).unwrap(),
+            selected
+        );
+        assert!(read_root(&selected, true, InputMounts::None).is_err());
+        assert!(read_root(&selected, false, InputMounts::None).is_err());
+        assert!(read_root(&selected, false, InputMounts::Bridge).is_err());
         for path in [
             "/Media".into(),
             format!("/Media/{host}"),
@@ -682,8 +726,35 @@ mod tests {
             "/Media/ab/Control".into(),
             format!("Media/{host}/Control"),
         ] {
-            assert!(read_root(Path::new(&path), true, true).is_err(), "{path}");
+            assert!(
+                read_root(Path::new(&path), true, InputMounts::Bridge).is_err(),
+                "{path}"
+            );
         }
+    }
+    #[test]
+    fn route_socket_mounts_are_exact_and_do_not_expand_other_roles() {
+        for root in ["/Egress", "/Application"] {
+            let path = Path::new(root);
+            assert_eq!(read_root(path, true, InputMounts::Route).unwrap(), path);
+            assert!(read_root(path, false, InputMounts::Route).is_err());
+            for mounts in [InputMounts::None, InputMounts::Bridge] {
+                assert!(read_root(path, true, mounts).is_err());
+            }
+        }
+        for rejected in [
+            "/",
+            "/State",
+            "/Egress/Egress.sock",
+            "/Application/Control.sock",
+            "/Egress/../Application",
+            "/ApplicationOther",
+            "Application",
+        ] {
+            assert!(read_root(Path::new(rejected), true, InputMounts::Route).is_err());
+        }
+        let media = PathBuf::from(format!("/Media/{}/Control", "ab".repeat(32)));
+        assert!(read_root(&media, true, InputMounts::Route).is_err());
     }
     #[test]
     fn nomap_excludes_the_login_identity_in_the_parent_namespace() {

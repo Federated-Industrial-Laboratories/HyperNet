@@ -115,7 +115,7 @@ impl Entry {
         let record = records.last().context("mutation audit derives no record")?;
         ensure!(
             snapshot.epoch == historical.scope.epoch
-                && snapshot.height.checked_add(1) == Some(self.height)
+                && snapshot.height < self.height
                 && intent.minimum_policy_epoch == snapshot.epoch
                 && intent.minimum_policy_height == snapshot.height
                 && wire::digest(record) == self.created.digest
@@ -145,6 +145,13 @@ impl Entry {
     }
 }
 impl Evidence {
+    pub fn creation_height(&self, created: &VersionRef) -> Result<u64> {
+        self.0
+            .iter()
+            .find(|entry| entry.created == *created)
+            .map(|entry| entry.height)
+            .context("creation provenance is absent")
+    }
     #[cfg(test)]
     pub(super) fn at_capacity() -> Self {
         // Synthetic bytes are only for capacity preflight. Historical evidence

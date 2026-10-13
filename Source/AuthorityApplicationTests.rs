@@ -274,6 +274,11 @@ pub(super) fn result_bytes(execution: &Execution) -> &[u8] {
         ExecutionOutput::Inert => panic!("expected a certified operation result"),
     }
 }
+pub(crate) fn state_parses(application: &PolicyApplication) -> usize {
+    application
+        .state_parses
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
 fn attestation_bytes(execution: &Execution) -> &[u8] {
     match &execution.output {
         ExecutionOutput::Result { attestation, .. } => attestation,

@@ -223,11 +223,52 @@ fn durable_votes_locks_and_results_survive_lost_replies() {
     resumed.decide(&commit.bytes).unwrap();
     assert_eq!(resumed.committed().unwrap().height, 1);
     assert_eq!(resumed.applied().unwrap().height, 0);
+    let discovery_generation = resumed.generation();
+    assert!(matches!(
+        resumed
+            .apply_turn(|_, _| panic!("Discovery executed before durable publication"))
+            .unwrap(),
+        application::Turn::Progress
+    ));
+    assert_eq!(resumed.generation(), discovery_generation + 1);
+    assert_eq!(resumed.applied().unwrap().height, 0);
+    assert!(resumed.execution(commit.node).unwrap().is_none());
+    drop(resumed);
+    let mut resumed = Engine::open(
+        &directories[0].0,
+        config.clone(),
+        keys[0].clone(),
+        discovery_generation + 1,
+    )
+    .unwrap();
     assert!(
         resumed
             .apply_committed(|_, _| anyhow::bail!("Interrupted executor"))
             .is_err()
     );
+    let before_publication = resumed.generation();
+    std::os::unix::fs::symlink("Signer.bin", directories[0].0.join("SignerPending.bin")).unwrap();
+    assert!(
+        resumed
+            .apply_committed(|_, position| Ok(execution(&config, position)))
+            .is_err()
+    );
+    assert_eq!(resumed.generation(), before_publication);
+    assert_eq!(resumed.archive.leaves().len(), 1);
+    assert_eq!(resumed.snapshot.archive_size, 0);
+    assert!(resumed.active().is_err());
+    drop(resumed);
+    std::fs::remove_file(directories[0].0.join("SignerPending.bin")).unwrap();
+    let mut resumed = Engine::open(
+        &directories[0].0,
+        config.clone(),
+        keys[0].clone(),
+        before_publication,
+    )
+    .unwrap();
+    assert_eq!(resumed.applied().unwrap().height, 0);
+    assert!(resumed.archive.leaves().is_empty());
+    assert!(resumed.execution(commit.node).unwrap().is_none());
     let result = resumed
         .apply_committed(|_, position| Ok(execution(&config, position)))
         .unwrap();
@@ -333,10 +374,51 @@ fn duplicate_phase_lookups_verify_only_exact_quorums_with_retained_history() {
             .receive_wish(&synchronizer::sign(&config, 5, key).unwrap())
             .unwrap();
     }
+    let generation = engine.generation();
+    let repeated = synchronizer::sign(&config, 5, &keys[0]).unwrap();
+    let duplicate = engine.receive_wish(&repeated).unwrap();
+    assert!(duplicate.wish.is_none() && duplicate.new_view.is_none());
+    let mut invalid = repeated;
+    *invalid.last_mut().unwrap() ^= 1;
+    assert!(engine.receive_wish(&invalid).is_err());
+    assert_eq!(engine.generation(), generation);
     let high = engine
         .known_certificate(&engine.snapshot.highest_prepare)
         .unwrap();
     let command = request(&config, 55);
+    for key in &keys {
+        let report = NewView::sign(&config, 5, high.digest(), key).unwrap();
+        engine.receive_new_view(&report.envelope).unwrap();
+    }
+    let selected = report_id(5, &config.voters[0]);
+    let original = engine.snapshot.reports[&selected].clone();
+    let mut invalid = original.clone();
+    *invalid.last_mut().unwrap() ^= 1;
+    let wrong_signer = NewView::sign(&config, 5, high.digest(), &keys[1]).unwrap();
+    let wrong_view = NewView::sign(&config, 4, high.digest(), &keys[0]).unwrap();
+    let wrong_phase = NewView::sign(&config, 5, engine.snapshot.locked, &keys[0]).unwrap();
+    let generation = engine.generation();
+    for replacement in [
+        invalid,
+        wrong_signer.envelope,
+        wrong_view.envelope,
+        wrong_phase.envelope,
+    ] {
+        engine
+            .snapshot
+            .reports
+            .insert(selected.clone(), replacement);
+        assert!(engine.propose(&command, 10000).is_err());
+        assert_eq!(engine.generation(), generation);
+    }
+    engine.snapshot.reports.insert(selected, original);
+    let previous_reports = engine.snapshot.reports.clone();
+    for signer in &config.voters[2..] {
+        engine.snapshot.reports.remove(&report_id(5, signer));
+    }
+    assert!(engine.propose(&command, 10000).is_err());
+    assert_eq!(engine.generation(), generation);
+    engine.snapshot.reports = previous_reports.clone();
     let node = Node {
         scope: config.scope.clone(),
         view: 5,
@@ -346,8 +428,12 @@ fn duplicate_phase_lookups_verify_only_exact_quorums_with_retained_history() {
         evaluated_at: 10000,
         justify: Some(high.digest()),
     };
-    let leader = &keys[config.member(&config.leader(5).unwrap()).unwrap()];
-    let proposal = wire::sign_envelope(&node.encode().unwrap(), leader).unwrap();
+    let proposal = engine.propose(&command, 10000).unwrap();
+    assert_eq!(
+        wire::envelope(&proposal, 1).unwrap().0,
+        node.encode().unwrap()
+    );
+    assert_eq!(engine.snapshot.reports, previous_reports);
     engine
         .prepare(&proposal, &command, |_| Ok(()), |_, _| Ok(()))
         .unwrap();
@@ -369,9 +455,46 @@ fn duplicate_phase_lookups_verify_only_exact_quorums_with_retained_history() {
             .collect::<Vec<_>>()
     };
     let prepares = phase_votes(Phase::Prepare);
+    let own_index = vote_id(5, Phase::Prepare, &config.voters[0]);
+    let own = engine.snapshot.votes[&own_index].clone();
+    let mut corrupt = own.clone();
+    *corrupt.last_mut().unwrap() ^= 1;
+    let wrong_phase = phase_votes(Phase::PreCommit)[0].envelope.clone();
+    let generation = engine.generation();
+    for replacement in [&corrupt, &prepares[2].envelope, &wrong_phase] {
+        engine
+            .snapshot
+            .votes
+            .insert(own_index.clone(), replacement.clone());
+        assert!(engine.receive_vote(&prepares[1].envelope).is_err());
+        assert_eq!(engine.generation(), generation);
+        assert!(!engine.snapshot.votes.contains_key(&vote_id(
+            5,
+            Phase::Prepare,
+            &config.voters[1]
+        )));
+    }
+    engine.snapshot.votes.insert(own_index, own);
+    let unrelated = engine
+        .snapshot
+        .votes
+        .iter()
+        .filter(|(_, bytes)| SignedVote::parse(&config, bytes).unwrap().vote.view != 5)
+        .map(|(key, bytes)| (key.clone(), bytes.clone()))
+        .collect::<BTreeMap<_, _>>();
+    assert!(!unrelated.is_empty());
     for vote in &prepares {
         engine.receive_vote(&vote.envelope).unwrap();
     }
+    assert!(
+        unrelated
+            .iter()
+            .all(|(key, bytes)| engine.snapshot.votes.get(key) == Some(bytes))
+    );
+    let selected = engine
+        .known_certificate(&Certificate::vote_digest(&prepares[0].vote).unwrap())
+        .unwrap();
+    assert_eq!(selected.vote.as_ref(), Some(&prepares[0].vote));
     let prepare = Certificate::collect(&config, &prepares[..3]).unwrap();
     let extended = Certificate::collect(&config, &prepares).unwrap();
     let mut unsigned = wire::decode(&prepare.bytes)
@@ -436,6 +559,20 @@ fn duplicate_phase_lookups_verify_only_exact_quorums_with_retained_history() {
         assert_eq!(engine.generation(), generation);
     }
     engine.snapshot.certificates.insert(index, original);
+    let mut invalid_phase = precommit.bytes.clone();
+    *invalid_phase.last_mut().unwrap() ^= 1;
+    assert!(engine.advance_phase(&invalid_phase).is_err());
+    assert_eq!(engine.generation(), generation);
+
+    let commits = phase_votes(Phase::Commit);
+    let commit = Certificate::collect(&config, &commits[..3]).unwrap();
+    engine.decide(&commit.bytes).unwrap();
+    let generation = engine.generation();
+    engine.decide(&commit.bytes).unwrap();
+    let mut invalid_commit = commit.bytes.clone();
+    *invalid_commit.last_mut().unwrap() ^= 1;
+    assert!(engine.decide(&invalid_commit).is_err());
+    assert_eq!(engine.generation(), generation);
 }
 #[test]
 fn result_forgery_cannot_acquire_an_executed_signature() {

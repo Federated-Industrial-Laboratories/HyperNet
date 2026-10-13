@@ -104,6 +104,7 @@ struct Driver {
     outbox: BTreeMap<Digest, (u64, Message, Vec<u8>)>,
     local: VecDeque<Message>,
     requests: BTreeMap<Digest, Submission>,
+    request_order: VecDeque<Digest>,
     input_flight: Option<input_driver::Flight>,
     input_waiting: BTreeMap<Digest, (Key, Message)>,
     query_times: BTreeMap<Digest, Instant>,
@@ -196,6 +197,7 @@ pub async fn serve(
         outbox: BTreeMap::new(),
         local: VecDeque::new(),
         requests: BTreeMap::new(),
+        request_order: VecDeque::new(),
         input_flight: None,
         input_waiting: BTreeMap::new(),
         query_times: BTreeMap::new(),
@@ -364,6 +366,13 @@ impl Driver {
         Ok(())
     }
     fn broadcast(&mut self, message: Message) -> Result<()> {
+        self.engine.active()?;
+        // The bounded outbox already holds authenticated, signed bytes for an
+        // exact message. Its existing retransmission path remains responsible
+        // for delivery; a duplicate need not validate and sign those bytes again.
+        if self.outbox.values().any(|(_, known, _)| known == &message) {
+            return Ok(());
+        }
         let bytes = self.engine.sign_peer(&message)?;
         let digest = wire::digest(&bytes);
         if self.outbox.contains_key(&digest) {
@@ -433,6 +442,8 @@ impl Driver {
             let committed = self.engine.unapplied_commands()?;
             self.requests
                 .retain(|digest, _| !committed.contains(digest));
+            self.request_order
+                .retain(|digest| self.requests.contains_key(digest));
         }
         let broadcasts = self.outbox.keys().copied().collect();
         let submissions = self.requests.keys().copied().collect();
@@ -519,6 +530,8 @@ impl Driver {
                 OrderedRequest::parse(self.engine.configuration(), &bytes.command)
                     .is_ok_and(|r| r.expires.saturating_add(5000) > now)
             });
+            self.request_order
+                .retain(|digest| self.requests.contains_key(digest));
         }
         let pending: Vec<_> = self.requests.values().cloned().collect();
         for command in pending {
@@ -542,6 +555,23 @@ impl Driver {
         self.prune_queues()?;
         self.try_propose()
     }
+    fn remember_request(&mut self, submission: Submission) -> Result<Digest> {
+        let digest = wire::digest(&submission.command);
+        if self.requests.contains_key(&digest) {
+            return Ok(digest);
+        }
+        ensure!(
+            self.requests.len() < MAX_PENDING,
+            "pending request capacity reached"
+        );
+        self.requests.insert(digest, submission);
+        self.request_order.push_back(digest);
+        Ok(digest)
+    }
+    fn remove_request(&mut self, digest: &Digest) {
+        self.requests.remove(digest);
+        self.request_order.retain(|pending| pending != digest);
+    }
     fn submit(&mut self, submission: Submission) -> Result<Digest> {
         submission.encode()?;
         let command = &submission.command;
@@ -552,7 +582,7 @@ impl Driver {
         );
         let digest = wire::digest(command);
         if self.engine.unapplied_commands()?.contains(&digest) {
-            self.requests.remove(&digest);
+            self.remove_request(&digest);
             self.prune_queues()?;
             return Ok(digest);
         }
@@ -577,8 +607,7 @@ impl Driver {
         )?;
         self.application
             .validate(self.engine.application(), command, now, &resolved)?;
-        self.requests.insert(digest, submission);
-        Ok(digest)
+        self.remember_request(submission)
     }
 
     fn try_propose(&mut self) -> Result<()> {
@@ -608,9 +637,11 @@ impl Driver {
             }
             return Ok(());
         }
+        // A later digest cannot displace older eligible work; future requests retain their place.
         let commands: Vec<_> = self
-            .requests
-            .values()
+            .request_order
+            .iter()
+            .filter_map(|digest| self.requests.get(digest))
             .filter(|command| request_eligible_at(&command.command).is_ok_and(|time| time <= now))
             .cloned()
             .collect();
@@ -956,7 +987,7 @@ impl Driver {
         }
         if let super::application::Turn::Result(node, record) = progress {
             let command = node.command.context("Applied result command missing")?;
-            self.requests.remove(&command);
+            self.remove_request(&command);
             self.broadcast(Message::Execution(
                 node.encode()?,
                 record.attestation,
@@ -1092,6 +1123,17 @@ impl Driver {
                 } else {
                     Some(input[4].fixed::<32>()?)
                 };
+                if input[2] == V::Null {
+                    return match self.engine.latest_history_reply(
+                        input[0].uint()?,
+                        input[1].fixed::<32>()?,
+                        input[3].uint()?,
+                        prior,
+                    )? {
+                        Some(reply) => Ok(reply),
+                        None => self.reply(2, 1, None, None),
+                    };
+                }
                 match self.engine.history_reply(
                     input[0].uint()?,
                     input[1].fixed::<32>()?,

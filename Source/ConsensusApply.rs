@@ -56,32 +56,30 @@ impl Engine {
         {
             return Ok(Turn::Idle);
         }
-        if self.snapshot.apply_cursor.is_none() {
-            let certificate = *self
-                .snapshot
-                .commit_certificates
-                .get(&id(&self.snapshot.committed))
-                .context("Actual deciding certificate missing")?;
-            let mut next = self.snapshot.clone();
-            next.apply_cursor = Some(Cursor {
-                target: next.committed,
-                certificate,
-                base: next.applied,
-                state: wire::digest(&next.application),
-                scan: next.committed,
-                reverse: Vec::new(),
-                verified: false,
-            });
-            self.persist(next)?;
-        }
-        let cursor = self
+        if self
             .snapshot
             .apply_cursor
             .as_ref()
-            .context("Application cursor missing")?;
-        if !cursor.verified {
+            .is_none_or(|cursor| !cursor.verified)
+        {
             let mut next = self.snapshot.clone();
-            let mut cursor = next.apply_cursor.take().unwrap();
+            let mut cursor = if let Some(cursor) = next.apply_cursor.take() {
+                cursor
+            } else {
+                let certificate = *next
+                    .commit_certificates
+                    .get(&id(&next.committed))
+                    .context("Actual deciding certificate missing")?;
+                Cursor {
+                    target: next.committed,
+                    certificate,
+                    base: next.applied,
+                    state: wire::digest(&next.application),
+                    scan: next.committed,
+                    reverse: Vec::new(),
+                    verified: false,
+                }
+            };
             let qc = certificate(&self.configuration, &next, &cursor.certificate)?;
             ensure!(
                 qc.phase == Phase::Commit && qc.node == cursor.target,
@@ -115,9 +113,16 @@ impl Engine {
                 cursor.verified = true;
             }
             next.apply_cursor = Some(cursor);
+            // The committed/applied roots already survive a crash. Publish initial discovery
+            // with its first bounded scan before any application callback or output.
             self.persist(next)?;
             return Ok(Turn::Progress);
         }
+        let cursor = self
+            .snapshot
+            .apply_cursor
+            .as_ref()
+            .context("Application cursor missing")?;
         if cursor.reverse.is_empty() {
             let mut next = self.snapshot.clone();
             next.apply_cursor = None;

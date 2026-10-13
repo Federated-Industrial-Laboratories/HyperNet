@@ -144,6 +144,29 @@ impl Point {
             && self.state == wire::digest(prior)
     }
 }
+fn within_floor(
+    point: (u64, u64, [u8; 32]),
+    config: &Configuration,
+    state: &State,
+    prior: &[u8],
+) -> bool {
+    point.0 == config.scope.epoch
+        && point.1 <= state.height
+        && (point.1 < state.height || point.2 == wire::digest(prior))
+}
+fn creation_value(value: V, state: &State, created: &VersionRef, replay: bool) -> Result<V> {
+    let height = if replay {
+        state.evidence.creation_height(created)?
+    } else {
+        state
+            .height
+            .checked_add(1)
+            .context("creation height overflow")?
+    };
+    let mut fields = value.array(5)?.to_vec();
+    fields.push(V::Uint(height));
+    Ok(array(fields))
+}
 pub(super) enum Operation {
     Runtime(crate::authority_runtime_activation::Operation),
     Reconfigure(crate::authority_epoch::Declaration),
@@ -206,7 +229,7 @@ impl Operation {
         }
         if matches!(
             intent.action.as_str(),
-            "AuthorityDelegateGrant" | "AuthorityAdmitMember"
+            "AuthorityDelegateGrant" | "AuthorityAdmitMember" | "AuthorityRedeemMember"
         ) {
             return Ok(Self::Mutation(Mutation::parse(intent)?));
         }
@@ -353,10 +376,12 @@ pub(super) fn evaluate(
             replay,
         )?;
         let snapshot = runtime.snapshot();
-        if snapshot.epoch != config.scope.epoch
-            || snapshot.height > state.height
-            || snapshot.height == state.height && snapshot.state != wire::digest(prior)
-        {
+        if !within_floor(
+            (snapshot.epoch, snapshot.height, snapshot.state),
+            config,
+            state,
+            prior,
+        ) {
             selected.refuse(12);
         }
         return Ok(Decision {
@@ -402,9 +427,6 @@ pub(super) fn evaluate(
             });
         }
         let snapshot = domain.snapshot();
-        let exact = snapshot.epoch == config.scope.epoch
-            && snapshot.height == state.height
-            && snapshot.state == wire::digest(prior);
         let mut selected = domain.prepare_with_inputs(
             &state.domains,
             &state.records,
@@ -419,9 +441,12 @@ pub(super) fn evaluate(
         // every relevant dependency and rechecks current authority and target
         // constraints; unrelated receipt commits do not invalidate that compare.
         if !replay
-            && (snapshot.epoch != config.scope.epoch
-                || snapshot.height > state.height
-                || snapshot.height == state.height && !exact)
+            && !within_floor(
+                (snapshot.epoch, snapshot.height, snapshot.state),
+                config,
+                state,
+                prior,
+            )
         {
             selected.refuse(12);
         }
@@ -441,7 +466,9 @@ pub(super) fn evaluate(
                 added.is_empty()
                     || matches!(
                         domain.command,
-                        crate::authority_domains::Command::Mail(
+                        crate::authority_domains::Command::Route(
+                            crate::authority_domains::routes::Command::Invite { .. }
+                        ) | crate::authority_domains::Command::Mail(
                             crate::authority_domains::mail::Command::Publish { .. }
                         ) | crate::authority_domains::Command::SealedIdentity(
                             crate::authority_domains::sealed_identity::Command::Root { .. }
@@ -478,9 +505,12 @@ pub(super) fn evaluate(
         )?;
         if let Some(snapshot) = deployment.snapshot()
             && !replay
-            && (snapshot.epoch != config.scope.epoch
-                || snapshot.height != state.height
-                || snapshot.state != wire::digest(prior))
+            && !within_floor(
+                (snapshot.epoch, snapshot.height, snapshot.state),
+                config,
+                state,
+                prior,
+            )
         {
             selected.refuse(12);
         }
@@ -506,6 +536,11 @@ pub(super) fn evaluate(
                 changed = Some(records);
             }
         }
+        if selected.code == 0
+            && let Some(created) = &selected.created
+        {
+            selected.value = creation_value(selected.value, state, created, replay)?;
+        }
         return Ok(Decision {
             code: selected.code,
             value: selected.value,
@@ -523,9 +558,12 @@ pub(super) fn evaluate(
             application.authorise(&state.records, &reserved, intent, evaluated, replay)?;
         if let Some(snapshot) = application.snapshot()
             && !replay
-            && (snapshot.epoch != config.scope.epoch
-                || snapshot.height != state.height
-                || snapshot.state != wire::digest(prior))
+            && !within_floor(
+                (snapshot.epoch, snapshot.height, snapshot.state),
+                config,
+                state,
+                prior,
+            )
         {
             selected.refuse(12);
         }
@@ -551,6 +589,11 @@ pub(super) fn evaluate(
                 changed = Some(records);
             }
         }
+        if selected.code == 0
+            && let Some(created) = &selected.created
+        {
+            selected.value = creation_value(selected.value, state, created, replay)?;
+        }
         return Ok(Decision {
             code: selected.code,
             value: selected.value,
@@ -568,13 +611,40 @@ pub(super) fn evaluate(
         });
     }
     if let Operation::Mutation(mutation) = operation {
+        let redeem = intent.action == "AuthorityRedeemMember";
+        if redeem {
+            let Mutation::Admit {
+                acceptance, grant, ..
+            } = mutation
+            else {
+                anyhow::bail!("candidate redemption is not an admission");
+            };
+            let invitation = state.domains.record(168, acceptance.member_id)?;
+            let invitation = crate::authority_domains::routes::Invitation::parse(
+                &invitation.payload,
+                intent.network,
+                intent.incarnation,
+            )?;
+            let parameters = wire::decode(&intent.parameters)?;
+            ensure!(
+                invitation.grant.id == *grant
+                    && wire::envelope(&invitation.offer, 1)?.0
+                        == wire::envelope(parameters.array(6)?[4].bytes()?, 2)?.0,
+                "redemption differs from the issued candidate-specific invitation"
+            );
+        }
         let mut selected =
             mutation.authorise(&state.records, &reserved, intent, evaluated, replay)?;
         let snapshot = mutation.snapshot();
+        // The point is a causal floor. Current authority, identity conflicts and
+        // every exact dependency are re-evaluated above at this committed order.
         if !replay
-            && (snapshot.epoch != config.scope.epoch
-                || snapshot.height != state.height
-                || snapshot.state != wire::digest(prior))
+            && !within_floor(
+                (snapshot.epoch, snapshot.height, snapshot.state),
+                config,
+                state,
+                prior,
+            )
         {
             selected.code = super::minimum_code(selected.code, 12);
         }
@@ -596,18 +666,26 @@ pub(super) fn evaluate(
                 Governance::parse(config.scope.network, config.scope.incarnation, &records)?;
             }
         }
+        let mut result = value(&intent.action, &dependencies, b(&selected.record));
+        if selected.code == 0 {
+            result = creation_value(result, state, &selected.created, replay)?;
+        }
         return Ok(Decision {
             code: selected.code,
-            value: value(&intent.action, &dependencies, b(&selected.record)),
+            value: result,
             expires: selected.expires_ms.min(request_expires),
             records: (selected.code == 0 && !replay).then_some(records),
             domains: None,
             restrictions: Default::default(),
             terminal: None,
-            admissions: if replay {
+            admissions: if replay || redeem {
                 vec![]
             } else {
-                selected.member_key.into_iter().collect()
+                selected
+                    .member_key
+                    .into_iter()
+                    .filter(|key| !state.streams.keys().contains(key))
+                    .collect()
             },
             created: Some(selected.created),
         });
@@ -706,7 +784,15 @@ pub(super) fn evaluate(
             snapshot,
             ..
         } => {
-            if !current.contains(target) || (!replay && !point.exact(config, state.height, prior)) {
+            if !current.contains(target)
+                || (!replay
+                    && !within_floor(
+                        (point.epoch, point.height, point.state),
+                        config,
+                        state,
+                        prior,
+                    ))
+            {
                 decision.code = 12;
                 return Ok(decision);
             }
@@ -772,7 +858,12 @@ pub(super) fn evaluate(
                 Governance::parse(config.scope.network, config.scope.incarnation, &records)?;
                 decision.records = Some(records);
             }
-            decision.value = value(&intent.action, &refs, b(&tombstone));
+            decision.value = creation_value(
+                value(&intent.action, &refs, b(&tombstone)),
+                state,
+                &revoked,
+                replay,
+            )?;
         }
     }
     Ok(decision)

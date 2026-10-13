@@ -429,8 +429,10 @@ rechecks current authority, expiry, consent, target identity and generation,
 absence constraints and available capacity. Unrelated read or receipt commits
 therefore do not invalidate a mutation; a relevant change still refuses. The
 result remains bound to its actual committed state and the consumer verifies
-continuity from its own retained floor. This rule does not change the separate
-exact-point requirements of governance, deployment or epoch operations.
+continuity from its own retained floor. Delegation, member admission,
+application/deployment registration and withdrawal, and grant revocation use
+the same causal-point rule with their complete current dependency and identity
+checks. Reconfiguration retains its explicitly defined snapshot requirements.
 
 Kind 201 results are `[201,1,action,versions,...fields]`. Versions is the exact
 sorted, unique bounded VersionRef list certified for the action. Every action
@@ -536,13 +538,13 @@ Exact revocation uses
 TargetGrant is an exact kind102 VersionRef. Intent resource/revision name its
 ID/generation; profile is zero. Snapshot dependencies equal intent expected
 and contain the exact pre-state capability dependencies plus target. Its Point
-must equal the prior application epoch, height and complete state digest;
-its height is the intent minimumPolicyHeight.
+is a causal floor in the current application epoch; an equal-height point must
+match the complete state digest. Its height is the intent minimumPolicyHeight.
 
 Current network-scoped RevokeGrant authority is required. The transition
 inserts the immutable kind126 tombstone defined in PolicyContract, with the
 requester as revoker and this exact expectedSnapshot. Its result is
-`[201,1,"AuthorityRevokeGrant",dependenciesAndTombstone,tombstoneBytes]`.
+`[201,1,"AuthorityRevokeGrant",dependenciesAndTombstone,tombstoneBytes,creationHeight]`.
 The consumer independently constructs those bytes from its retained pre-state.
 The result may revoke its own authorising grant; authorisation is checked
 against the pre-state, and subsequent requests observe the revocation.
@@ -601,9 +603,23 @@ still require their own current admission. Additional actions need explicit gran
 Both intents name the created record ID and revision1, with profile0. Their
 minimumPolicyHeight equals the Snapshot point's height. Expected versions equal
 the exact pre-state dependencies. Permit is
-`[201,1,action,dependenciesAndCreatedRecord,createdRecordBytes]`; Refuse is
+`[201,1,action,dependenciesAndCreatedRecord,createdRecordBytes,creationHeight]`; Refuse is
 `[201,1,action,[]]`. Consumers independently derive the created record. Neither
 action returns Pending or changes its target after a timeout.
+
+For these member mutations, application/deployment registration and withdrawal,
+and grant revocation, Permit has exactly six fields. CreationHeight is the U64
+height of the original committed mutation. The authority derives it from durable
+mutation evidence and certifies identical result bytes on every exact replay.
+It must satisfy `Snapshot.height < creationHeight <= ExecutedResult.height`.
+Equality with ExecutedResult.height denotes first execution even when unrelated
+commits followed the signed Snapshot. The first execution must validate consent
+and acceptance at its actual evaluation time. A later certified execution of
+that immutable result denotes replay and may disclose a committed admission after
+its original acceptance window has expired, subject to current disclosure checks.
+A local cached record never changes this classification. Missing, extra, invalid
+or contradictory height metadata refuses; no five-field mutation reader exists.
+Context, Get, List and refusal results keep their own explicit shapes.
 
 The canonical applied state is
 `[250,1,network,incarnation,epoch,height,records,streams,roleReservations,mutationEvidence,domainState,terminalDeclaration,epochOrigin]`.
@@ -703,7 +719,7 @@ Application validity is at most seven days; consent is at most24hours within it.
 AuthorityDelegationContext selects an owned parent, child tier and optional owned
 child. Current DelegateGrant authorises its exact64-reference closure without
 InspectAudit. Its scoped cache is distinct from complete AuthorityContext.
-AuthorityApplicationRegister adds the current Snapshot to accepted immutable
+AuthorityApplicationRegister adds a certified Snapshot to accepted immutable
 terms and atomically creates admission, stream, evidence and completion.
 AuthorityApplicationGet discloses127, exact102 and optional128 only to the owner
 or application. AuthorityApplicationList returns complete sorted owner metadata
@@ -713,10 +729,20 @@ conveys a domain permission. The result value bound remains98304bytes.
 
 AuthorityApplicationWithdraw is a restrictive veto by either recorded party,
 including after grant or ordinary admission expiry. It requires the exact target
-and current Snapshot but no separate RevokeGrant capability. Retries use normal
+and a same-epoch causal Snapshot but no separate RevokeGrant capability. Retries use normal
 permanent stream receipts; they preserve a subsequently fenced application stream
 and all withdrawals. Expired acceptance does not invalidate historical evidence
-of a completed registration or authorise its repetition.
+of a completed registration or authorise its repetition. Registration and
+withdrawal Permit results are
+`[201,1,action,dependenciesAndCreatedRecord,createdRecordBytes,creationHeight]`.
+
+AuthorityDeploymentRegister and AuthorityDeploymentWithdraw apply the same
+causal-point and immutable creation-height rules. They recheck the exact current
+registration authority, operator consent, identities and reservations, or the
+exact admitted deployment and owner's restrictive withdrawal authority. Their
+Permit result is `[201,1,action,dependenciesAndCreatedRecords,createdRecordBytesList,creationHeight]`.
+Registration creates the exact kind117,105 and129 records together; withdrawal
+creates kind130. The metadata does not confer runtime activation authority.
 
 ## Host clock observation
 
@@ -790,6 +816,16 @@ retained position and optional retained tree head. Clients verify this evidence
 independently and durably retain the new head, result position and restrictive
 policy floors before releasing an effect. Ordinary operation3 remains available
 for short contiguous ancestry. Unknown positions, roots and suffixes refuse.
+
+Operation4 accepts `[fromHeight,fromNode,targetNodeOrNull,priorTreeSize,priorTreeRootOrNull]`.
+A null target requests the latest usable nonterminal certified checkpoint, with
+that exact anchor as the reply target and an empty suffix. An unavailable
+checkpoint returns Refused/Unavailable with null optional fields and an empty
+sidecar. This query cannot grant permission or advance a client's trusted floor.
+A client can verify and retain this evidence before creating its application
+challenge, within the original transport limits. After the fresh result, it
+verifies the exact short suffix and rechecks continuity from its retained floor
+before normal durable acceptance. Invalid evidence fails closed.
 
 If the exact target is in the certified archive before the latest checkpoint,
 operation4 returns Refused/HistoryOvertaken with all optional fields null and an
@@ -909,16 +945,19 @@ minimum is1GiB, including journal replacement and pending-object headroom.
 Immutable RuntimeBootstrapKeys is kind131, lookup N:
 
 ```
-[131,1,N,I,1,null,authorityTransports,clockMonitors]
+[131,1,N,I,1,null,authorityTransports,clockMonitors,routeTransports]
 authorityTransports = sorted four [voterKey,transportKey] pairs
 clockMonitors = sorted one through four monitor keys
+routeTransports = [[2,relayServiceId,relayTransportKey],[3,admissionServiceId,admissionTransportKey]]
 ```
 
 The voter keys equal the genesis descriptor's four voters. All transport and
 monitor keys are distinct from each other and existing bootstrap identity
 classes. Genesis reservations add class5 for these transports and class6 for
 these monitors, derived only from this authenticated record. The record has no
-mutable Snapshot and no successor. Draft input explicitly supplies
+mutable Snapshot and no successor. Route mappings must equal the accepted kind31
+bootstrap route. Reserved route transport keys can serve only their exact registered
+role5 endpoint IDs and purposes. Draft input explicitly supplies
 `authorityTransports` and `clockMonitors`; inspection displays both. Reserving a
 transport or service binding does not confer an authority appointment.
 
@@ -983,3 +1022,81 @@ read, review or media effect requires a fresh bilateral proof; immutable byte
 receipts do not advance authority. Healthy epoch adoption retains prior floors
 and verifies the complete terminal/Ready chain. Exceptional recovery creates a
 new identity requiring independent trust acceptance.
+
+
+## Private route authority
+
+Route metadata uses the ordinary kind/domain record envelope:
+`[kind,1,N,I,generation,predecessorDigestOrNull,lookup,payload]`.
+
+| Kind | Lookup | Payload |
+| --- | --- | --- |
+| 165 | Opaque route service ID | `[signedProfile,managerKey,managementGrant,withdrawn]` |
+| 166 | Voucher ID | `[relay165,destination165,sponsorKey,grant102,possessionKey,action,[scopeKind,scopeId],maximumConnections,maximumBytes,expiresMs,creationIntent]` |
+| 167 | Voucher ID | `[reservedConnections,reservedBytes,lastConnection,lastTranscript,lastIntent]` |
+| 168 | Member ID | `[singleSignedOffer,inviterGrant102,creationIntent]` |
+
+A route profile is an operator-signed envelope containing:
+
+```
+[200,1,"AuthorityRouteProfile",N,I,deployment,serviceKey,operatorKey,
+ profile117,consent105,endpointId,identity,addressOrNull,domain,protocol,mode,
+ relayIdOrNull,limits,maximumConnections,assurance,[notBeforeMs,expiresMs],manifestBytes]
+identity = [serviceId,serverName,transportKey,leafDer,certificateAuthorityPem]
+limits = [maximumBytes,maximumDurationMs,maximumIdleMs]
+```
+
+Domain is a canonical lowercase hexadecimal control-domain ID. Mode1 is a relay;
+mode2 is a public endpoint; mode3 is an outbound attachment. Protocol0 is relay
+transit;1 authority;2 content;3 media;4 mail;5 transfer;6 an authenticated foreign
+Page read gate. The local manifest and consent bind exact keys, endpoint IDs,
+limits and mounted service sockets. The exact manifest bytes must reproduce both
+117 and105 references, including the endpoint address and TLS leaf. Certificate validation and exact leaf/key
+pins both apply. A route never grants an application permission.
+
+`RouteContext`, `RouteLookup`, `RouteInviteContext`, `RouteCandidateContext` and
+`RouteVoucherContext` disclose only the checked caller's current dependency
+closure. `RouteRegister`, `RouteWithdraw`, `RouteIssue`, `RoutePermit` and
+`RouteInvite` are ordered mutations. A permit reserves one stream and its full
+finite byte budget before the relay opens a destination. The relay also persists
+a spent connection ID before returning readiness. An uncertain retry cannot
+open another stream under the same reservation.
+
+A retained live connection may use a fresh `RouteVoucherContext` result to
+revalidate its current voucher, sponsor and exact relay/destination profiles.
+That disclosure alone cannot admit a stream: the original verified Permit,
+connection ID, transcript and immutable resource limits remain required.
+Kind167 contains the latest reservation, not an inventory of live connections;
+a later reservation cannot replace an earlier stream's retained admission.
+Spent IDs remain durable through their original connection lifetime. Restart
+retains spent IDs but never reconstructs a live connection from those records.
+
+Current transit and endpoint permission each expire under the ordinary 5000-ms
+challenge ceiling. Every forwarding write remains gated by a fully verified
+current proof. Refresh changes only current permission; it cannot extend the
+original transport duration, byte allowance, consent or application deadline.
+No bytes are released through an expired or withdrawn permission.
+
+`RouteReady` describes remaining total transport limits. Final-service TLS then
+carries `[200,1,"EndpointReady",N,I,service,protocol]`, after endpoint permission
+is current and before any application frame. The client checks all four context
+fields against its pinned profile. It creates an application challenge only after
+this readiness. Multiple framed requests carry submission, polling and history
+on the same admitted channel. Every frame must match its selected protocol;
+protocol1 still excludes diagnostics and management. A failed session closes;
+reconnection requires a fresh Permit and cannot reset an unresolved operation.
+
+An invitation is addressed to one candidate and creates only that candidate's
+requester stream. Its existing administrator-signed acceptance payload is
+countersigned by the candidate. `AuthorityRedeemMember` uses the membership
+mutation parameters and result, with the candidate as requester and the current
+inviter's admission capability as authority. The exact issued kind168 payload,
+current inviter grant, candidate reader grant and all delegation dependencies
+must match. Pending invitations never confer ordinary membership or audit rights.
+
+`RouteReaderPermit` carries a signed `RouteBridgeRead` envelope. It binds the
+network, incarnation, final endpoint, reader, exact grant, action, expiry, nonce
+and exact inert `BridgeLease` packet. The endpoint obtains a fresh quorum result
+before forwarding that packet. The authority checks current local foreign-Page
+permission, publication revision and accepted foreign trust/floor. No unsigned
+bridge administration is exposed by the reader protocol.

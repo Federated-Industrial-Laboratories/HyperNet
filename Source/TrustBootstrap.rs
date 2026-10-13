@@ -344,7 +344,7 @@ fn verify(bytes: &[u8], require_acceptance: bool, time: Option<u64>) -> Result<V
             100 | 102 => 17,
             101 => 14,
             114 => 13,
-            131 => 8,
+            131 => 9,
             _ => bail!("unexpected genesis record kind"),
         };
         let values = record(&value, kind, arity)?;
@@ -566,6 +566,11 @@ fn verify(bytes: &[u8], require_acceptance: bool, time: Option<u64>) -> Result<V
     let admission_service = id(&route[8])?;
     let relay_key = key(&route[6])?;
     let admission_key = key(&route[10])?;
+    ensure!(
+        runtime_keys.route_transports.get(&2) == Some(&(relay_service, relay_key))
+            && runtime_keys.route_transports.get(&3) == Some(&(admission_service, admission_key)),
+        "Bootstrap route differs from its immutable runtime identity mapping"
+    );
     ensure!(
         relay_service != admission_service && relay_key != admission_key,
         "relay and admission identities must differ"
@@ -820,6 +825,24 @@ pub fn draft(spec: DraftSpec, identities: [[u8; 32]; 4], time: u64) -> Result<Ve
     ]);
     let policy_bytes = wire::encode(&array(policy))?;
     let runtime_keys = crate::runtime_bootstrap_keys::Keys {
+        route_transports: [
+            (
+                2,
+                (
+                    hex32(&spec.route.relay_service)?,
+                    hex32(&spec.route.relay_transport_key)?,
+                ),
+            ),
+            (
+                3,
+                (
+                    hex32(&spec.route.admission_service)?,
+                    hex32(&spec.route.admission_transport_key)?,
+                ),
+            ),
+        ]
+        .into_iter()
+        .collect(),
         authority_transports: spec
             .authority_transports
             .iter()

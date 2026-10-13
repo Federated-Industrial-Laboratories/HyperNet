@@ -121,7 +121,7 @@ is not authority readiness. Use an independently validating Suite authority
 operation to establish that a current quorum can answer that operation.
 
 This profile runs the `Authority` role. The separate `runtime services` commands
-manage explicitly admitted Page, Media, Mail, Transfer and SSH services. See
+manage explicitly admitted Page, Media, Mail, Transfer, Route, Bridge and SSH services. See
 [ServiceRuntime](ServiceRuntime.md) for their exact consent and activation workflow.
 Reader join, mail and Pages are unavailable through the authority runtime profile.
 
@@ -179,6 +179,13 @@ runtime to recreate the signer. Preserve the existing journal and its independen
 floor when arranging new consent. Do not initialise the same voter key into a
 fresh journal to bypass expiry or a restart refusal.
 
+Each replica retains at most32 pending submissions and proposes eligible requests
+in their first local admission order. Duplicate submissions retain their original
+position. A future request does not block eligible work, and completed, committed
+or expired entries leave both the request index and its ordering queue. A durable
+proposal for the current view and terminal progress keep their existing priority.
+Queue order does not extend any challenge or guarantee completion before expiry.
+
 ## Recovery and diagnostics
 
 `diagnose` reports only local lifecycle state and fixed failure categories. It
@@ -192,6 +199,31 @@ cleanup, when the recorded container identity and configuration still verify.
 The private record contains running, exit, OOM and PID observations plus up to
 32 KiB each of standard output and standard error from the last 64 log lines.
 Diagnostic capture failure does not prevent stopping the owned workload.
+
+Replica diagnostics include an `ActivitySummary` at most once every five
+seconds of completed work. It reports the view range, elapsed interval, elapsed
+time inside driver turns, storage synchronisation time and journal commit counts.
+It also reports quorum-certificate signature-check time, check counts and exact
+proof reuse counts, complete application-state validation time and reuse counts,
+metadata encoding time and maximum encoded size. Expired challenge counts include
+the maximum non-negative age at proposal evaluation. These aggregate counters
+carry no timestamps or operation identifiers. Ordinary turns below the slow-turn threshold contribute to these totals. Counters contain
+no request contents, paths or identities. These timings help distinguish storage
+cost from other driver work; they do not establish clock health or quorum status.
+
+Each execution thread retains at most 256 successful quorum-certificate proofs
+within a 256 KiB byte allowance. Exact proof bytes can reuse signature arithmetic.
+Parsing, scope, voter membership and signer ordering are checked on every use.
+This transient cache stores no permission decision and grants no current authority;
+view, branch, input, epoch and application checks remain separate.
+
+Each policy application retains one successfully validated immutable state for
+its fixed authority configuration. Reuse requires identical complete state bytes;
+other bytes receive full validation, and a failed validation cannot replace the
+entry. The retained encoding obeys the existing 8 MiB application-state bound.
+Execution clones the validated state before mutation. Current permission,
+revocation, request, epoch and clock checks run for each operation; this entry
+contains no reusable permission result and is empty after restart.
 
 The runtime publishes a completed configuration tree atomically. Pending
 preparation can resume, but published state is never deleted or replaced. Every

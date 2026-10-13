@@ -56,6 +56,8 @@ mod authority_recipient;
 mod authority_recovery;
 #[path = "AuthorityReplica.rs"]
 mod authority_replica;
+#[path = "AuthorityRouteReader.rs"]
+mod authority_route_reader;
 #[path = "AuthorityRuntimeActivation.rs"]
 mod authority_runtime_activation;
 #[path = "AuthorityTransferService.rs"]
@@ -72,6 +74,27 @@ mod markup;
 mod policy;
 #[path = "Protocol.rs"]
 mod protocol;
+#[path = "RouteAuthority.rs"]
+mod route_authority;
+#[path = "RouteConfig.rs"]
+mod route_config;
+#[cfg(test)]
+#[path = "RouteConnector.rs"]
+mod route_connector;
+#[path = "RouteEndpoint.rs"]
+mod route_endpoint;
+#[path = "RouteIo.rs"]
+mod route_io;
+#[path = "RouteProfile.rs"]
+mod route_profile;
+#[path = "RouteProtocol.rs"]
+mod route_protocol;
+#[path = "RouteRuntime.rs"]
+mod route_runtime;
+#[path = "RouteState.rs"]
+mod route_state;
+#[path = "RouteTls.rs"]
+mod route_tls;
 #[path = "RuntimeAuthorization.rs"]
 mod runtime_authorization;
 #[path = "RuntimeBootstrapKeys.rs"]
@@ -159,6 +182,10 @@ enum Command {
     },
     #[command(hide = true)]
     RuntimeServiceInitialise,
+    /// Run the exact consented private relay or application endpoint.
+    PrivateRouteService,
+    #[command(hide = true)]
+    PrivateRouteEgress,
     #[command(hide = true)]
     RuntimeServiceReceipt,
     #[command(hide = true)]
@@ -226,6 +253,8 @@ fn run() -> Result<()> {
             arguments,
         } => runtime_guard::run(kind, expires, arguments)?,
         Command::Runtime { command } => runtime_management::run(command)?,
+        Command::PrivateRouteService => runtime_service_entry::routes()?,
+        Command::PrivateRouteEgress => runtime_management::services::egress::run()?,
         Command::RuntimeServiceInitialise => {
             runtime_service_entry::initialise()?;
         }

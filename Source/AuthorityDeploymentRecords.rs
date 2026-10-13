@@ -262,6 +262,14 @@ impl Index {
                     } else {
                         None
                     }
+                } else if r.services.get(&5) == Some(service) {
+                    roots.as_ref().and_then(|roots| {
+                        roots
+                            .route_transports
+                            .iter()
+                            .find(|(_, (_, transport))| transport == key)
+                            .map(|(class, _)| *class)
+                    })
                 } else {
                     None
                 };

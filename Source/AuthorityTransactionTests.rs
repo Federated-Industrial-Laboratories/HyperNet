@@ -240,7 +240,7 @@ fn exact_revoke_is_atomic_and_an_existing_tombstone_never_reactivates() {
     );
 }
 #[test]
-fn stale_snapshot_never_partially_revokes() {
+fn revocation_floor_allows_unrelated_discovery_and_replays_exactly() {
     let f = Fixture::with_extra_administrator(1000, vec![12, 25]);
     let (prior, target) = extra_grant(&f);
     let request = revoke(&f, &prior, target, 2);
@@ -254,7 +254,7 @@ fn stale_snapshot_never_partially_revokes() {
         )
         .unwrap();
     assert_eq!(result_code(&advanced), 0);
-    let denied = f
+    let applied = f
         .app
         .execute(
             &advanced.state,
@@ -262,12 +262,20 @@ fn stale_snapshot_never_partially_revokes() {
             &crate::authority_objects::Resolved::default(),
         )
         .unwrap();
-    assert_eq!(result_code(&denied), 12);
+    assert_eq!(result_code(&applied), 0);
     let original_records = State::parse(&f.app.config, &prior).unwrap().records;
     assert_eq!(
-        State::parse(&f.app.config, &denied.state).unwrap().records,
-        original_records
+        State::parse(&f.app.config, &applied.state)
+            .unwrap()
+            .records
+            .len(),
+        original_records.len() + 1
     );
+    let replayed =
+        super::membership_tests::execute(&f, &applied.state, &request, &f.requester, 6000);
+    assert_eq!(result_code(&replayed), 0);
+    assert_eq!(result_bytes(&applied), result_bytes(&replayed));
+    f.app.validate_checkpoint(&replayed.state, 3).unwrap();
 }
 #[test]
 fn discovery_returns_current_tombstones_but_never_relabels_a_cached_result() {

@@ -154,10 +154,17 @@ fn admission_audit_restart_replay_and_expired_operator_withdrawal_are_atomic() {
     let f = fixture();
     let before = State::parse(&f.app.config, &f.initial).unwrap();
     let request = registration(&f, &before, &f.initial);
-    let committed = f.committed(&request, 4000, 6000, 1);
+    let advanced = membership_tests::execute(
+        &f,
+        &f.initial,
+        &membership_tests::status(&f, &f.requester, 93),
+        &f.requester,
+        5500,
+    );
+    let committed = f.committed(&request, 4000, 6000, 2);
     f.app
         .validate(
-            &f.initial,
+            &advanced.state,
             &committed.command,
             6000,
             &crate::authority_objects::Resolved::default(),
@@ -166,7 +173,7 @@ fn admission_audit_restart_replay_and_expired_operator_withdrawal_are_atomic() {
     let applied = f
         .app
         .execute(
-            &f.initial,
+            &advanced.state,
             &committed,
             &crate::authority_objects::Resolved::default(),
         )
@@ -176,12 +183,12 @@ fn admission_audit_restart_replay_and_expired_operator_withdrawal_are_atomic() {
     assert_eq!(state.records.len(), before.records.len() + 3);
     assert_eq!(state.streams.keys().len(), before.streams.keys().len() + 9);
     assert_eq!(state.evidence.value().list(1).unwrap().len(), 1);
-    f.app.validate_checkpoint(&applied.state, 1).unwrap();
+    f.app.validate_checkpoint(&applied.state, 2).unwrap();
     let replay = f
         .app
         .execute(
             &applied.state,
-            &f.committed(&request, 5000, 6500, 2),
+            &f.committed(&request, 5000, 6500, 3),
             &crate::authority_objects::Resolved::default(),
         )
         .unwrap();
@@ -197,7 +204,7 @@ fn admission_audit_restart_replay_and_expired_operator_withdrawal_are_atomic() {
     damaged[9] = array(vec![]);
     assert!(
         f.app
-            .validate_checkpoint(&wire::encode_state(&array(damaged)).unwrap(), 1)
+            .validate_checkpoint(&wire::encode_state(&array(damaged)).unwrap(), 2)
             .is_err()
     );
     let index = state.deployments().unwrap();
@@ -223,11 +230,18 @@ fn admission_audit_restart_replay_and_expired_operator_withdrawal_are_atomic() {
         parameters,
         refs,
     );
-    let committed = f.with_recipient(&request, 25000, 27000, 3, &operator);
+    let advanced = membership_tests::execute(
+        &f,
+        &replay.state,
+        &membership_tests::status(&f, &f.requester, 94),
+        &f.requester,
+        26000,
+    );
+    let committed = f.with_recipient(&request, 25000, 27000, 5, &operator);
     let withdrawn = f
         .app
         .execute(
-            &replay.state,
+            &advanced.state,
             &committed,
             &crate::authority_objects::Resolved::default(),
         )
@@ -236,7 +250,13 @@ fn admission_audit_restart_replay_and_expired_operator_withdrawal_are_atomic() {
     let state = State::parse(&f.app.config, &withdrawn.state).unwrap();
     assert_eq!(state.deployments().unwrap().open_count(), 0);
     assert_eq!(state.streams.keys().len(), 10);
-    f.app.validate_checkpoint(&withdrawn.state, 3).unwrap();
+    f.app.validate_checkpoint(&withdrawn.state, 5).unwrap();
+    let replayed = membership_tests::execute(&f, &withdrawn.state, &request, &operator, 28000);
+    assert_eq!(code(&replayed), 0);
+    assert_eq!(
+        tests::result_bytes(&withdrawn),
+        tests::result_bytes(&replayed)
+    );
 }
 #[test]
 fn capacity_refusal_does_not_publish_partial_multi_identity_admission() {

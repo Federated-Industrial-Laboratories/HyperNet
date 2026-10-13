@@ -27,7 +27,7 @@ pub mod storage;
 #[path = "ConsensusSync.rs"]
 pub mod synchronizer;
 #[path = "ConsensusStorageTiming.rs"]
-mod timing;
+pub(crate) mod timing;
 
 use crate::trust_wire::{self as wire, Value as V};
 use anyhow::{Context, Result, ensure};
@@ -193,9 +193,9 @@ fn insert_command(config: &Configuration, state: &mut Snapshot, command: &[u8]) 
     state.commands.entry(id(&digest)).or_insert(object);
     Ok(digest)
 }
-fn insert_certificate(
+fn check_certificate(
     config: &Configuration,
-    state: &mut Snapshot,
+    state: &Snapshot,
     input: &[u8],
 ) -> Result<Certificate> {
     let qc = Certificate::parse(config, input)?;
@@ -210,9 +210,28 @@ fn insert_certificate(
         "Certificate history capacity exhausted"
     );
     if !state.certificates.contains_key(&id(&qc.digest())) {
+        ensure!(
+            !input.is_empty() && input.len() <= storage::maximum(12)?,
+            "Object exceeds its kind bound"
+        );
+        objects(state)?.charge(input.len())?;
+    }
+    Ok(qc)
+}
+fn stage_certificate(state: &mut Snapshot, qc: &Certificate, input: &[u8]) -> Result<()> {
+    if !state.certificates.contains_key(&id(&qc.digest())) {
         let object = objects(state)?.staged(12, qc.digest(), input)?;
         state.certificates.insert(id(&qc.digest()), object);
     }
+    Ok(())
+}
+fn insert_certificate(
+    config: &Configuration,
+    state: &mut Snapshot,
+    input: &[u8],
+) -> Result<Certificate> {
+    let qc = check_certificate(config, state, input)?;
+    stage_certificate(state, &qc, input)?;
     Ok(qc)
 }
 fn check_node(config: &Configuration, state: &Snapshot, input: &[u8]) -> Result<Node> {
@@ -388,8 +407,8 @@ impl Engine {
         store.sync()?;
         snapshot.inputs.set_application(references)?;
         snapshot.inputs.unpin(&[0; 32]);
-        Self::publish_objects(&snapshot)?;
-        journal.commit(&snapshot)?;
+        let encoded = Self::publish_objects(&snapshot)?;
+        journal.commit_encoded(&encoded)?;
         Self::unstage_objects(&mut snapshot);
         let archive = archive::Archive::open(
             directory,
@@ -634,20 +653,27 @@ impl Engine {
         ensure!(!self.snapshot.quarantined, "Replica is quarantined");
         Ok(())
     }
-    fn persist(&mut self, mut next: Snapshot) -> Result<()> {
+    fn persist(&mut self, next: Snapshot) -> Result<()> {
+        let encoded = match Self::publish_objects(&next) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                self.faulted = true;
+                return Err(error);
+            }
+        };
+        self.persist_published(next, &encoded)
+    }
+    // The encoding belongs to this unchanged snapshot. Its immutable objects
+    // have reached durable storage before the journal can name them.
+    fn persist_published(&mut self, mut next: Snapshot, encoded: &[u8]) -> Result<()> {
         let retained: std::collections::BTreeSet<_> =
             Self::all_objects(&next).map(storage::Object::key).collect();
         let collect = Self::all_objects(&self.snapshot).any(|o| !retained.contains(&o.key()));
-        let result = (|| -> Result<()> {
-            Self::publish_objects(&next)?;
-            self.journal.commit(&next)?;
-            Self::unstage_objects(&mut next);
-            Ok(())
-        })();
-        if let Err(error) = result {
+        if let Err(error) = self.journal.commit_encoded(encoded) {
             self.faulted = true;
             return Err(error);
         }
+        Self::unstage_objects(&mut next);
         self.snapshot = next;
         if collect && let Err(error) = self.collect_objects() {
             self.faulted = true;
@@ -705,14 +731,12 @@ impl Engine {
     pub fn receive_wish(&mut self, envelope: &[u8]) -> Result<Outputs> {
         self.voting()?;
         let (signer, target) = synchronizer::verify(&self.configuration, envelope)?;
-        let mut next = self.snapshot.clone();
         let member = self.configuration.member(&signer)?;
-        if target <= next.sync.maxima[member] {
+        if target <= self.snapshot.sync.maxima[member] {
             return Ok(Outputs::default());
         }
-        if target > next.sync.maxima[member] {
-            next.wishes[member] = Some(envelope.to_vec());
-        }
+        let mut next = self.snapshot.clone();
+        next.wishes[member] = Some(envelope.to_vec());
         let effects = next.sync.receive(member, target)?;
         self.sync_effects(next, effects)
     }
@@ -785,15 +809,21 @@ impl Engine {
             return Ok(previous.clone());
         }
         let mut reports = Vec::new();
-        for bytes in self.snapshot.reports.values() {
+        for signer in &self.configuration.voters {
+            let Some(bytes) = self.snapshot.reports.get(&report_id(self.view(), signer)) else {
+                continue;
+            };
             let report = NewView::parse(&self.configuration, bytes)?;
-            if report.view == self.view() {
-                reports.push(certificate(
-                    &self.configuration,
-                    &self.snapshot,
-                    &report.prepare,
-                )?);
-            }
+            ensure!(
+                report.signer == *signer && report.view == self.view(),
+                "Indexed new-view report differs from its signer or view"
+            );
+            let qc = certificate(&self.configuration, &self.snapshot, &report.prepare)?;
+            ensure!(
+                qc.phase == Phase::Prepare && qc.view < report.view,
+                "New-view report has invalid Prepare evidence"
+            );
+            reports.push(qc);
         }
         ensure!(reports.len() >= 3, "New-view quorum is missing");
         reports.sort_by_key(|qc| qc.view);
@@ -931,26 +961,33 @@ impl Engine {
             },
         )
     }
-    fn sign_vote(&mut self, mut next: Snapshot, vote: Vote) -> Result<Vec<u8>> {
+    fn check_vote(&self, state: &Snapshot, vote: &Vote) -> Result<Option<Vec<u8>>> {
         self.voting()?;
-        self.require_input_branch(&next, vote.node)?;
-        epoch::branch(&self.configuration, &next, vote.node)?;
+        self.require_input_branch(state, vote.node)?;
+        epoch::branch(&self.configuration, state, vote.node)?;
         ensure!(
-            vote.view > next.retired_view,
+            vote.view > state.retired_view,
             "Vote view has been durably retired"
         );
-        let entry = vote_id(vote.view, vote.phase, &next.signer);
-        if let Some(old) = next.own_votes.get(&entry) {
+        let entry = vote_id(vote.view, vote.phase, &state.signer);
+        if let Some(old) = state.own_votes.get(&entry) {
             ensure!(
-                SignedVote::parse(&self.configuration, old)?.vote == vote,
+                SignedVote::parse(&self.configuration, old)?.vote == *vote,
                 "A different vote is already durable"
             );
-            return Ok(old.clone());
+            return Ok(Some(old.clone()));
+        }
+        Ok(None)
+    }
+    fn sign_vote(&mut self, mut next: Snapshot, vote: Vote) -> Result<Vec<u8>> {
+        if let Some(old) = self.check_vote(&next, &vote)? {
+            return Ok(old);
         }
         ensure!(
             next.own_votes.len() < MAX_VOTES && next.votes.len() < MAX_VOTES,
             "Vote history capacity exhausted"
         );
+        let entry = vote_id(vote.view, vote.phase, &next.signer);
         let signed = SignedVote::sign(&self.configuration, vote, &self.key)?;
         next.own_votes
             .insert(entry.clone(), signed.envelope.clone());
@@ -960,23 +997,29 @@ impl Engine {
     }
     pub fn advance_phase(&mut self, input: &[u8]) -> Result<Vec<u8>> {
         self.voting()?;
-        let mut next = self.snapshot.clone();
-        let qc = insert_certificate(&self.configuration, &mut next, input)?;
+        let qc = check_certificate(&self.configuration, &self.snapshot, input)?;
         ensure!(
             qc.view == self.view() && qc.view > 0,
             "Phase certificate is outside the entered view"
         );
         ensure!(
             qc.view > self.committed()?.view
-                && extends(&self.configuration, &next, qc.node, next.committed)?,
+                && extends(
+                    &self.configuration,
+                    &self.snapshot,
+                    qc.node,
+                    self.snapshot.committed,
+                )?,
             "Phase vote would leave the known committed prefix"
         );
+        let mut highest_prepare = self.snapshot.highest_prepare;
+        let mut locked = self.snapshot.locked;
         let phase = match qc.phase {
             Phase::Prepare => {
-                let high = certificate(&self.configuration, &next, &next.highest_prepare)?;
+                let high = certificate(&self.configuration, &self.snapshot, &highest_prepare)?;
                 ensure!(qc.view >= high.view, "Prepare floor moved backwards");
                 if qc.view > high.view {
-                    next.highest_prepare = qc.digest();
+                    highest_prepare = qc.digest();
                 }
                 Phase::PreCommit
             }
@@ -989,7 +1032,7 @@ impl Engine {
                 };
                 let prepare = certificate(
                     &self.configuration,
-                    &next,
+                    &self.snapshot,
                     &Certificate::vote_digest(&expected)?,
                 )
                 .context("Matching Prepare certificate is required before Commit voting")?;
@@ -997,28 +1040,38 @@ impl Engine {
                     prepare.vote.as_ref() == Some(&expected),
                     "Indexed Prepare certificate differs from the exact vote"
                 );
-                let high = certificate(&self.configuration, &next, &next.highest_prepare)?;
+                let high = certificate(&self.configuration, &self.snapshot, &highest_prepare)?;
                 if prepare.view > high.view {
-                    next.highest_prepare = prepare.digest();
+                    highest_prepare = prepare.digest();
                 }
-                let lock = certificate(&self.configuration, &next, &next.locked)?;
+                let lock = certificate(&self.configuration, &self.snapshot, &locked)?;
                 ensure!(qc.view >= lock.view, "Lock floor moved backwards");
                 if qc.view > lock.view {
-                    next.locked = qc.digest();
+                    locked = qc.digest();
                 }
                 Phase::Commit
             }
             Phase::Commit => anyhow::bail!("Commit evidence is decided, not voted again"),
         };
-        self.sign_vote(
-            next,
-            Vote {
-                scope: self.configuration.scope.clone(),
-                view: qc.view,
-                phase,
-                node: qc.node,
-            },
-        )
+        let vote = Vote {
+            scope: self.configuration.scope.clone(),
+            view: qc.view,
+            phase,
+            node: qc.node,
+        };
+        if self.snapshot.own_votes.contains_key(&vote_id(
+            vote.view,
+            vote.phase,
+            &self.snapshot.signer,
+        )) && let Some(old) = self.check_vote(&self.snapshot, &vote)?
+        {
+            return Ok(old);
+        }
+        let mut next = self.snapshot.clone();
+        stage_certificate(&mut next, &qc, input)?;
+        next.highest_prepare = highest_prepare;
+        next.locked = locked;
+        self.sign_vote(next, vote)
     }
     /// Gossip votes to all replicas; any honest collector can reconstruct withheld decisions.
     pub fn receive_vote(&mut self, input: &[u8]) -> Result<Option<Vec<u8>>> {
@@ -1057,8 +1110,18 @@ impl Engine {
         );
         next.votes.insert(entry, input.to_vec());
         let mut matching = Vec::new();
-        for value in next.votes.values() {
+        for signer in &self.configuration.voters {
+            let index = vote_id(signed.vote.view, signed.vote.phase, signer);
+            let Some(value) = next.votes.get(&index) else {
+                continue;
+            };
             let candidate = SignedVote::parse(&self.configuration, value)?;
+            ensure!(
+                candidate.signer == *signer
+                    && candidate.vote.view == signed.vote.view
+                    && candidate.vote.phase == signed.vote.phase,
+                "Indexed vote differs from its exact signer, view or phase"
+            );
             if candidate.vote == signed.vote {
                 matching.push(candidate);
             }
@@ -1081,25 +1144,37 @@ impl Engine {
     }
     pub fn decide(&mut self, input: &[u8]) -> Result<()> {
         self.voting()?;
-        let mut next = self.snapshot.clone();
-        let qc = insert_certificate(&self.configuration, &mut next, input)?;
+        let qc = check_certificate(&self.configuration, &self.snapshot, input)?;
         ensure!(
             qc.phase == Phase::Commit && qc.view > 0,
             "Only a Commit certificate decides"
         );
-        if extends(&self.configuration, &next, next.committed, qc.node)? {
+        if extends(
+            &self.configuration,
+            &self.snapshot,
+            self.snapshot.committed,
+            qc.node,
+        )? {
             return Ok(());
         }
-        if !extends(&self.configuration, &next, qc.node, next.committed)? {
-            let old = next
+        if !extends(
+            &self.configuration,
+            &self.snapshot,
+            qc.node,
+            self.snapshot.committed,
+        )? {
+            let old = self
+                .snapshot
                 .commit_certificates
-                .get(&id(&next.committed))
-                .and_then(|digest| next.certificates.get(&id(digest)))
-                .map(|object| body(&next, object).map(|b| b.as_ref().clone()))
+                .get(&id(&self.snapshot.committed))
+                .and_then(|digest| self.snapshot.certificates.get(&id(digest)))
+                .map(|object| body(&self.snapshot, object).map(|b| b.as_ref().clone()))
                 .transpose()?
                 .unwrap_or_default();
             return self.incident(old, input.to_vec(), true);
         }
+        let mut next = self.snapshot.clone();
+        stage_certificate(&mut next, &qc, input)?;
         next.committed = qc.node;
         next.commit_certificates.insert(id(&qc.node), qc.digest());
         self.persist(next)

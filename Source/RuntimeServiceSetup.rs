@@ -23,6 +23,9 @@ pub struct Setup {
     /// Exact local content or media service controls exposed to a bridge as HOSTKEY=INSTALLED_DIRECTORY.
     #[arg(long)]
     media_service: Vec<String>,
+    /// Exact installed application socket exposed by a route endpoint.
+    #[arg(long)]
+    route_service: Option<PathBuf>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -74,6 +77,16 @@ pub fn run(args: Setup) -> Result<Value> {
     )?)?;
     ensure!(manifest.roles.len() == 1, "service setup requires one role");
     let expected: &[&str] = match manifest.roles[0].role {
+        5 => &[
+            "Bootstrap.cbor",
+            "Certificate.pem",
+            "CertificateAuthority.pem",
+            "Manifest.cbor",
+            "RouteProfile.cbor",
+            "Service.key",
+            "ServiceConfig.json",
+            "Transport.key",
+        ],
         7 => &[
             "Bootstrap.cbor",
             "BridgeProfile.cbor",
@@ -224,6 +237,42 @@ pub fn run(args: Setup) -> Result<Value> {
             Zeroizing::new(serde_json::to_vec(&media_controls)?),
         );
     }
+    ensure!(
+        manifest.roles[0].role == 5 || args.route_service.is_none(),
+        "application socket mounts require role5"
+    );
+    let route_target = if let Some(directory) = &args.route_service {
+        let directory = files::root(directory)?;
+        let (target, _) = load(&directory)?;
+        target.check_artifacts()?;
+        super::route_target(&manifest, &target.manifest)?;
+        Some(MediaMount {
+            directory,
+            profile_digest: target.digest()?,
+        })
+    } else {
+        None
+    };
+    if manifest.roles[0].role == 5 {
+        crate::route_config::validate_import(
+            &manifest,
+            &data,
+            route_target.as_ref().map(|v| v.directory.as_path()),
+        )?;
+        let route_profile = crate::authority_domains::routes::RegisteredProfile::parse(
+            &data["RouteProfile.cbor"],
+            manifest.network,
+            manifest.incarnation,
+        )?;
+        data.insert(
+            "Egress.json".into(),
+            Zeroizing::new(super::egress::configuration(&manifest, &route_profile)?),
+        );
+        data.insert(
+            "RouteBinding.json".into(),
+            Zeroizing::new(serde_json::to_vec(&route_target)?),
+        );
+    }
     let seccomp = serde_json::to_vec(&super::super::setup::seccomp()?)?;
     data.insert("Seccomp.json".into(), Zeroizing::new(seccomp));
     let profile = Profile {
@@ -238,6 +287,7 @@ pub fn run(args: Setup) -> Result<Value> {
         clock_directory: args.clock_directory,
         selinux: files::selinux_enabled()?,
         media_controls,
+        route_target,
     };
     profile.validate()?;
     ensure!(
@@ -290,6 +340,7 @@ pub fn run(args: Setup) -> Result<Value> {
         container: None,
         network: None,
         helper: None,
+        egress: None,
         authority_control: None,
         last_time: files::now()?,
     };

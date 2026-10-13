@@ -154,13 +154,15 @@ pub(super) fn status(p: &Profile, s: &mut State) -> Result<Value> {
     };
     result["running"] = json!(running);
     result["serviceReadiness"] = json!("NotProbed");
-    result["cleanupComplete"] =
-        json!(s.container.is_none() && s.helper.is_none() && s.network.is_none());
+    result["cleanupComplete"] = json!(
+        s.container.is_none() && s.helper.is_none() && s.egress.is_none() && s.network.is_none()
+    );
     Ok(result)
 }
 pub(super) fn stop(p: &Profile, s: &mut State) -> Result<()> {
     workload::remove(p, s, false)?;
     workload::remove(p, s, true)?;
+    egress::remove(p, s)?;
     workload::remove_network(p, s)
 }
 pub(super) fn withdraw(p: &Profile, s: &mut State) -> Result<Value> {
@@ -184,7 +186,8 @@ pub(super) fn withdrawal_receipt(p: &Profile, s: &State, output: &Path) -> Resul
         "persist local withdrawal before exporting its assertion"
     );
     use wire::Value as V;
-    let cleanup = s.container.is_none() && s.helper.is_none() && s.network.is_none();
+    let cleanup =
+        s.container.is_none() && s.helper.is_none() && s.egress.is_none() && s.network.is_none();
     let payload = wire::encode(&V::Array(vec![
         V::Uint(200),
         V::Uint(1),
@@ -385,6 +388,7 @@ pub(super) fn start(path: &Path, request: &Path) -> Result<Value> {
             initialise(&p, &mut s)?;
             files::publish_public(&root.join("Authorization/ActivationRequest.cbor"), &bytes)?;
             let command = match p.role()?.role {
+                5 => files::strings(&["private-route-service"]),
                 7 => files::strings(&["authority-bridge-service"]),
                 8 => files::strings(&["ssh-service", "--config", "/Config/ServiceConfig.json"]),
                 1 => files::strings(&["authority-page-service"]),
@@ -393,6 +397,7 @@ pub(super) fn start(path: &Path, request: &Path) -> Result<Value> {
                 3 => files::strings(&["authority-mail-service"]),
                 _ => unreachable!(),
             };
+            egress::start(&p, &mut s)?;
             let id = workload::create(&p, &mut s, false, &command, None)?;
             files::podman(&files::strings(&["start", &id]))?;
             let r = s.container.as_ref().unwrap();
@@ -413,6 +418,12 @@ pub(super) fn start(path: &Path, request: &Path) -> Result<Value> {
                         >= p.manifest.validity.1
                 {
                     break;
+                }
+                if let Some(egress) = &s.egress {
+                    ensure!(
+                        super::egress::verify(&p, egress)?["State"]["Running"] == true,
+                        "consented egress helper stopped"
+                    );
                 }
                 let Some(r) = &s.container else { break };
                 let v = workload::verify(&p, r)?;

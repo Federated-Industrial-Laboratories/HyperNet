@@ -46,7 +46,7 @@ fn role() -> Result<u64> {
         crate::runtime_manifest::MAXIMUM,
     )?)?;
     ensure!(
-        m.roles.len() == 1 && matches!(m.roles[0].role, 1..=4 | 7 | 8),
+        m.roles.len() == 1 && matches!(m.roles[0].role, 1..=5 | 7 | 8),
         "unsupported installed service role"
     );
     Ok(m.roles[0].role)
@@ -62,7 +62,18 @@ fn store_confinement() -> Result<confinement::Profile> {
 pub fn initialise() -> Result<()> {
     let role = role()?;
     let guard = Guard::load(Path::new("/Authorization"), Path::new("/Config"), role)?;
-    if role == 7 {
+    if role == 5 {
+        let config = crate::route_config::Config::load()?;
+        let profile = store_confinement()?;
+        config.resources(&profile)?;
+        drop(crate::route_state::Disk::open(
+            Path::new("/State"),
+            config.manifest.network,
+            config.manifest.incarnation,
+            config.metadata_bytes,
+        )?);
+        activation::initialise(&guard)?;
+    } else if role == 7 {
         let config = bridge::Config::load(Path::new("/Config/ServiceConfig.json"))?;
         let profile = config.confinement()?;
         config.resources(&profile)?;
@@ -184,4 +195,17 @@ pub fn receipt() -> Result<()> {
     let receipt = crate::authority_runtime_activation::Receipt::parse(&bytes)?;
     std::io::stdout().lock().write_all(receipt.canonical())?;
     Ok(())
+}
+
+pub fn routes() -> Result<()> {
+    ensure!(
+        role()? == 5,
+        "private route entry requires its own installed role"
+    );
+    let guard = Guard::load(Path::new("/Authorization"), Path::new("/Config"), 5)?;
+    let config = crate::route_config::Config::load()?;
+    let profile = config.confinement()?;
+    config.resources(&profile)?;
+    let active = activation::activate(&guard)?;
+    crate::runtime()?.block_on(crate::route_runtime::run(config, &guard, &active))
 }

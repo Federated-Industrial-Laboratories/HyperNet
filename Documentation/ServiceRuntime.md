@@ -1,6 +1,6 @@
 # Installed service runtime
 
-`HyperNet runtime services` manages one consenting Page, Media, Mail, Transfer, Bridge or SSH service.
+`HyperNet runtime services` manages one consenting Page, Media, Mail, Transfer, Route, Bridge or SSH service.
 The service has separate requester and recipient journals. The requester makes
 its own authority queries; the recipient retains a manager's activation and
 remote effect claims. Neither journal is the manager's private requester state.
@@ -22,13 +22,14 @@ Prepare one private configuration directory containing the fixed artifacts:
 | Mail, role3 | Bootstrap.cbor, Manifest.cbor, Service.key, ServiceConfig.json, MailProfile.cbor |
 | Page, role1 | Bootstrap.cbor, Manifest.cbor, Service.key, ServiceConfig.json, PageProfile.cbor |
 | Media, role2 | Bootstrap.cbor, Manifest.cbor, Service.key, ServiceConfig.json, MediaProfile.cbor |
+| Route, role5 | Bootstrap.cbor, Manifest.cbor, Service.key, ServiceConfig.json, RouteProfile.cbor, Certificate.pem, CertificateAuthority.pem, Transport.key |
 | Bridge, role7 | Bootstrap.cbor, Manifest.cbor, Service.key, ServiceConfig.json, BridgeProfile.cbor, Certificate.pem, CertificateAuthority.pem, Transport.key |
 
 `Service.key` is the dedicated role's raw32-byte signing seed. The operator key
 is separate and never mounted into the workload. Setup adds the fixed hardened
 Seccomp.json artifact. The exact file membership and every digest are included
 in the operator's local consent. Consult [SshServices](SshServices.md),
-[PageStore](PageStore.md), [MediaStore](MediaStore.md), [MailStore](MailStore.md), [TransferStore](TransferStore.md) or [Bridge](Bridge.md) for the fixed
+[PageStore](PageStore.md), [MediaStore](MediaStore.md), [MailStore](MailStore.md), [TransferStore](TransferStore.md), [PrivateRoutes](PrivateRoutes.md) or [Bridge](Bridge.md) for the fixed
 configuration paths and schemas.
 
 ```sh
