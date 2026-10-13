@@ -656,11 +656,49 @@ impl Engine {
         prior_size: u64,
         prior_root: Option<Digest>,
     ) -> Result<Vec<u8>> {
+        self.history_reply_target(height, from, Some(target), prior_size, prior_root)?
+            .context("Certified checkpoint unavailable")
+    }
+    pub fn latest_history_reply(
+        &self,
+        height: u64,
+        from: Digest,
+        prior_size: u64,
+        prior_root: Option<Digest>,
+    ) -> Result<Option<Vec<u8>>> {
+        self.history_reply_target(height, from, None, prior_size, prior_root)
+    }
+    fn history_reply_target(
+        &self,
+        height: u64,
+        from: Digest,
+        target: Option<Digest>,
+        prior_size: u64,
+        prior_root: Option<Digest>,
+    ) -> Result<Option<Vec<u8>>> {
         self.active()?;
-        let proof = self
-            .checkpoint_proof()
-            .context("Certified checkpoint unavailable")?;
+        if target.is_none() {
+            ensure!(
+                height <= archive::MAX_LEAVES as u64
+                    && prior_size <= height
+                    && (prior_size == 0) == prior_root.is_none(),
+                "History retained position differs"
+            );
+            if height == 0 {
+                ensure!(
+                    from == self.configuration.genesis().digest()?,
+                    "History retained node differs"
+                );
+            }
+        }
+        let Some(proof) = self.checkpoint_proof() else {
+            return Ok(None);
+        };
         let c = verified(&self.configuration, proof)?;
+        if target.is_none() && height > c.height() {
+            return Ok(None);
+        }
+        let target = target.unwrap_or(*c.node());
         ensure!(
             height <= c.height()
                 && prior_size <= height
@@ -724,6 +762,7 @@ impl Engine {
             b(&history),
             V::Array(suffix.into_iter().map(V::Bytes).collect()),
         ]))
+        .map(Some)
     }
 }
 

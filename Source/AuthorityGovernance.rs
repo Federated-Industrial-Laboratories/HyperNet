@@ -125,7 +125,7 @@ impl Record {
             105 => 19,
             117 => 16,
             130 => 11,
-            131 => 8,
+            131 => 9,
             _ => anyhow::bail!("unsupported governance record"),
         };
         let f = decoded.array(arity)?;

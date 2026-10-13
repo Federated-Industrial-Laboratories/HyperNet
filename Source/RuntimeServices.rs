@@ -15,6 +15,8 @@ use std::{
 };
 #[path = "RuntimeServiceControl.rs"]
 mod control;
+#[path = "RuntimeServiceEgress.rs"]
+pub(crate) mod egress;
 #[path = "RuntimeServiceEpoch.rs"]
 mod epoch;
 #[path = "RuntimeServicePreparation.rs"]
@@ -102,12 +104,13 @@ struct Profile {
     clock_directory: PathBuf,
     selinux: bool,
     media_controls: BTreeMap<String, MediaMount>,
+    route_target: Option<MediaMount>,
 }
 impl Profile {
     fn role(&self) -> Result<&Role> {
         ensure!(
-            self.manifest.roles.len() == 1 && matches!(self.manifest.roles[0].role, 1..=4 | 7 | 8),
-            "installed service template requires one Page, Media, Mail, Transfer or SSH role"
+            self.manifest.roles.len() == 1 && matches!(self.manifest.roles[0].role, 1..=5 | 7 | 8),
+            "installed service template requires one Page, Media, Mail, Transfer, Route or SSH role"
         );
         Ok(&self.manifest.roles[0])
     }
@@ -117,13 +120,24 @@ impl Profile {
         let role = self.role()?;
         ensure!(
             self.manifest.authority_config.is_none()
-                && (role.role == 7 || role.outbound_endpoint_ids.is_empty())
+                && (matches!(role.role, 5 | 7) || role.outbound_endpoint_ids.is_empty())
                 && role.volume_ids.len() == 1
                 && self.manifest.volumes.len() == 1
                 && !self.manifest.volumes[0].read_only,
-            "service template requires one explicit state volume and only role7 TCP egress"
+            "service template requires one explicit state volume and only Route or Bridge TCP egress"
         );
-        if role.role == 7 {
+        if role.role == 5 {
+            ensure!(
+                role.bind_endpoint_ids.len() <= 1,
+                "route service has more than one listener"
+            );
+            for endpoint in &self.manifest.endpoints {
+                ensure!(
+                    endpoint.address.is_ipv4() && endpoint.port > 1024,
+                    "installed route endpoints require literal IPv4 and unprivileged ports"
+                );
+            }
+        } else if role.role == 7 {
             ensure!(
                 role.bind_endpoint_ids.len() == 1 && !role.outbound_endpoint_ids.is_empty(),
                 "bridge requires exact listener and counterpart routes"
@@ -171,6 +185,19 @@ impl Profile {
             "authority control must use its isolated installed directory"
         );
         let expected: &[&str] = match role.role {
+            5 => &[
+                "Bootstrap.cbor",
+                "Certificate.pem",
+                "CertificateAuthority.pem",
+                "Egress.json",
+                "Manifest.cbor",
+                "RouteBinding.json",
+                "RouteProfile.cbor",
+                "Seccomp.json",
+                "Service.key",
+                "ServiceConfig.json",
+                "Transport.key",
+            ],
             7 => &[
                 "Bootstrap.cbor",
                 "BridgeProfile.cbor",
@@ -232,6 +259,17 @@ impl Profile {
             role.role == 7 || self.media_controls.is_empty(),
             "only a bridge can hold local media controls"
         );
+        ensure!(
+            role.role == 5 || self.route_target.is_none(),
+            "only a route endpoint can mount an application socket"
+        );
+        if let Some(target) = &self.route_target {
+            files::safe_path(&target.directory)?;
+            ensure!(
+                target.directory.is_absolute(),
+                "route target directory must be absolute"
+            );
+        }
         for (key, mount) in &self.media_controls {
             ensure!(
                 hex::encode(crate::trust_bootstrap::hex32(key)?) == *key
@@ -294,6 +332,21 @@ impl Profile {
                 );
             }
         }
+        if self.role()?.role == 5 {
+            ensure!(
+                files::read(&self.root.join("Config/RouteBinding.json"), wire::MAXIMUM)?
+                    == serde_json::to_vec(&self.route_target)?,
+                "application socket binding differs from signed local consent"
+            );
+            if let Some(target) = &self.route_target {
+                let (installed, _) = load(&target.directory)?;
+                ensure!(
+                    installed.digest()? == target.profile_digest,
+                    "route application installation changed"
+                );
+                route_target(&self.manifest, &installed.manifest)?;
+            }
+        }
         ensure!(
             files::selinux_enabled()? == self.selinux,
             "SELinux mode differs from local service profile"
@@ -318,6 +371,8 @@ struct State {
     container: Option<Resource>,
     network: Option<Resource>,
     helper: Option<Resource>,
+    #[serde(default)]
+    egress: Option<Resource>,
     authority_control: Option<PathBuf>,
     last_time: u64,
 }
@@ -351,8 +406,8 @@ fn preview(p: &Profile, s: &State) -> Result<Value> {
     Ok(
         json!({"status":if s.withdrawn{"Withdrawn"}else if s.consented{"Consented"}else{"AwaitingLocalConsent"},
         "profileDigest":p.digest()?,"localGeneration":1,"manifest":p.manifest,"artifacts":p.artifacts,
-        "role":match p.role()?.role{1=>"Page",2=>"Media",3=>"Mail",4=>"Transfer",7=>"Bridge",8=>"Ssh",_=>unreachable!()},"authentication":if p.role()?.role==8{"Native OpenSSH host key from exact signed SshProfile; generic manifest TLS metadata does not authenticate this listener"}else if p.role()?.role==7{"Pinned TLS1.3 counterpart bridges plus private local operator control; no direct reader route"}else{"Private local control only; no remote reader route"},
-        "tcpEgress":p.role()?.role==7,"mediaControls":p.media_controls,"authorityAccess":"Private control socket only","session":"Foreground","automaticBoot":false,
+        "role":match p.role()?.role{1=>"Page",2=>"Media",3=>"Mail",4=>"Transfer",5=>"PrivateRoute",7=>"Bridge",8=>"Ssh",_=>unreachable!()},"authentication":if p.role()?.role==8{"Native OpenSSH host key from exact signed SshProfile; generic manifest TLS metadata does not authenticate this listener"}else if p.role()?.role==7{"Pinned TLS1.3 counterpart bridges plus private local operator control; no direct reader route"}else if p.role()?.role==5{"Pinned TLS1.3 relay transport; inner TLS terminates at the exact consented final service"}else{"Private local control only; no remote reader route"},
+        "tcpEgress":p.role()?.role==7,"isolatedEgressHelper":p.role()?.role==5,"mediaControls":p.media_controls,"authorityAccess":"Private control socket only","session":"Foreground","automaticBoot":false,
         "authorityControl":s.authority_control.as_ref().unwrap_or(&p.authority_control),"currentPermission":false,"initialised":s.initialised}),
     )
 }
@@ -429,3 +484,15 @@ fn store_route(bridge: &Manifest, store: &Manifest, key: [u8; 32]) -> Result<()>
 #[cfg(test)]
 #[path = "RuntimeServiceRouteTests.rs"]
 mod route_tests;
+
+fn route_target(route: &Manifest, target: &Manifest) -> Result<()> {
+    ensure!(
+        route.network == target.network
+            && route.incarnation == target.incarnation
+            && route.deployment != target.deployment
+            && target.roles.len() == 1
+            && matches!(target.roles[0].role, 1..=4 | 7),
+        "route application mount must be one separate consented service in the same network"
+    );
+    Ok(())
+}

@@ -87,13 +87,17 @@ pub(super) fn executed_inputs(
     command: &[u8],
     next: &[u8],
 ) -> Result<Vec<InputReference>> {
-    let retained = application.retained_inputs(next)?;
     let command_refs = application.command_inputs(command)?;
     let prior_refs = application.retained_inputs(prior)?;
+    let retained = application.retained_inputs(next)?;
     // Evaluation cannot create an object by naming bytes which were never admitted.
     inputs::validate_required(&retained, &command_refs, &prior_refs)?;
     Ok(retained)
 }
+
+#[cfg(test)]
+#[path = "ConsensusDriverInputTests.rs"]
+mod tests;
 
 pub(super) struct Flight {
     id: Digest,

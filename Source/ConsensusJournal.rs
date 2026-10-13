@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 //! Exclusive, bounded, synchronised signer state. Checksums do not prove rollback resistance.
 use anyhow::{Context, Result, ensure};
-use serde::{Serialize, de::DeserializeOwned};
+#[cfg(test)]
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
@@ -147,9 +149,14 @@ impl Journal {
         );
         Ok(())
     }
+    #[cfg(test)]
     pub fn commit<T: Serialize>(&mut self, state: &T) -> Result<()> {
         self.healthy()?;
         let bytes = serde_json::to_vec(state)?;
+        self.commit_encoded(&bytes)
+    }
+    pub(super) fn commit_encoded(&mut self, bytes: &[u8]) -> Result<()> {
+        self.healthy()?;
         ensure!(bytes.len() <= MAXIMUM, "Signer journal capacity exhausted");
         let next = self
             .generation
@@ -170,8 +177,8 @@ impl Journal {
             file.write_all(MAGIC)?;
             file.write_all(&next.to_be_bytes())?;
             file.write_all(&(bytes.len() as u64).to_be_bytes())?;
-            file.write_all(&Sha256::digest(&bytes))?;
-            file.write_all(&bytes)?;
+            file.write_all(&Sha256::digest(bytes))?;
+            file.write_all(bytes)?;
             super::timing::sync(&file, false)?;
             ensure!(
                 file.metadata()?

@@ -283,7 +283,7 @@ pub fn verify(
                 && !intent.expected.contains(&r.reference)
         });
     for r in &returned {
-        if !operation.mutation() || replay || page_indices.is_some() && !is_mutation(r) {
+        if !operation.mutation() || replay || !is_mutation(r) {
             before.records.insert(r.reference.index(), r.clone());
         }
     }

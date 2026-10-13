@@ -12,6 +12,7 @@ use crate::{
     trust_wire::{self as wire, Value as V},
 };
 use anyhow::{Context, Result, ensure};
+use std::sync::{Arc, Mutex};
 
 #[path = "AuthorityEpochEvaluation.rs"]
 mod epoch_evaluation;
@@ -50,6 +51,12 @@ struct State {
 }
 impl State {
     fn parse(config: &Configuration, bytes: &[u8]) -> Result<Self> {
+        let started = std::time::Instant::now();
+        let parsed = Self::parse_complete(config, bytes);
+        crate::consensus::timing::state_parse(started.elapsed());
+        parsed
+    }
+    fn parse_complete(config: &Configuration, bytes: &[u8]) -> Result<Self> {
         let decoded = wire::decode_state(bytes)?;
         let list = decoded.list(13)?;
         ensure!(list.len() >= 2, "truncated application state");
@@ -292,13 +299,53 @@ fn result(action: &str, code: u64, value: &[u8]) -> Result<Vec<u8>> {
         b(value),
     ]))
 }
+struct VerifiedState {
+    bytes: Vec<u8>,
+    state: Arc<State>,
+}
 pub struct PolicyApplication {
     config: Configuration,
+    verified: Mutex<Option<VerifiedState>>,
+    #[cfg(test)]
+    state_parses: std::sync::atomic::AtomicUsize,
 }
 impl PolicyApplication {
     /// The complete bootstrap, including genesis grants and custody acceptance, is verified before construction.
     pub fn new(config: Configuration) -> Self {
-        Self { config }
+        Self {
+            config,
+            verified: Mutex::new(None),
+            #[cfg(test)]
+            state_parses: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    // Only immutable state validation is reused, under this fixed configuration.
+    // Request authority and time-dependent decisions are evaluated separately.
+    fn verified_state(&self, bytes: &[u8]) -> Result<Arc<State>> {
+        ensure!(
+            bytes.len() <= crate::authority_capacity::MAX_STATE_BYTES,
+            "authority state exceeds its bound"
+        );
+        let mut retained = self
+            .verified
+            .lock()
+            .map_err(|_| anyhow::anyhow!("authority state validation is unavailable"))?;
+        if let Some(entry) = retained.as_ref()
+            && entry.bytes == bytes
+        {
+            crate::consensus::timing::state_cache_hit();
+            return Ok(Arc::clone(&entry.state));
+        }
+        #[cfg(test)]
+        self.state_parses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let state = Arc::new(State::parse(&self.config, bytes)?);
+        *retained = Some(VerifiedState {
+            bytes: bytes.to_vec(),
+            state: Arc::clone(&state),
+        });
+        Ok(state)
     }
 
     fn inert(&self, command: &[u8]) -> Result<bool> {
@@ -559,7 +606,7 @@ impl Application for PolicyApplication {
             SignedRequest::Intent(intent)
                 if crate::authority_domains::Operation::handles(&intent.action) =>
             {
-                let state = State::parse(&self.config, prior)?;
+                let state = self.verified_state(prior)?;
                 crate::authority_domains::Operation::parse(&intent)?
                     .command
                     .required_inputs(&state.domains)
@@ -568,7 +615,7 @@ impl Application for PolicyApplication {
         }
     }
     fn retained_inputs(&self, bytes: &[u8]) -> Result<Vec<crate::authority_objects::Reference>> {
-        crate::authority_domains::retained_inputs(&State::parse(&self.config, bytes)?.domains)
+        crate::authority_domains::retained_inputs(&self.verified_state(bytes)?.domains)
     }
     fn result_inputs(
         &self,
@@ -596,7 +643,7 @@ impl Application for PolicyApplication {
     }
     fn validate_checkpoint(&self, state: &[u8], height: u64) -> Result<()> {
         ensure!(
-            State::parse(&self.config, state)?.height == height,
+            self.verified_state(state)?.height == height,
             "checkpoint application height differs from its certified anchor"
         );
         Ok(())
@@ -612,7 +659,7 @@ impl Application for PolicyApplication {
             inputs.references() == self.required_inputs(prior, ordered)?,
             "application validation input closure differs"
         );
-        let state = State::parse(&self.config, prior)?;
+        let state = self.verified_state(prior)?;
         ensure!(
             state.terminal.is_none(),
             "terminal old-epoch application cannot authorize further work"
@@ -642,7 +689,7 @@ impl Application for PolicyApplication {
             inputs.references() == self.required_inputs(prior, &committed.command)?,
             "application execution input closure differs"
         );
-        let mut state = State::parse(&self.config, prior)?;
+        let mut state = self.verified_state(prior)?.as_ref().clone();
         ensure!(
             state.terminal.is_none(),
             "terminal old-epoch application cannot execute further work"
@@ -667,6 +714,11 @@ impl Application for PolicyApplication {
         let mut common_code = self.context_code(&request, &state);
         let challenge_expiry = challenge.evaluation_expiry(committed.evaluated_at, ordered.expires);
         if challenge_expiry.is_err() {
+            crate::consensus::timing::expired_challenge(
+                committed
+                    .evaluated_at
+                    .saturating_sub(challenge.created_at_ms),
+            );
             common_code = minimum_code(common_code, 7);
         }
         let scope = crate::authority_proof::Scope {
@@ -789,6 +841,10 @@ mod transaction_tests;
 #[cfg(test)]
 #[path = "AuthorityApplicationStreamTests.rs"]
 mod stream_tests;
+
+#[cfg(test)]
+#[path = "AuthorityApplicationStateTests.rs"]
+mod state_tests;
 
 #[cfg(test)]
 #[path = "AuthorityMembershipTests.rs"]

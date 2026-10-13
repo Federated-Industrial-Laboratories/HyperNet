@@ -3,6 +3,18 @@
 use super::*;
 use std::fs;
 
+fn route_descriptors(connections: u64) -> Result<u64> {
+    ensure!(
+        (1..=4096).contains(&connections),
+        "route connection bound differs"
+    );
+    // Parsing, readers and attachments each retain C sockets; forwarding needs C destinations.
+    connections
+        .checked_mul(4)
+        .and_then(|n| n.checked_add(64))
+        .context("route descriptor budget overflow")
+}
+
 pub(super) fn verify(p: &Profile, r: &Resource) -> Result<Value> {
     let id =
         r.id.as_deref()
@@ -219,7 +231,7 @@ pub(super) fn network(p: &Profile, s: &mut State) -> Result<()> {
 }
 pub(super) fn remove_network(p: &Profile, s: &mut State) -> Result<()> {
     ensure!(
-        s.container.is_none() && s.helper.is_none(),
+        s.container.is_none() && s.helper.is_none() && s.egress.is_none(),
         "service containers remain"
     );
     if s.network.is_none() {
@@ -250,7 +262,7 @@ pub(super) fn remove_network(p: &Profile, s: &mut State) -> Result<()> {
     s.network = None;
     save(p, s)
 }
-fn mount(
+pub(super) fn mount(
     p: &Profile,
     args: &mut Vec<String>,
     source: &Path,
@@ -316,6 +328,18 @@ pub(super) fn create(
             / 1000
     };
     ensure!(remaining > 0, "service consent expired");
+    let descriptors = if role.role == 5 {
+        route_descriptors(
+            crate::authority_domains::routes::RegisteredProfile::parse(
+                &files::read(&p.root.join("Config/RouteProfile.cbor"), wire::MAXIMUM)?,
+                p.manifest.network,
+                p.manifest.incarnation,
+            )?
+            .maximum_connections,
+        )?
+    } else {
+        256
+    };
     let mut args = files::strings(&[
         "create",
         "--name",
@@ -338,14 +362,42 @@ pub(super) fn create(
         "--ipc=private",
         "--pid=private",
         "--ulimit=core=0:0",
-        "--ulimit=nofile=256:256",
+        &format!("--ulimit=nofile={descriptors}:{descriptors}"),
         "--ulimit=nproc=4096:4096",
         &format!("--ulimit=fsize={0}:{0}", role.state_admission_bytes),
-        &format!("--memory={}", role.memory_bytes),
-        &format!("--memory-swap={}", role.memory_bytes),
-        &format!("--pids-limit={}", role.pids),
+        &format!(
+            "--memory={}",
+            if role.role == 5 && !helper {
+                role.memory_bytes - role.memory_bytes / 4
+            } else {
+                role.memory_bytes
+            }
+        ),
+        &format!(
+            "--memory-swap={}",
+            if role.role == 5 && !helper {
+                role.memory_bytes - role.memory_bytes / 4
+            } else {
+                role.memory_bytes
+            }
+        ),
+        &format!(
+            "--pids-limit={}",
+            if role.role == 5 && !helper {
+                role.pids - role.pids / 4
+            } else {
+                role.pids
+            }
+        ),
         &format!("--cpu-period={}", role.cpu_period),
-        &format!("--cpu-quota={}", role.cpu_quota),
+        &format!(
+            "--cpu-quota={}",
+            if role.role == 5 && !helper {
+                role.cpu_quota - role.cpu_quota / 4
+            } else {
+                role.cpu_quota
+            }
+        ),
         &format!(
             "--timeout={}",
             if helper { remaining.min(60) } else { remaining }
@@ -361,7 +413,15 @@ pub(super) fn create(
     ]);
     args.extend(labels(p)?);
     let mut r = resource("container", name);
-    if !helper && matches!(role.role, 7 | 8) {
+    let attached_route = role.role == 5
+        && crate::authority_domains::routes::RegisteredProfile::parse(
+            &files::read(&p.root.join("Config/RouteProfile.cbor"), wire::MAXIMUM)?,
+            p.manifest.network,
+            p.manifest.incarnation,
+        )?
+        .mode
+            == 3;
+    if !helper && matches!(role.role, 5 | 7 | 8) && !attached_route {
         network(p, s)?;
         let n = s.network.as_ref().unwrap();
         verify(p, n)?;
@@ -432,6 +492,26 @@ pub(super) fn create(
             );
         }
     }
+    if !helper && role.role == 5 {
+        mount(
+            p,
+            &mut args,
+            &p.root.join("Launch/State/Egress"),
+            "/Egress",
+            false,
+            true,
+        );
+        if let Some(target) = &p.route_target {
+            mount(
+                p,
+                &mut args,
+                &target.directory.join("Launch/State/Control"),
+                "/Application",
+                false,
+                true,
+            );
+        }
+    }
     if let Some(input) = input {
         mount(p, &mut args, input, "/EpochInput", false, true);
     }
@@ -475,4 +555,24 @@ pub(super) fn finite(
     let bytes = result?;
     cleanup?;
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn private_route_descriptor_budget_covers_all_pools_and_destinations() {
+        for connections in [1, 8, 128, 4096] {
+            let inbound = 3 * connections;
+            let destinations = connections;
+            assert_eq!(
+                route_descriptors(connections).unwrap(),
+                inbound + destinations + 64
+            );
+        }
+        assert_eq!(route_descriptors(128).unwrap(), 576);
+        assert!(route_descriptors(0).is_err());
+        assert!(route_descriptors(4097).is_err());
+        assert!(route_descriptors(u64::MAX).is_err());
+    }
 }

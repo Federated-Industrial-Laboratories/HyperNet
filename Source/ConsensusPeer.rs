@@ -57,7 +57,7 @@ pub const MAX_PAYLOAD: usize = 196608;
 pub const MAX_REPAIR_RECORDS: usize = 16;
 pub const HTTP_TIMEOUT: Duration = Duration::from_secs(3);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message {
     Wish(Vec<u8>),
     NewView(Vec<u8>, Vec<u8>),

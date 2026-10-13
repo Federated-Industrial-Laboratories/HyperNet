@@ -37,6 +37,7 @@ verified installation. Installation does not start a service or grant authority.
 - [Authority replicas](Documentation/AuthorityReplica.md): pinned peers and consensus operation.
 - [Runtime](Documentation/Runtime.md): setup, preview, local consent and authority lifecycle.
 - [Service runtime](Documentation/ServiceRuntime.md): exact hosting consent and serving activation.
+- [Private routes](Documentation/PrivateRoutes.md): pinned relay transport, public endpoints and outbound attachments.
 - [Authority epochs](Documentation/AuthorityEpochs.md): certified healthy replacement.
 - [Network recovery](Documentation/NetworkRecovery.md): exceptional recovery and independently accepted identity.
 - [Pages](Documentation/Pages.md): inert publication, manual review and current approval.
@@ -52,10 +53,10 @@ verified installation. Installation does not start a service or grant authority.
 - [Qualification](Documentation/Qualification.md): native checks and platform limits.
 - [Security](Documentation/Security.md): private reporting and trust boundaries.
 
-The current interface uses explicit local authority and service control routes.
-These routes do not establish reader anonymity. Relay-only reader access,
-confidential publication and broader platform qualification remain separate
-requirements before production Internet use. Native AArch64, macOS and
-SELinux-enabled operation remain pending qualification.
+Private reader routes use fresh TLS channels to an approved relay and the final
+service. Independent privacy depends on separate, noncolluding operators; an
+organisation operating both ends can correlate connections. Sealed publications
+protect content separately. Native AArch64, macOS and SELinux-enabled operation
+remain pending qualification.
 
 Licensed under the [MIT License](Licence.txt).

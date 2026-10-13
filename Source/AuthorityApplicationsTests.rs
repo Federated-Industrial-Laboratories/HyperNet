@@ -479,6 +479,68 @@ fn owner_and_application_can_withdraw_after_parent_revocation_without_audit_auth
 }
 
 #[test]
+fn application_creation_and_withdrawal_allow_bookkeeping_but_keep_current_authority() {
+    let (f, owner, prior) = setup();
+    let app = m::key(81);
+    let (prior, request, _) = app_setup(&f, &prior, &owner, &app, 72);
+    let advanced = m::execute(
+        &f,
+        &prior,
+        &m::status(&f, &f.requester, 94),
+        &f.requester,
+        5500,
+    );
+    let registered = m::execute(&f, &advanced.state, &request, &owner, 6000);
+    assert_eq!(m::code(&registered), 0);
+    assert_eq!(
+        body(&registered).array(6).unwrap()[5].uint().unwrap(),
+        State::parse(&f.app.config, &registered.state)
+            .unwrap()
+            .height
+    );
+    let replayed = m::execute(&f, &registered.state, &request, &owner, 40000);
+    assert_eq!(m::code(&replayed), 0);
+    assert_eq!(result_bytes(&registered), result_bytes(&replayed));
+    let before = State::parse(&f.app.config, &registered.state).unwrap();
+    let after = State::parse(&f.app.config, &replayed.state).unwrap();
+    assert_eq!(before.streams.value(), after.streams.value());
+    assert_eq!(before.evidence.value(), after.evidence.value());
+    assert_eq!(before.records, after.records);
+    f.app
+        .validate_checkpoint(&replayed.state, after.height)
+        .unwrap();
+
+    let withdrawal = withdraw(&f, &replayed.state, &owner, m::public(&app), 41000);
+    let advanced = m::execute(
+        &f,
+        &replayed.state,
+        &m::status(&f, &f.requester, 95),
+        &f.requester,
+        42000,
+    );
+    let withdrawn = m::execute(&f, &advanced.state, &withdrawal, &owner, 43000);
+    assert_eq!(m::code(&withdrawn), 0);
+    let replayed = m::execute(&f, &withdrawn.state, &withdrawal, &owner, 44000);
+    assert_eq!(m::code(&replayed), 0);
+    assert_eq!(result_bytes(&withdrawn), result_bytes(&replayed));
+    let state = State::parse(&f.app.config, &replayed.state).unwrap();
+    f.app
+        .validate_checkpoint(&replayed.state, state.height)
+        .unwrap();
+
+    // A changed authorisation is still decisive at the delayed creation order.
+    let revoke = super::transaction_tests::revoke(&f, &prior, [70; 32], 3);
+    let revoked = m::execute(&f, &prior, &revoke, &f.requester, 6000);
+    assert_eq!(m::code(&revoked), 0);
+    let refused = m::execute(&f, &revoked.state, &request, &owner, 7000);
+    assert_ne!(m::code(&refused), 0);
+    assert_eq!(
+        State::parse(&f.app.config, &revoked.state).unwrap().records,
+        State::parse(&f.app.config, &refused.state).unwrap().records
+    );
+}
+
+#[test]
 fn registration_replay_after_acceptance_expiry_preserves_fenced_application_stream() {
     let (f, owner, prior) = setup();
     let app = m::key(81);

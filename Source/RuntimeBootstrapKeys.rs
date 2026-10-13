@@ -8,11 +8,12 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct Keys {
     pub authority_transports: BTreeMap<[u8; 32], [u8; 32]>,
     pub clock_monitors: BTreeSet<[u8; 32]>,
+    pub route_transports: BTreeMap<u64, ([u8; 32], [u8; 32])>,
 }
 impl Keys {
     pub fn parse(bytes: &[u8], network: [u8; 32], incarnation: [u8; 32]) -> Result<Self> {
         let value = wire::decode(bytes)?;
-        let row = value.array(8)?;
+        let row = value.array(9)?;
         ensure!(
             row[0].uint()? == 131
                 && row[1].uint()? == 1
@@ -56,9 +57,26 @@ impl Keys {
             !clock_monitors.is_empty(),
             "At least one bootstrap clock monitor is required"
         );
+        let mut route_transports = BTreeMap::new();
+        for (entry, expected) in row[8].array(2)?.iter().zip([2, 3]) {
+            let fields = entry.array(3)?;
+            let class = fields[0].uint()?;
+            let id = fields[1].fixed::<32>()?;
+            let key = fields[2].fixed::<32>()?;
+            wire::valid_key(&key)?;
+            ensure!(
+                class == expected
+                    && id != [0; 32]
+                    && identities.insert(key)
+                    && route_transports.values().all(|(old, _)| *old != id),
+                "Repeated or invalid immutable route identity"
+            );
+            route_transports.insert(class, (id, key));
+        }
         Ok(Self {
             authority_transports,
             clock_monitors,
+            route_transports,
         })
     }
     #[cfg(test)]
@@ -78,6 +96,12 @@ impl Keys {
                     .collect(),
             ),
             V::Array(self.clock_monitors.iter().map(b).collect()),
+            V::Array(
+                self.route_transports
+                    .iter()
+                    .map(|(class, (id, key))| V::Array(vec![V::Uint(*class), b(id), b(key)]))
+                    .collect(),
+            ),
         ]))?;
         Self::parse(&bytes, network, incarnation)?;
         Ok(bytes)
@@ -120,6 +144,9 @@ mod tests {
                 .map(|(i, voter)| (*voter, public(20 + i as u8)))
                 .collect(),
             clock_monitors: [public(30)].into_iter().collect(),
+            route_transports: [(2, ([70; 32], public(31))), (3, ([71; 32], public(32)))]
+                .into_iter()
+                .collect(),
         };
         let bytes = keys.encode([40; 32], [41; 32]).unwrap();
         let parsed = Keys::parse(&bytes, [40; 32], [41; 32]).unwrap();
@@ -131,7 +158,7 @@ mod tests {
         let mut collision = keys.clone();
         collision.clock_monitors = [voters[0]].into_iter().collect();
         assert!(collision.encode([40; 32], [41; 32]).is_err());
-        let mut value = wire::decode(&bytes).unwrap().array(8).unwrap().to_vec();
+        let mut value = wire::decode(&bytes).unwrap().array(9).unwrap().to_vec();
         value[4] = V::Uint(2);
         assert!(Keys::parse(&wire::encode(&V::Array(value)).unwrap(), [40; 32], [41; 32]).is_err());
     }

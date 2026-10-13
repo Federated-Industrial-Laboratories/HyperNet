@@ -12,7 +12,7 @@ impl Engine {
             .chain(state.certificates.values())
             .chain(state.inputs.objects())
     }
-    pub(super) fn object_budget(state: &Snapshot, ordinary: bool) -> Result<()> {
+    pub(super) fn object_budget(state: &Snapshot, ordinary: bool) -> Result<Vec<u8>> {
         let store = objects(state)?;
         let node_limit = if ordinary {
             storage::ORDINARY_NODES
@@ -73,11 +73,14 @@ impl Engine {
             )
             .context("Object accounting overflow")?;
         ensure!(charged <= byte_limit, "Pending byte capacity exhausted");
+        let started = std::time::Instant::now();
+        let encoded = serde_json::to_vec(state)?;
+        timing::metadata_encoding(started.elapsed(), encoded.len());
         ensure!(
-            serde_json::to_vec(state)?.len() <= journal::MAXIMUM,
+            encoded.len() <= journal::MAXIMUM,
             "Signer metadata capacity exhausted"
         );
-        Ok(())
+        Ok(encoded)
     }
     pub(super) fn all_objects(state: &Snapshot) -> impl Iterator<Item = &storage::Object> {
         Self::pending_objects(state).chain(state.executed.values().map(|e| &e.object))
@@ -96,20 +99,25 @@ impl Engine {
     // Any uncertain write stops this instance; reopen verifies the committed
     // archive prefix and truncates only its uncommitted suffix.
     pub(super) fn publish_applied(&mut self, next: Snapshot, suffix: &[Digest]) -> Result<()> {
-        if let Err(error) = Self::publish_objects(&next).and_then(|_| {
+        let publication = Self::publish_objects(&next).and_then(|encoded| {
             self.archive.append(
                 self.snapshot.archive_size,
                 self.snapshot.archive_root,
                 suffix,
-            )
-        }) {
-            self.faulted = true;
-            return Err(error);
-        }
-        self.persist(next)
+            )?;
+            Ok(encoded)
+        });
+        let encoded = match publication {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                self.faulted = true;
+                return Err(error);
+            }
+        };
+        self.persist_published(next, &encoded)
     }
-    pub(super) fn publish_objects(state: &Snapshot) -> Result<()> {
-        Self::object_budget(state, false)?;
+    pub(super) fn publish_objects(state: &Snapshot) -> Result<Vec<u8>> {
+        let encoded = Self::object_budget(state, false)?;
         let store = objects(state)?;
         ensure!(
             state.executed.len() <= storage::MAX_RESULTS,
@@ -130,7 +138,7 @@ impl Engine {
         if created {
             store.sync()?;
         }
-        Ok(())
+        Ok(encoded)
     }
     pub(super) fn unstage_objects(state: &mut Snapshot) {
         state.inputs.unstage();

@@ -5,6 +5,9 @@ use anyhow::{Context, Result, ensure};
 use ed25519_dalek::{Signature, SigningKey};
 use serde::{Deserialize, Serialize};
 
+#[path = "ConsensusSignatureCache.rs"]
+mod signature_cache;
+
 pub type Digest = [u8; 32];
 pub type Key = [u8; 32];
 
@@ -326,6 +329,7 @@ pub struct Certificate {
 #[cfg(test)]
 thread_local! {
     static CERTIFICATE_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CERTIFICATE_SIGNATURE_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 impl Certificate {
     /// Quorum membership changes the proof bytes, not the certified vote's identity.
@@ -341,6 +345,10 @@ impl Certificate {
     #[cfg(test)]
     pub(super) fn parse_count() -> usize {
         CERTIFICATE_PARSES.get()
+    }
+    #[cfg(test)]
+    pub(super) fn signature_check_count() -> usize {
+        CERTIFICATE_SIGNATURE_CHECKS.get()
     }
     pub fn digest(&self) -> Digest {
         self.identity
@@ -369,6 +377,7 @@ impl Certificate {
         let payload = a[3].bytes()?;
         let vote = Vote::parse(config, payload)?;
         ensure!(pairs.len() >= 3, "Certificate quorum is missing");
+        let verified = signature_cache::contains(input);
         let mut prior = None;
         for pair in pairs {
             let pair = pair.array(2)?;
@@ -378,20 +387,33 @@ impl Certificate {
                 prior.is_none_or(|p| p < signer),
                 "Certificate signers are repeated or unordered"
             );
-            wire::valid_key(&signer)?.verify_strict(
-                &wire::signature_message(payload, &signer),
-                &Signature::from_bytes(&pair[1].fixed::<64>()?),
-            )?;
+            let key = wire::valid_key(&signer)?;
+            let signature = Signature::from_bytes(&pair[1].fixed::<64>()?);
+            if !verified {
+                let start = std::time::Instant::now();
+                let result =
+                    key.verify_strict(&wire::signature_message(payload, &signer), &signature);
+                super::timing::certificate_signature(start.elapsed());
+                #[cfg(test)]
+                CERTIFICATE_SIGNATURE_CHECKS.set(CERTIFICATE_SIGNATURE_CHECKS.get() + 1);
+                result?;
+            }
             prior = Some(signer);
         }
-        Ok(Self {
+        let certificate = Self {
             identity: Self::vote_digest(&vote)?,
             bytes: input.to_vec(),
             node: vote.node,
             view: vote.view,
             phase: vote.phase,
             vote: Some(vote),
-        })
+        };
+        if verified {
+            super::timing::certificate_cache_hit();
+        } else {
+            signature_cache::remember(input);
+        }
+        Ok(certificate)
     }
     pub fn collect(config: &Configuration, votes: &[SignedVote]) -> Result<Self> {
         ensure!(
@@ -623,6 +645,10 @@ impl OrderedRequest {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "ConsensusCertificateTests.rs"]
+mod certificate_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {

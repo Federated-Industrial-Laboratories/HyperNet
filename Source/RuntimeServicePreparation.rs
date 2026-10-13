@@ -38,6 +38,12 @@ fn members(path: &Path, expected: &[&str]) -> Result<()> {
 }
 pub(super) fn prepare(p: &Profile) -> Result<()> {
     p.check_artifacts()?;
+    let route = p.role()?.role == 5;
+    let directories: &[&str] = if route {
+        &["Config", "EgressConfig", "State"]
+    } else {
+        &["Config", "State"]
+    };
     let journal = p.root.join("Preparation.json");
     let pending = p.root.join("LaunchPending");
     let launch = p.root.join("Launch");
@@ -79,10 +85,14 @@ pub(super) fn prepare(p: &Profile) -> Result<()> {
             ]))?;
         }
         directory(&pending)?;
-        for name in ["Config", "State"] {
+        for name in directories {
             directory(&pending.join(name))?;
         }
-        for name in ["Requester", "Recipient", "Control"] {
+        for name in if route {
+            vec!["Requester", "Recipient", "Control", "Egress"]
+        } else {
+            vec!["Requester", "Recipient", "Control"]
+        } {
             let d = pending.join("State").join(name);
             directory(&d)?;
             ensure!(
@@ -100,31 +110,40 @@ pub(super) fn prepare(p: &Profile) -> Result<()> {
                 wire::digest(&bytes) == *expected,
                 "consented service configuration changed"
             );
-            let path = pending.join("Config").join(name);
-            if path.try_exists()? {
-                ensure!(
-                    files::read(&path, wire::MAXIMUM)? == *bytes,
-                    "partial configuration differs"
-                );
-            } else {
-                files::create(&path, &bytes)?;
+            let mut targets = vec![pending.join("Config").join(name)];
+            if route && name == "Egress.json" {
+                targets.push(pending.join("EgressConfig/Egress.json"));
+            }
+            for path in targets {
+                if path.try_exists()? {
+                    ensure!(
+                        files::read(&path, wire::MAXIMUM)? == *bytes,
+                        "partial configuration differs"
+                    );
+                } else {
+                    files::create(&path, &bytes)?;
+                }
             }
         }
-        members(&pending, &["Config", "State"])?;
+        members(&pending, directories)?;
+        if route {
+            members(&pending.join("EgressConfig"), &["Egress.json"])?;
+        }
         members(
             &pending.join("State"),
-            &["Control", "Recipient", "Requester"],
+            if route {
+                &["Control", "Egress", "Recipient", "Requester"]
+            } else {
+                &["Control", "Recipient", "Requester"]
+            },
         )?;
         members(
             &pending.join("Config"),
             &p.artifacts.keys().map(String::as_str).collect::<Vec<_>>(),
         )?;
-        for d in [
-            &pending,
-            pending.join("Config").as_path(),
-            pending.join("State").as_path(),
-        ] {
-            fs::File::open(d)?.sync_all()?;
+        fs::File::open(&pending)?.sync_all()?;
+        for name in directories {
+            fs::File::open(pending.join(name))?.sync_all()?;
         }
         files::podman(&files::strings(&[
             "unshare",

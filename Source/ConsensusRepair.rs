@@ -17,7 +17,7 @@ pub struct Reference {
     pub digest: Digest,
     pub signer: Option<Key>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Item {
     pub reference: Reference,

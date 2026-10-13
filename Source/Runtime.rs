@@ -12,7 +12,7 @@ pub(crate) mod files;
 #[path = "RuntimeModel.rs"]
 mod model;
 #[path = "RuntimeServices.rs"]
-mod services;
+pub(crate) mod services;
 #[path = "RuntimeSetup.rs"]
 mod setup;
 

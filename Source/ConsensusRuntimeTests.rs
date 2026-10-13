@@ -17,6 +17,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[path = "ConsensusHistoryOvertakenTests.rs"]
 mod history_overtaken;
+#[path = "ConsensusHistoryPreparationTests.rs"]
+mod history_preparation;
+#[path = "ConsensusRequestOrderTests.rs"]
+mod request_order;
 
 struct ExampleApplication(Configuration);
 impl Application for ExampleApplication {
@@ -145,6 +149,7 @@ fn repair_driver(
         outbox: BTreeMap::new(),
         local: VecDeque::new(),
         requests: BTreeMap::new(),
+        request_order: VecDeque::new(),
         input_flight: None,
         input_waiting: BTreeMap::new(),
         query_times: BTreeMap::new(),
@@ -163,6 +168,53 @@ fn repair_driver(
         application_ready: false,
         retransmit_cursor: 0,
     }
+}
+#[test]
+fn exact_outbox_reuse_preserves_validation_and_replay() {
+    let (configuration, keys) = fixture();
+    let directory = Directory::new();
+    let engine = Engine::create(
+        &directory.0,
+        configuration.clone(),
+        keys[0].clone(),
+        initial(),
+    )
+    .unwrap();
+    let mailbox = ingress::Mailbox::new();
+    let mut driver = repair_driver(
+        engine,
+        &directory.0,
+        &keys,
+        configuration.voters[1],
+        mailbox.clone(),
+    );
+    let first =
+        Message::Wish(super::super::synchronizer::sign(&configuration, 1, &keys[0]).unwrap());
+    driver.broadcast(first.clone()).unwrap();
+    let original = mailbox.try_pop().unwrap().unwrap();
+    driver.broadcast(first.clone()).unwrap();
+    assert_eq!(driver.outbox.len(), 1);
+    assert_eq!(driver.local.len(), 1);
+    assert!(mailbox.try_pop().unwrap().is_none());
+
+    let second = super::super::synchronizer::sign(&configuration, 2, &keys[0]).unwrap();
+    driver.broadcast(Message::Wish(second.clone())).unwrap();
+    assert_eq!(driver.outbox.len(), 2);
+    assert_ne!(mailbox.try_pop().unwrap().unwrap(), original);
+    let mut invalid = second;
+    *invalid.last_mut().unwrap() ^= 1;
+    assert!(driver.broadcast(Message::Wish(invalid)).is_err());
+    assert_eq!(driver.outbox.len(), 2);
+    assert_eq!(driver.local.len(), 2);
+    assert!(mailbox.try_pop().unwrap().is_none());
+
+    driver.outbox.clear();
+    driver.local.clear();
+    driver.broadcast(first.clone()).unwrap();
+    assert_eq!(mailbox.try_pop().unwrap().unwrap(), original);
+    driver.engine.faulted = true;
+    assert!(driver.broadcast(first).is_err());
+    assert!(mailbox.try_pop().unwrap().is_none());
 }
 #[test]
 fn missing_new_view_quorum_defers_validation_until_authenticated_report_arrives() {
@@ -350,13 +402,12 @@ fn quorum_ready_clock_tick_proposes_only_eligible_requests_and_rebroadcasts_dura
     let eligible = current_request(&configuration, 72, now);
     let future = current_request(&configuration, 73, now + 60000);
     for command in [eligible.clone(), future] {
-        driver.requests.insert(
-            wire::digest(&command),
-            Submission {
+        driver
+            .remember_request(Submission {
                 command,
                 inputs: Resolved::default(),
-            },
-        );
+            })
+            .unwrap();
     }
     // Neither request arrival nor a transport ACK is needed for clock eligibility.
     driver.tick().unwrap();
@@ -447,13 +498,12 @@ fn committed_unapplied_requests_stop_gossip_without_consuming_alternatives() {
     );
     let empty = wire::encode(&Resolved::default().value()).unwrap();
     for bytes in [&command, &following, &fresh, &speculative] {
-        driver.requests.insert(
-            wire::digest(bytes),
-            Submission {
+        driver
+            .remember_request(Submission {
                 command: bytes.clone(),
                 inputs: Resolved::default(),
-            },
-        );
+            })
+            .unwrap();
         driver
             .send(
                 configuration.voters[1],
@@ -483,6 +533,10 @@ fn committed_unapplied_requests_stop_gossip_without_consuming_alternatives() {
         alternatives
     );
     assert_eq!(drain_submissions(), alternatives);
+    assert_eq!(
+        driver.request_order,
+        VecDeque::from([fresh_digest, speculative_digest])
+    );
     // Repeated peer and local submissions return pending results without
     // requiring a new clock observation or retransmitting a decided command.
     driver
@@ -594,13 +648,12 @@ fn early_execution_shares_recover_by_query_after_committed_request_suppression()
         configuration.voters[1],
         requests.clone(),
     );
-    driver.requests.insert(
-        digest,
-        Submission {
+    driver
+        .remember_request(Submission {
             command: command.clone(),
             inputs: Resolved::default(),
-        },
-    );
+        })
+        .unwrap();
     for engine in &engines[..2] {
         let node = engine.applied().unwrap();
         let execution = engine.execution(node.digest().unwrap()).unwrap().unwrap();
@@ -616,6 +669,7 @@ fn early_execution_shares_recover_by_query_after_committed_request_suppression()
     driver.apply().unwrap();
     assert_eq!(driver.engine.applied().unwrap().height, 0);
     assert!(!driver.requests.contains_key(&digest));
+    assert!(driver.request_order.is_empty());
     driver.apply().unwrap();
     assert_eq!(driver.engine.applied().unwrap().height, 1);
     let pending = wire::decode(&driver.result(digest).unwrap()).unwrap();

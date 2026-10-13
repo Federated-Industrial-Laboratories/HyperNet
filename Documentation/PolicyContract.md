@@ -98,6 +98,12 @@ Nested types have these exact array shapes:
   invalidates a proposed authorisation or transition. A frozen roster guards its
   transitive identity/admission dependencies by exact deterministic recomputation
   at commit, not by omitting their current-state checks.
+  Delegation, member admission, application/deployment registration and withdrawal,
+  and grant revocation use a same-epoch causal point floor. They recompute their
+  exact relevant dependencies and current authority at execution. A future point
+  or an equal-height point with another state digest is refused; unrelated commits
+  do not invalidate unchanged authorisation. Each creation result certifies its
+  original creation height, which stays identical on exact requester replay.
 - `Impact = [category:U64, subject:Id, before:Digest|null,
   after:Digest|null, reason:U64]`. Categories are Role=0, Endpoint=1,
   Placement=2, Resource=3, Audience=4, Trust=5.
@@ -267,9 +273,14 @@ admission remain separate.
 Member creation requires an administrator offer and the candidate's signature
 over the same immutable acceptance payload. It binds the network, incarnation,
 member ID, signing key, exact reader grant and bounded validity. The final ordered
-request adds its current Snapshot after acceptance. A later state change does
-not alter what the candidate signed; changed membership semantics require new
-acceptance. The full signed intent survives in bounded canonical mutation evidence.
+request adds its certified Snapshot after acceptance. For delegation and member
+admission, its point is a same-epoch causal floor; an equal-height point must have
+the exact state digest. The authority recomputes the complete exact dependency
+set, current capabilities, revocations and identity conflicts at committed order.
+Unrelated requester or service bookkeeping does not invalidate these checks. A
+later state change does not alter what the candidate signed; changed membership
+semantics require new acceptance. The full signed intent survives in bounded
+canonical mutation evidence.
 
 Delegation and admission are separate capabilities. A reader grant may exist
 before admission, but it confers no usable authority on an unadmitted candidate.

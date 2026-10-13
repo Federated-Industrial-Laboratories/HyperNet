@@ -474,7 +474,7 @@ fn mutation_authorities_are_separate_and_dedicated_keys_cannot_be_subjects() {
     }
 }
 #[test]
-fn child_attenuation_and_stale_snapshot_refuse_before_mutation() {
+fn child_attenuation_refuses_before_mutation() {
     let f = Fixture::with_actions(1000, vec![0, 10, 11, 12, 25]);
     for (index, value, expected) in [
         (3, array(vec![V::Uint(31)]), 4),
@@ -496,27 +496,166 @@ fn child_attenuation_and_stale_snapshot_refuse_before_mutation() {
             State::parse(&f.app.config, &f.initial).unwrap().records
         );
     }
-    let request = delegate(&f, &f.initial, child(&f, public(&key(80)), 70), 5000);
-    let status = wire::sign_envelope(
+}
+pub(super) fn status(f: &Fixture, signer: &SigningKey, nonce: u8) -> Vec<u8> {
+    wire::sign_envelope(
         &wire::encode(&array(vec![
             V::Uint(55),
             V::Uint(1),
             b(&f.app.config.scope.network),
             b(&f.app.config.scope.incarnation),
-            b(&public(&f.requester)),
-            b(&[87; 32]),
+            b(&public(signer)),
+            b(&[nonce; 32]),
             V::Uint(0),
             V::Uint(0),
         ]))
         .unwrap(),
-        &f.requester,
+        signer,
     )
-    .unwrap();
+    .unwrap()
+}
+#[test]
+fn membership_causal_floor_accepts_unrelated_commits_and_replays_once() {
+    let f = Fixture::with_actions(1000, vec![0, 10, 11, 12, 25]);
+    let request = delegate(&f, &f.initial, child(&f, public(&key(80)), 70), 5000);
+    let status = status(&f, &f.requester, 87);
     let advanced = execute(&f, &f.initial, &status, &f.requester, 5000);
+    let applied = execute(&f, &advanced.state, &request, &f.requester, 6000);
+    assert_eq!(code(&applied), 0);
+    let result = crate::authority_proof::OperationResult::parse(result_bytes(&applied)).unwrap();
     assert_eq!(
-        code(&execute(&f, &advanced.state, &request, &f.requester, 6000)),
-        12
+        wire::decode(&result.value).unwrap().array(6).unwrap()[5],
+        V::Uint(2)
     );
+    let replayed = execute(&f, &applied.state, &request, &f.requester, 7000);
+    assert_eq!(code(&replayed), 0);
+    assert_eq!(result_bytes(&applied), result_bytes(&replayed));
+    let before = State::parse(&f.app.config, &applied.state).unwrap();
+    let after = State::parse(&f.app.config, &replayed.state).unwrap();
+    assert_eq!(before.records, after.records);
+    assert_eq!(before.evidence.value(), after.evidence.value());
+    assert_eq!(before.streams.value(), after.streams.value());
+    assert_eq!(after.records.len(), f.expected.len() + 1);
+    f.app.validate_checkpoint(&replayed.state, 3).unwrap();
+    for height in [0, 4] {
+        let mut damaged = wire::decode_state(&replayed.state)
+            .unwrap()
+            .array(13)
+            .unwrap()
+            .to_vec();
+        let mut entries = damaged[9].list(1).unwrap().to_vec();
+        let mut entry = entries[0].array(4).unwrap().to_vec();
+        entry[2] = V::Uint(height);
+        entries[0] = array(entry);
+        damaged[9] = array(entries);
+        assert!(
+            f.app
+                .validate_checkpoint(&wire::encode_state(&array(damaged)).unwrap(), 3)
+                .is_err()
+        );
+    }
+}
+#[test]
+fn membership_floor_refuses_future_epoch_height_and_equal_height_conflict() {
+    let f = Fixture::with_actions(1000, vec![0, 10, 11, 12, 25]);
+    let request = delegate(&f, &f.initial, child(&f, public(&key(80)), 70), 5000);
+    for (index, value, expected) in [
+        (0, V::Uint(f.app.config.scope.epoch + 1), 12),
+        (1, V::Uint(1), 12),
+        (2, b(&[87; 32]), 12),
+    ] {
+        let original = Intent::from_signed(&request).unwrap();
+        let mut parameters = wire::decode(&original.parameters)
+            .unwrap()
+            .array(6)
+            .unwrap()
+            .to_vec();
+        let mut snapshot = parameters[5].array(2).unwrap().to_vec();
+        let mut point = snapshot[0].array(3).unwrap().to_vec();
+        point[index] = value;
+        snapshot[0] = array(point);
+        parameters[5] = array(snapshot);
+        let mut fields = wire::decode(&wire::envelope(&request, 1).unwrap().0)
+            .unwrap()
+            .array(17)
+            .unwrap()
+            .to_vec();
+        let point = parameters[5].array(2).unwrap()[0].array(3).unwrap();
+        fields[13] = point[0].clone();
+        fields[14] = point[1].clone();
+        fields[16] = b(&wire::encode(&array(parameters)).unwrap());
+        let changed =
+            wire::sign_envelope(&wire::encode(&array(fields)).unwrap(), &f.requester).unwrap();
+        let refused = execute(&f, &f.initial, &changed, &f.requester, 6000);
+        assert_eq!(code(&refused), expected);
+        assert_eq!(
+            State::parse(&f.app.config, &refused.state).unwrap().records,
+            State::parse(&f.app.config, &f.initial).unwrap().records
+        );
+    }
+}
+#[test]
+fn older_membership_floor_still_requires_current_parent_and_tier() {
+    let f = Fixture::with_actions(1000, vec![0, 10, 11, 12, 25]);
+    let request = delegate(&f, &f.initial, child(&f, public(&key(80)), 70), 5000);
+    let intent = Intent::from_signed(&request).unwrap();
+    let operation = transactions::Operation::parse(&intent, &f.app.config).unwrap();
+    for kind in [101, 102] {
+        // Exercise the evaluator with an already authenticated newer dependency.
+        // This synthetic state is not claimed as a restorable checkpoint.
+        let mut state = State::parse(&f.app.config, &f.initial).unwrap();
+        state.height = 1;
+        let record = state
+            .records
+            .iter_mut()
+            .find(|r| wire::decode(r).unwrap().list(32).unwrap()[0] == V::Uint(kind))
+            .unwrap();
+        let mut fields = wire::decode(record).unwrap().list(32).unwrap().to_vec();
+        fields[4] = V::Uint(2);
+        fields[5] = b(&wire::digest(record));
+        *fields.last_mut().unwrap() = snapshot(&f, &f.initial, &f.expected);
+        *record = wire::encode(&array(fields)).unwrap();
+        let prior = state.encode(&f.app.config).unwrap();
+        let decision = transactions::evaluate(
+            &operation,
+            &state,
+            &f.app.config,
+            &prior,
+            &intent,
+            transactions::Evaluation {
+                at: 6000,
+                expires: 10000,
+                replay: false,
+                recipient: public(&f.requester),
+            },
+            &crate::authority_objects::Resolved::default(),
+        )
+        .unwrap();
+        assert_ne!(decision.code, 0, "changed kind {kind} was accepted");
+        assert!(decision.records.is_none());
+    }
+}
+#[test]
+fn intervening_other_administrator_revocation_defeats_membership_floor() {
+    let f = Fixture::with_extra_administrator(1000, vec![0, 10, 11, 12, 25]);
+    let request = delegate(&f, &f.initial, child(&f, public(&key(80)), 70), 5000);
+    let other = Fixture {
+        app: PolicyApplication::new(f.app.config.clone()),
+        initial: f.initial.clone(),
+        bootstrap: f.bootstrap.clone(),
+        requester: key(77),
+        expected: f.expected.clone(),
+        grant: [92; 32],
+    };
+    let revocation = super::transaction_tests::revoke(&other, &f.initial, f.grant, 1);
+    let revoked = execute(&f, &f.initial, &revocation, &other.requester, 5000);
+    assert_eq!(code(&revoked), 0);
+    let refused = execute(&f, &revoked.state, &request, &f.requester, 6000);
+    assert_eq!(code(&refused), 6);
+    let before = State::parse(&f.app.config, &revoked.state).unwrap();
+    let after = State::parse(&f.app.config, &refused.state).unwrap();
+    assert_eq!(before.records, after.records);
+    assert_eq!(before.evidence.value(), after.evidence.value());
 }
 #[test]
 fn finite_audit_capacity_refuses_atomically_without_orphan_grants() {
@@ -640,4 +779,205 @@ fn reader_revocation_is_permanent_without_rewriting_membership_or_stream() {
         code(&execute(&f, &revoked.state, &fresh, &f.requester, 15000)),
         6
     );
+}
+
+fn route_request(
+    f: &Fixture,
+    prior: &[u8],
+    signer: &SigningKey,
+    command: crate::authority_domains::routes::Command,
+    grant: Option<VersionRef>,
+    at: u64,
+) -> Vec<u8> {
+    let mut operation = crate::authority_domains::Operation {
+        grant,
+        command: command.into(),
+        snapshot: crate::authority_domains::snapshot(&snapshot(f, prior, &[])).unwrap(),
+    };
+    let make = |operation: &crate::authority_domains::Operation| {
+        let signed = signed(
+            f,
+            prior,
+            signer,
+            "AuthorityDomain",
+            operation.command.resource(),
+            wire::decode(&operation.parameters().unwrap()).unwrap(),
+            operation.snapshot.references.clone(),
+        );
+        let (payload, _) = wire::envelope(&signed, 1).unwrap();
+        let mut fields = wire::decode(&payload).unwrap().array(17).unwrap().to_vec();
+        fields[11] = V::Uint(u64::from(operation.mutation()));
+        wire::sign_envelope(&wire::encode(&array(fields)).unwrap(), signer).unwrap()
+    };
+    let provisional = make(&operation);
+    let intent = Intent::from_signed(&provisional).unwrap();
+    let state = State::parse(&f.app.config, prior).unwrap();
+    let decision = operation
+        .prepare(
+            &state.domains,
+            &state.records,
+            &state.reservations,
+            &intent,
+            at,
+            false,
+            false,
+        )
+        .unwrap();
+    assert_eq!(decision.code, 0, "route request preparation refused");
+    operation.snapshot =
+        crate::authority_domains::snapshot(&snapshot(f, prior, &decision.dependencies)).unwrap();
+    make(&operation)
+}
+
+#[test]
+fn candidate_invitation_admits_only_its_request_stream_before_exact_redemption() {
+    use crate::authority_domains::routes::Command as Route;
+    let f = Fixture::with_actions(1000, vec![0, 10, 11, 12, 25]);
+    let candidate = key(80);
+    let (prior, accepted) = setup(&f, &candidate);
+    let (payload, _) = wire::envelope(&accepted, 2).unwrap();
+    let offer = wire::sign_envelope(&payload, &f.requester).unwrap();
+    let root = f
+        .expected
+        .iter()
+        .find(|r| r.kind == 102 && r.id == f.grant)
+        .unwrap()
+        .clone();
+    let invite = route_request(
+        &f,
+        &prior,
+        &f.requester,
+        Route::Invite { offer },
+        Some(root),
+        6000,
+    );
+    let issued = execute(&f, &prior, &invite, &f.requester, 6000);
+    assert_eq!(code(&issued), 0);
+    let state = State::parse(&f.app.config, &issued.state).unwrap();
+    assert!(state.streams.keys().contains(&public(&candidate)));
+    assert!(
+        state
+            .records
+            .iter()
+            .all(|r| wire::decode(r).unwrap().list(32).unwrap()[0] != V::Uint(125))
+    );
+    let context = route_request(
+        &f,
+        &issued.state,
+        &candidate,
+        Route::CandidateContext {
+            accepted: accepted.clone(),
+        },
+        None,
+        7000,
+    );
+    let discovered = execute(&f, &issued.state, &context, &candidate, 7000);
+    assert_eq!(code(&discovered), 0);
+    let state = State::parse(&f.app.config, &discovered.state).unwrap();
+    let versions = Governance::parse(
+        f.app.config.scope.network,
+        f.app.config.scope.incarnation,
+        &state.records,
+    )
+    .unwrap()
+    .versions();
+    let ordinary = Governance::parse(
+        f.app.config.scope.network,
+        f.app.config.scope.incarnation,
+        &state.records,
+    )
+    .unwrap();
+    assert!(
+        ordinary
+            .current_capability(
+                [70; 32],
+                &crate::authority_governance::Requirement {
+                    subject: public(&candidate),
+                    actions: &[0],
+                    scope: (0, f.app.config.scope.network),
+                    namespace: None,
+                    usage: [0, 1, 0, 1],
+                    evaluated_at_ms: 7000,
+                    expected: &[],
+                }
+            )
+            .is_err()
+    );
+    let params = |refs: &[VersionRef]| {
+        array(vec![
+            V::Uint(200),
+            V::Uint(1),
+            V::Text("AuthorityRedeemMember".into()),
+            b(&f.grant),
+            b(&accepted),
+            snapshot(&f, &discovered.state, refs),
+        ])
+    };
+    let provisional = signed(
+        &f,
+        &discovered.state,
+        &candidate,
+        "AuthorityRedeemMember",
+        [71; 32],
+        params(&[]),
+        vec![],
+    );
+    let intent = Intent::from_signed(&provisional).unwrap();
+    let prepared = Mutation::parse(&intent)
+        .unwrap()
+        .prepare(&state.records, &state.reservations, &intent, 8000, false)
+        .unwrap();
+    assert_eq!(prepared.code, 0);
+    assert!(prepared.dependencies.iter().all(|r| versions.contains(r)));
+    let redemption = signed(
+        &f,
+        &discovered.state,
+        &candidate,
+        "AuthorityRedeemMember",
+        [71; 32],
+        params(&prepared.dependencies),
+        prepared.dependencies.clone(),
+    );
+    // Route admission may commit between a candidate's context and submission.
+    let bookkeeping = execute(
+        &f,
+        &discovered.state,
+        &status(&f, &f.requester, 88),
+        &f.requester,
+        7500,
+    );
+    let joined = execute(&f, &bookkeeping.state, &redemption, &candidate, 8000);
+    assert_eq!(code(&joined), 0);
+    let joined_state = State::parse(&f.app.config, &joined.state).unwrap();
+    assert_eq!(
+        joined_state
+            .streams
+            .keys()
+            .iter()
+            .filter(|k| **k == public(&candidate))
+            .count(),
+        1
+    );
+    assert_eq!(
+        joined_state
+            .records
+            .iter()
+            .filter(|r| wire::decode(r).unwrap().list(32).unwrap()[0] == V::Uint(125))
+            .count(),
+        1
+    );
+    let again = execute(&f, &joined.state, &redemption, &candidate, 8500);
+    assert_eq!(code(&again), 0);
+    let fresh = route_request(
+        &f,
+        &again.state,
+        &candidate,
+        Route::CandidateContext { accepted },
+        None,
+        9000,
+    );
+    let recovered = execute(&f, &again.state, &fresh, &candidate, 9000);
+    assert_eq!(code(&recovered), 0);
+    let state = State::parse(&f.app.config, &recovered.state).unwrap();
+    assert_eq!(state.streams.keys().len(), 2);
 }
