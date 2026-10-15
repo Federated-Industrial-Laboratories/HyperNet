@@ -275,3 +275,18 @@ A local withdrawal takes effect before container cleanup. Registry withdrawal
 also prevents new certified routes. In-flight streams stop when current permission expires or a restrictive
 change is observed; no permission change recalls previously disclosed content. Keep the role's state directory across restarts. Do not reconstruct
 consumed vouchers or requester journals from a stale copy.
+
+A signed clock observation that passes all other validation but reaches its
+fixed expiry suspends the installed route service. The service closes its
+permission gates, connections and listeners, and drains ingress and forwarding
+tasks. Existing streams cannot resume. While suspended, local withdrawal,
+generation, consent, activation and configuration checks remain mandatory.
+The original monotonic consent deadline continues to run.
+
+After a fresh observation, the same confined process reconciles its exact
+persisted requester operation and obtains current authority confirmation of the
+unchanged route profile before accepting new connections. This does not repeat
+activation, restore consumed voucher capacity, or extend a connection or
+permission deadline. Invalid clocks, changed authorization or configuration,
+unrecoverable journals and expired consent stop the service. Fixed
+`Suspended` and `FreshObservation` diagnostics contain no connection identifiers.

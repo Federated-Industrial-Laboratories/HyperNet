@@ -146,7 +146,7 @@ fn verify(bytes: &[u8], key: [u8; 32], boot: &str, now: clock::Moment) -> Result
         payload(&w)? == bytes,
         "noncanonical signed clock observation"
     );
-    w.health(boot, now)
+    Ok(w.health(boot, now)?.authenticated_observation())
 }
 
 pub fn publish(directory: &Path, key: &SigningKey, witness: &Witness) -> Result<()> {
@@ -206,6 +206,83 @@ fn replace_observation(directory: &Path, name: &str, bytes: &[u8], mode: u32) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn signed_clock_expiry_only_recovers_otherwise_valid_observations() {
+        let key = SigningKey::from_bytes(&[62; 32]);
+        let boot = "12345678-1234-1234-1234-123456789abc";
+        let old = Witness {
+            version: 1,
+            kernel_boot: boot.into(),
+            sample_wall_ms: 10000,
+            sample_boot_ms: 2000,
+            valid_until_boot_ms: 3000,
+            maximum_error_ms: 20,
+            source: "162.159.200.1".parse().unwrap(),
+        };
+        let now = clock::Moment {
+            wall_ms: 11000,
+            boot_ms: 3000,
+        };
+        let check = |w: &Witness, signer: &SigningKey| {
+            verify(
+                &wire::sign_envelope(&payload(w)?, signer)?,
+                key.verifying_key().to_bytes(),
+                boot,
+                now,
+            )
+        };
+        assert!(
+            check(&old, &key)
+                .unwrap_err()
+                .is::<clock::ObservationExpired>()
+        );
+        let fresh = Witness {
+            sample_wall_ms: 11000,
+            sample_boot_ms: 3000,
+            valid_until_boot_ms: 4000,
+            ..old.clone()
+        };
+        check(&fresh, &key).unwrap();
+        for invalid in [
+            Witness {
+                maximum_error_ms: 251,
+                ..old.clone()
+            },
+            Witness {
+                source: "127.0.0.1".parse().unwrap(),
+                ..old.clone()
+            },
+            Witness {
+                kernel_boot: "22345678-1234-1234-1234-123456789abc".into(),
+                ..old.clone()
+            },
+            Witness {
+                valid_until_boot_ms: 2999,
+                ..old.clone()
+            },
+            Witness {
+                sample_wall_ms: 12000,
+                ..old.clone()
+            },
+            Witness {
+                sample_wall_ms: 11001,
+                sample_boot_ms: 3001,
+                valid_until_boot_ms: 4001,
+                ..old.clone()
+            },
+        ] {
+            assert!(
+                !check(&invalid, &key)
+                    .unwrap_err()
+                    .is::<clock::ObservationExpired>()
+            );
+        }
+        assert!(
+            !check(&old, &SigningKey::from_bytes(&[63; 32]))
+                .unwrap_err()
+                .is::<clock::ObservationExpired>()
+        );
+    }
     #[test]
     fn atomically_replaced_observations_keep_their_original_validity() {
         let directory = crate::consensus::journal::tests::Directory::new();

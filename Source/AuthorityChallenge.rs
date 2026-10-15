@@ -79,6 +79,7 @@ pub struct ClockHealth {
     sample_boot_ms: u64,
     valid_until_boot_ms: u64,
     maximum_error_ms: u64,
+    authenticated_observation: bool,
     #[cfg(test)]
     test_observation: Option<Observation>,
 }
@@ -99,13 +100,14 @@ impl ClockHealth {
             sample_boot_ms,
             valid_until_boot_ms,
             maximum_error_ms,
+            authenticated_observation: false,
             #[cfg(test)]
             test_observation: None,
         })
     }
     fn observe_at(&self, wall: u64, boot: u64) -> Result<Observation> {
         ensure!(
-            boot >= self.sample_boot_ms && boot < self.valid_until_boot_ms,
+            boot >= self.sample_boot_ms,
             "clock health is stale or invalid"
         );
         let predicted = self
@@ -118,10 +120,20 @@ impl ClockHealth {
                 .is_some_and(|e| e <= DELTA_MS),
             "clock progression exceeds the established error bound"
         );
+        if boot >= self.valid_until_boot_ms {
+            if self.authenticated_observation {
+                return Err(crate::consensus_clock::ObservationExpired.into());
+            }
+            anyhow::bail!("clock health is stale or invalid");
+        }
         Ok(Observation {
             wall_ms: wall,
             boot_ms: boot,
         })
+    }
+    pub(crate) fn authenticated_observation(mut self) -> Self {
+        self.authenticated_observation = true;
+        self
     }
     #[cfg(test)]
     pub(crate) fn frozen(mut self) -> Self {
@@ -375,6 +387,31 @@ pub(crate) mod profile_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn authenticated_clock_expiry_does_not_hide_invalid_progression() {
+        let health = ClockHealth::new(1000, 100, 1100, 20).unwrap();
+        assert!(
+            !health
+                .observe_at(2000, 1100)
+                .unwrap_err()
+                .is::<crate::consensus_clock::ObservationExpired>()
+        );
+        let authenticated = health.authenticated_observation();
+        assert!(
+            authenticated
+                .observe_at(2000, 1100)
+                .unwrap_err()
+                .is::<crate::consensus_clock::ObservationExpired>()
+        );
+        for (wall, boot) in [(2000, 99), (3000, 1100)] {
+            assert!(
+                !authenticated
+                    .observe_at(wall, boot)
+                    .unwrap_err()
+                    .is::<crate::consensus_clock::ObservationExpired>()
+            );
+        }
+    }
     #[test]
     fn clock_error_budget_does_not_add_another_uncertainty_allowance() {
         let health = ClockHealth::new(1000, 20, 100, 250).unwrap();

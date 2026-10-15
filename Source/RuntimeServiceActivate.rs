@@ -71,6 +71,13 @@ impl Active {
     }
     pub fn check(&self, guard: &Guard) -> Result<()> {
         guard.check()?;
+        self.check_marker()
+    }
+    pub(crate) fn check_local(&self, guard: &Guard) -> Result<()> {
+        guard.check_local()?;
+        self.check_marker()
+    }
+    fn check_marker(&self) -> Result<()> {
         ensure!(
             !self.store.epoch_sealed(),
             "service authority epoch is sealed"
