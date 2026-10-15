@@ -609,6 +609,41 @@ impl<'a> Client<'a> {
     pub fn context(&self) -> (&domains::State, &[Vec<u8>]) {
         self.disk.context()
     }
+    fn search_bundle(
+        &self,
+        agreement: Digest,
+        raw: [u8; 16],
+        native: &VersionRef,
+    ) -> Result<(Resolved, Vec<u8>)> {
+        ensure!(
+            self.config.profile.search,
+            "bridge indexing consent is absent"
+        );
+        self.active.check(self.guard)?;
+        let state = self.disk.context().0;
+        for record in state.records.values().filter(|r| r.reference.kind == 155) {
+            let revision = federation::ForeignRevision::parse(&record.payload)?;
+            if revision.agreement != agreement
+                || revision.native != *native
+                || revision.metadata.author.raw_page != raw
+            {
+                continue;
+            }
+            ensure!(
+                self.disk.live(&revision.bundle, self.now()?),
+                "retained imported search body expired"
+            );
+            let objects = self.disk.objects(std::slice::from_ref(&revision.bundle))?;
+            let bundle = page::objects::Bundle::parse(
+                objects.get(&revision.bundle)?,
+                revision.source.network,
+                revision.source.incarnation,
+            )?;
+            revision.metadata.verify_source(&bundle.source)?;
+            return Ok((objects, bundle.source));
+        }
+        anyhow::bail!("exact imported search body is not retained")
+    }
     pub fn stage(&mut self, objects: &Resolved) -> Result<()> {
         let (state, records) = self.disk.context();
         self.disk.publish_bridge(
@@ -707,6 +742,14 @@ impl<'a> Shared<'a> {
     }
     pub fn local_media_report(&self, bytes: &[u8]) -> Result<page::MediaReport> {
         self.0.borrow().local_media_report(bytes)
+    }
+    pub fn search_bundle(
+        &self,
+        agreement: Digest,
+        raw: [u8; 16],
+        native: &VersionRef,
+    ) -> Result<(Resolved, Vec<u8>)> {
+        self.0.borrow().search_bundle(agreement, raw, native)
     }
     pub fn stage(&self, objects: &Resolved) -> Result<()> {
         self.0.borrow_mut().stage(objects)

@@ -20,6 +20,8 @@ mod epoch_evaluation;
 mod mutation_evidence;
 #[path = "AuthorityStreams.rs"]
 mod streams;
+#[path = "AuthorityTierEvaluation.rs"]
+mod tier_evaluation;
 #[path = "AuthorityTransactions.rs"]
 mod transactions;
 
@@ -112,10 +114,20 @@ impl State {
                     !genesis
                         && matches!(
                             version.kind,
-                            102 | 105 | 117 | 125 | 126 | 127 | 128 | 129 | 130
+                            101 | 102 | 105 | 117 | 125 | 126 | 127 | 128 | 129 | 130
                         ),
                     "unsupported post-genesis governance record"
                 );
+                if version.kind == 101
+                    && let Some(original) = mutation_evidence::Evidence::genesis_tier(
+                        evidence_value.context("tier history has no evidence")?,
+                        version.id,
+                        config.scope.network,
+                        config.scope.incarnation,
+                    )?
+                {
+                    initial.push(b(&original));
+                }
                 if version.kind == 125 {
                     let key = fields[7].fixed()?;
                     ensure!(
@@ -915,3 +927,7 @@ mod mail_application_tests;
 #[cfg(test)]
 #[path = "AuthorityPageApplicationTests.rs"]
 mod page_application_tests;
+
+#[cfg(test)]
+#[path = "AuthorityTierTests.rs"]
+mod tier_tests;

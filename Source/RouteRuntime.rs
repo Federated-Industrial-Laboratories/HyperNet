@@ -59,6 +59,9 @@ pub(crate) enum Phase {
     EndpointTlsComplete,
     EndpointRefused,
     EndpointReadyStart,
+    EndpointReadyBindingRefused,
+    EndpointReadyBudgetRefused,
+    EndpointReadyWriteRefused,
     EndpointReadyComplete,
     RequestReceived,
     RequestDequeued,
@@ -133,6 +136,7 @@ struct ListenerQueue<T> {
     requests: mpsc::Receiver<Queued<T>>,
     attachments: mpsc::Receiver<Queued<T>>,
     diagnostics: Arc<IngressDiagnostics>,
+    stop: tokio::sync::watch::Sender<bool>,
 }
 #[derive(Clone, Copy, Debug)]
 enum Refusal {
@@ -185,6 +189,7 @@ impl IngressDiagnostics {
 }
 impl<T> Drop for ListenerQueue<T> {
     fn drop(&mut self) {
+        self.stop.send_replace(true);
         eprintln!(
             "HyperNet private route ingress totals: parsed={} refused={:?}",
             self.diagnostics.parsed.load(Ordering::Relaxed),
@@ -194,6 +199,19 @@ impl<T> Drop for ListenerQueue<T> {
                 .map(|count| count.load(Ordering::Relaxed))
         );
     }
+}
+impl<T> ListenerQueue<T> {
+    async fn shutdown(&mut self) {
+        self.stop.send_replace(true);
+        self.requests.close();
+        self.attachments.close();
+        while self.tasks.join_next().await.is_some() {}
+        while self.requests.try_recv().is_ok() {}
+        while self.attachments.try_recv().is_ok() {}
+    }
+}
+async fn drain<T: 'static>(tasks: &mut JoinSet<T>) {
+    while tasks.join_next().await.is_some() {}
 }
 fn transient_accept(error: &std::io::Error) -> bool {
     matches!(
@@ -227,11 +245,11 @@ fn listen<T, F, Fut>(
     capacity: usize,
     idle_ms: u64,
     attachment: Option<fn(&T) -> bool>,
-    parse: F,
+    mut parse: F,
 ) -> ListenerQueue<T>
 where
     T: Send + 'static,
-    F: Fn(TcpStream) -> Fut + Send + 'static,
+    F: FnMut(TcpStream) -> Fut + Send + 'static,
     Fut: Future<Output = Result<T>> + Send + 'static,
 {
     let (sender, requests) = mpsc::channel(capacity);
@@ -240,12 +258,16 @@ where
     let parked_slots = Arc::new(Semaphore::new(capacity));
     let diagnostics = Arc::new(IngressDiagnostics::default());
     let observed = diagnostics.clone();
+    let (stop, mut stopping) = tokio::sync::watch::channel(false);
     let mut tasks = JoinSet::new();
     tasks.spawn(async move {
         let mut parsing = JoinSet::new();
         let mut accept_after = tokio::time::Instant::now();
+        let outcome = async {
         loop {
             tokio::select! {
+                biased;
+                _ = stopping.changed() => break,
                 _ = sender.closed() => break,
                 accepted = async {
                     tokio::time::sleep_until(accept_after).await;
@@ -298,12 +320,17 @@ where
             }
         }
         Ok(())
+        }.await;
+        parsing.abort_all();
+        drain(&mut parsing).await;
+        outcome
     });
     ListenerQueue {
         tasks,
         requests,
         attachments,
         diagnostics,
+        stop,
     }
 }
 async fn next_admission<T>(
@@ -681,6 +708,7 @@ async fn relay(
     let mut tick = tokio::time::interval(Duration::from_millis(DISPATCH_MS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let outcome = async {
     loop {
         active.check(guard)?;
         let now = client.now()?;
@@ -750,7 +778,7 @@ async fn relay(
                     session.renewals = session.renewals.saturating_add(1);
                     timing.mark(Phase::RenewalStart);
                     if expiry <= crate::authority_challenge::boot_time_ms()? { timing.mark(Phase::RelayGuardExpired); }
-                    let result = client.refresh(&session.renewal, session.deadline);
+                    let result = clock_checked(client.refresh(&session.renewal, session.deadline))?;
                     timing.mark(if result.is_ok() { Phase::RenewalComplete } else { Phase::RenewalRefused });
                     active.check(guard)?;
                     if result.and_then(|expires| session.gate.renew(expires.min(session.deadline))).is_ok() {
@@ -765,7 +793,7 @@ async fn relay(
                 if let Some((reader, attachment)) = pairing {
                     let mut reader = waiting.remove(reader).context("waiting reader disappeared")?;
                     let attachment = attachments.remove(attachment).context("matching attachment disappeared")?;
-                    let permission = reader.permission(attachment.total_deadline, |renewal, deadline| client.refresh(renewal, deadline));
+                    let permission = clock_checked(reader.permission(attachment.total_deadline, |renewal, deadline| client.refresh(renewal, deadline)))?;
                     active.check(guard)?;
                     if permission.is_err() {
                         incoming.diagnostics.refuse(Refusal::AdmissionExpired);
@@ -804,7 +832,7 @@ async fn relay(
                         timing
                     });
                     if crate::authority_local_transport::remaining(deadline).is_err() { incoming.diagnostics.refuse(Refusal::Deadline); timing.mark(Phase::AdmissionRefused); continue; }
-                    let admitted = client.admit(&opened.open, opened.signer, opened.connection, opened.binding, (started, deadline), timing);
+                    let admitted = clock_checked(client.admit(&opened.open, opened.signer, opened.connection, opened.binding, (started, deadline), timing))?;
                     active.check(guard)?;
                     let admission = match admitted {
                         Ok(Some(admission)) => { timing.mark(Phase::AdmissionComplete); admission },
@@ -865,9 +893,16 @@ async fn relay(
             _ = tick.tick() => {},
         }
     }
-    incoming.tasks.abort_all();
-    forwarding.abort_all();
     Ok(())
+    }.await;
+    live.clear();
+    waiting.clear();
+    attachments.clear();
+    pending.clear();
+    forwarding.abort_all();
+    incoming.shutdown().await;
+    drain(&mut forwarding).await;
+    outcome
 }
 async fn endpoint_incoming(
     socket: TcpStream,
@@ -991,8 +1026,15 @@ async fn ready_session(
     ready: Vec<u8>,
     permission: route_io::Gate,
 ) -> Result<Request> {
-    session.boundary.arm(permission.clone(), session.deadline)?;
-    session.charge(ready.len())?;
+    // A checked proof can expire before this task runs. Bind its renewable guard
+    // before any readiness write; guarded_send waits within the original limits.
+    session
+        .boundary
+        .arm_renewable(permission.clone(), session.deadline)
+        .inspect_err(|_| session.mark(Phase::EndpointReadyBindingRefused))?;
+    session
+        .charge(ready.len())
+        .inspect_err(|_| session.mark(Phase::EndpointReadyBudgetRefused))?;
     route_io::guarded_send(
         &mut session.stream,
         &ready,
@@ -1000,7 +1042,8 @@ async fn ready_session(
         session.deadline,
         session.idle_ms,
     )
-    .await?;
+    .await
+    .inspect_err(|_| session.mark(Phase::EndpointReadyWriteRefused))?;
     session.mark(Phase::EndpointReadyComplete);
     next_packet(session, permission).await
 }
@@ -1165,6 +1208,16 @@ async fn endpoint(
         own.identity.service,
         own.protocol,
     )?;
+    let relay = if let Some((identity, address)) = &config.relay {
+        let current = client.lookup(identity.service)?;
+        ensure!(
+            current.mode == 1 && current.identity == *identity && current.address == Some(*address),
+            "attachment relay registration differs from local consent"
+        );
+        Some((identity.clone(), config.dial(identity, *address)?))
+    } else {
+        None
+    };
     let mut listener = if own.mode == 2 {
         let listener = TcpListener::bind(SocketAddr::new(
             Ipv4Addr::UNSPECIFIED.into(),
@@ -1183,16 +1236,6 @@ async fn endpoint(
     } else {
         None
     };
-    let relay = if let Some((identity, address)) = &config.relay {
-        let current = client.lookup(identity.service)?;
-        ensure!(
-            current.mode == 1 && current.identity == *identity && current.address == Some(*address),
-            "attachment relay registration differs from local consent"
-        );
-        Some((identity.clone(), config.dial(identity, *address)?))
-    } else {
-        None
-    };
     let scope = (
         own.protocol,
         config.manifest.network,
@@ -1204,6 +1247,7 @@ async fn endpoint(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut retry_after = tokio::time::Instant::now();
+    let outcome = async {
     loop {
         active.check(guard)?;
         if let Some((identity, address)) = &relay {
@@ -1246,7 +1290,7 @@ async fn endpoint(
                     request.session.mark(Phase::RequestDequeued);
                     if crate::authority_local_transport::remaining(request.session.deadline).is_err() { continue; }
                     permission.before_action(client, request.session.deadline)?;
-                    let packet = endpoint_packet(client, own, &request);
+                    let packet = clock_checked(endpoint_packet(client, own, &request))?;
                     active.check(guard)?;
                     if let Ok((packet, deadline)) = packet {
                         responses.spawn(response(request, packet, own.protocol, permission.gate.clone(), deadline));
@@ -1285,9 +1329,41 @@ async fn endpoint(
             _ = tick.tick() => {},
         }
     }
+    Ok(())
+    }.await;
+    permission.gate.close();
     incoming.abort_all();
     responses.abort_all();
-    Ok(())
+    if let Some(listener) = &mut listener {
+        listener.shutdown().await;
+    }
+    drain(&mut incoming).await;
+    drain(&mut responses).await;
+    outcome
+}
+fn clock_checked<T>(outcome: Result<T>) -> Result<Result<T>> {
+    match outcome {
+        Err(error) if error.is::<crate::consensus_clock::ObservationExpired>() => Err(error),
+        outcome => Ok(outcome),
+    }
+}
+async fn wait_for_clock(
+    mut check: impl FnMut() -> Result<()>,
+    stopping: impl Future<Output = ()>,
+) -> Result<bool> {
+    tokio::pin!(stopping);
+    loop {
+        match check() {
+            Ok(()) => return Ok(true),
+            Err(error) if error.is::<crate::consensus_clock::ObservationExpired>() => {}
+            Err(error) => return Err(error),
+        }
+        tokio::select! {
+            biased;
+            _ = &mut stopping => return Ok(false),
+            _ = tokio::time::sleep(Duration::from_millis(DISPATCH_MS)) => {},
+        }
+    }
 }
 pub async fn run(config: Config, guard: &Guard, active: &Active) -> Result<()> {
     ensure!(
@@ -1303,12 +1379,44 @@ pub async fn run(config: Config, guard: &Guard, active: &Active) -> Result<()> {
             true,
         )?),
     )?);
-    let mut client = Client::open(&config, guard, active)?;
-    client.own()?;
-    if config.profile.mode == 1 {
-        relay(&config, guard, active, acceptor, &mut client).await
-    } else {
-        endpoint(&config, guard, active, acceptor, &mut client).await
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    loop {
+        let outcome = async {
+            active.check(guard)?;
+            let mut client = Client::open(&config, guard, active)?;
+            client.own()?;
+            if config.profile.mode == 1 {
+                relay(&config, guard, active, acceptor.clone(), &mut client).await
+            } else {
+                endpoint(&config, guard, active, acceptor.clone(), &mut client).await
+            }
+        }
+        .await;
+        match outcome {
+            Err(error) if error.is::<crate::consensus_clock::ObservationExpired>() => {
+                // All previous sockets and tasks are gone. Only the original consent may resume.
+                eprintln!("HyperNet private route clock: Suspended");
+                let resumed = wait_for_clock(
+                    || {
+                        active.check_local(guard)?;
+                        guard.check_configuration()?;
+                        active.check(guard)
+                    },
+                    async {
+                        tokio::select! {
+                            _ = tokio::signal::ctrl_c() => {},
+                            _ = terminate.recv() => {},
+                        }
+                    },
+                )
+                .await?;
+                if !resumed {
+                    return Ok(());
+                }
+                eprintln!("HyperNet private route clock: FreshObservation");
+            }
+            outcome => return outcome,
+        }
     }
 }
 
@@ -1319,3 +1427,7 @@ mod tests;
 #[cfg(test)]
 #[path = "RouteAcceptTests.rs"]
 mod accept_tests;
+
+#[cfg(test)]
+#[path = "RouteClockTests.rs"]
+mod clock_tests;

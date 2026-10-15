@@ -128,6 +128,18 @@ pub enum Command {
         review: ForeignReview,
         export: ForeignProof,
     },
+    SearchList {
+        agreement: Digest,
+        export: ForeignProof,
+    },
+    LocalSearchRead {
+        page: Digest,
+        export: ForeignProof,
+    },
+    SearchRead {
+        page: Digest,
+        export: ForeignProof,
+    },
     List {
         agreement: Digest,
         export: ForeignProof,
@@ -186,7 +198,7 @@ impl Command {
             "FederationInventoryContext" => {
                 exact(3)?;
                 let action = f[2].uint()?;
-                ensure!(matches!(action, 0 | 3), "inventory action differs");
+                ensure!(matches!(action, 0 | 1 | 3), "inventory action differs");
                 Self::InventoryContext {
                     agreement: id(&f[1])?,
                     action,
@@ -196,7 +208,7 @@ impl Command {
                 exact(4)?;
                 let action = f[3].uint()?;
                 ensure!(
-                    matches!(action, 0 | 3 | 4),
+                    matches!(action, 0 | 1 | 3 | 4),
                     "unsupported foreign Page principal"
                 );
                 Self::PageContext {
@@ -449,12 +461,25 @@ impl Command {
                     after: after(&f[2])?,
                 }
             }
-            "FederationInspect" | "FederationRead" => {
+            "FederationInspect"
+            | "FederationRead"
+            | "FederationSearchRead"
+            | "FederationLocalSearchRead" => {
                 exact(3)?;
                 let export = ForeignProof::parse(f[2].bytes()?)?;
                 export.require_action("FederationExport")?;
                 if name == "FederationInspect" {
                     Self::Inspect {
+                        page: id(&f[1])?,
+                        export,
+                    }
+                } else if name == "FederationLocalSearchRead" {
+                    Self::LocalSearchRead {
+                        page: id(&f[1])?,
+                        export,
+                    }
+                } else if name == "FederationSearchRead" {
+                    Self::SearchRead {
                         page: id(&f[1])?,
                         export,
                     }
@@ -471,6 +496,15 @@ impl Command {
                 let export = ForeignProof::parse(f[2].bytes()?)?;
                 export.require_action("FederationExport")?;
                 Self::Review { review, export }
+            }
+            "FederationSearchList" => {
+                exact(3)?;
+                let export = ForeignProof::parse(f[2].bytes()?)?;
+                export.require_action("FederationExport")?;
+                Self::SearchList {
+                    agreement: id(&f[1])?,
+                    export,
+                }
             }
             "FederationList" => {
                 exact(3)?;
@@ -572,6 +606,9 @@ impl Command {
             Self::Inspect { .. } => "FederationInspect",
             Self::Review { .. } => "FederationReview",
             Self::List { .. } => "FederationList",
+            Self::SearchList { .. } => "FederationSearchList",
+            Self::SearchRead { .. } => "FederationSearchRead",
+            Self::LocalSearchRead { .. } => "FederationLocalSearchRead",
             Self::Read { .. } => "FederationRead",
             Self::PageWithdraw { .. } => "FederationPageWithdraw",
             Self::ForeignSeal { .. } => "FederationForeignSeal",
@@ -707,8 +744,13 @@ impl Command {
             Self::Queue { agreement, after } => {
                 vec![b(agreement), after.as_ref().map_or(V::Null, |id| b(id))]
             }
-            Self::List { agreement, export } => vec![b(agreement), b(&export.bytes)],
-            Self::Inspect { page, export } | Self::Read { page, export } => {
+            Self::List { agreement, export } | Self::SearchList { agreement, export } => {
+                vec![b(agreement), b(&export.bytes)]
+            }
+            Self::Inspect { page, export }
+            | Self::Read { page, export }
+            | Self::SearchRead { page, export }
+            | Self::LocalSearchRead { page, export } => {
                 vec![b(page), b(&export.bytes)]
             }
             Self::Review { review, export } => vec![review.value(), b(&export.bytes)],
@@ -757,7 +799,8 @@ impl Command {
             Self::Accept { treaty, .. } => treaty.id,
             Self::Get { agreement }
             | Self::Queue { agreement, .. }
-            | Self::List { agreement, .. } => *agreement,
+            | Self::List { agreement, .. }
+            | Self::SearchList { agreement, .. } => *agreement,
             Self::Agreements { .. } => wire::digest(b"FederationAgreements"),
             Self::Withdraw { agreement }
             | Self::Admission { agreement, .. }
@@ -771,7 +814,10 @@ impl Command {
                 share_id(*agreement, *page).expect("fixed share identity")
             }
             Self::Unshare { share } => share.id,
-            Self::Inspect { page, .. } | Self::Read { page, .. } => *page,
+            Self::Inspect { page, .. }
+            | Self::Read { page, .. }
+            | Self::SearchRead { page, .. }
+            | Self::LocalSearchRead { page, .. } => *page,
             Self::Review { review, .. } => review.revision.id,
             Self::PageWithdraw { page } => page.id,
             Self::ForeignSeal { trust, .. } | Self::ForeignActivate { trust, .. } => trust.id,
@@ -798,6 +844,9 @@ impl Command {
                 | Self::Inspect { .. }
                 | Self::Review { .. }
                 | Self::Read { .. }
+                | Self::SearchRead { .. }
+                | Self::LocalSearchRead { .. }
+                | Self::SearchList { .. }
                 | Self::List { .. }
                 | Self::PageWithdraw { .. }
                 | Self::ForeignSeal { .. }
@@ -910,7 +959,10 @@ impl Command {
             }
             Self::Inspect { export, .. }
             | Self::Read { export, .. }
-            | Self::List { export, .. } => {
+            | Self::List { export, .. }
+            | Self::SearchRead { export, .. }
+            | Self::LocalSearchRead { export, .. }
+            | Self::SearchList { export, .. } => {
                 out.insert(export.floor.index());
             }
             Self::Review { review, export } => {

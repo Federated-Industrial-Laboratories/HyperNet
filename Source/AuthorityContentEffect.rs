@@ -156,6 +156,37 @@ pub(super) fn execute(
             )?);
             sha2::Sha256::digest(&response).into()
         }
+        content::Effect::Search => {
+            ensure!(
+                !selected.opaque && profile.content.as_ref().is_some_and(|p| p.search),
+                "content search lacks indexing consent"
+            );
+            let query = crate::search_text::Request::parse(payload)?;
+            query.network_scope(
+                profile.manifest.network,
+                profile.manifest.incarnation,
+                page::namespace_id(&selected.namespace)?,
+            )?;
+            ensure!(
+                *offset == 0 && *bytes == selected.bytes,
+                "search requires the complete exact source"
+            );
+            disk.reconcile(&object, now)?;
+            let source = disk.read(&object, 0, *bytes as usize, now)?;
+            revision
+                .context("search revision absent")?
+                .verify_source(&source)?;
+            response = crate::search_text::response(&query, &source)?;
+            receipt = Some(complete(
+                disk,
+                &object,
+                request.intent().digest,
+                key,
+                now,
+                revision,
+            )?);
+            sha2::Sha256::digest(&response).into()
+        }
         content::Effect::Purge => {
             ensure!(payload.is_empty(), "content purge carries unexpected bytes");
             disk.purge(placement.digest, now)?;

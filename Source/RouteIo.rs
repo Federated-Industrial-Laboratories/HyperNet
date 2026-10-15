@@ -96,6 +96,12 @@ impl Boundary {
             permission.expiry()? > crate::authority_challenge::boot_time_ms()?,
             "route permission expired before arming"
         );
+        self.arm_renewable(permission, deadline)
+    }
+    /// An endpoint may bind while its proof is being renewed. Every raw write still
+    /// waits for current permission, and the original transport deadline cannot grow.
+    pub fn arm_renewable(&self, permission: Gate, deadline: u64) -> Result<()> {
+        permission.expiry()?;
         crate::authority_local_transport::remaining(deadline)?;
         let mut armed = false;
         self.0.send_modify(|binding| {

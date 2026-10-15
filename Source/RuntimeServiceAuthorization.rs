@@ -25,6 +25,7 @@ pub struct Guard {
     clock: Source,
     last_wall: Cell<u64>,
     boot_deadline: u64,
+    artifacts: BTreeMap<String, Digest>,
 }
 fn artifact_name(name: &str) -> bool {
     !name.is_empty()
@@ -72,6 +73,67 @@ pub fn local_consent(
         ),
     ]))
 }
+fn verify_artifacts(config: &Path, artifacts: &BTreeMap<String, Digest>) -> Result<()> {
+    let present = std::fs::read_dir(config)?
+        .map(|e| {
+            e?.file_name()
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("invalid configuration filename"))
+        })
+        .collect::<Result<std::collections::BTreeSet<_>>>()?;
+    ensure!(
+        present == artifacts.keys().cloned().collect(),
+        "service configuration has missing or unconsented artifacts"
+    );
+    for (name, expected) in artifacts {
+        let bytes = crate::authority_files::read(&config.join(name), wire::MAXIMUM, true)?;
+        ensure!(
+            wire::digest(&bytes) == *expected,
+            "service configuration artifact differs from local consent"
+        );
+    }
+    Ok(())
+}
+fn verify_local(
+    directory: &Path,
+    operator: Key,
+    generation: u64,
+    local_consent: Digest,
+    consent: Digest,
+    boot_deadline: u64,
+    boot_ms: u64,
+) -> Result<()> {
+    ensure!(
+        boot_ms < boot_deadline,
+        "original service consent lifetime expired"
+    );
+    let withdrawal: u64 =
+        serde_json::from_slice(&public_read(&directory.join("Withdrawal.json"), 64)?)?;
+    ensure!(withdrawal == 0, "local service consent is withdrawn");
+    let current_generation: u64 =
+        serde_json::from_slice(&public_read(&directory.join("Generation.json"), 64)?)?;
+    ensure!(
+        current_generation == generation,
+        "local service generation changed"
+    );
+    let (local, sigs) = wire::envelope(
+        &public_read(&directory.join("LocalConsent.cbor"), wire::MAXIMUM)?,
+        1,
+    )?;
+    ensure!(
+        sigs.len() == 1 && sigs[0].0 == operator && wire::digest(&local) == local_consent,
+        "local workload consent changed"
+    );
+    let (current_consent, sigs) = wire::envelope(
+        &public_read(&directory.join("HostConsent.cbor"), wire::MAXIMUM)?,
+        1,
+    )?;
+    ensure!(
+        sigs.len() == 1 && sigs[0].0 == operator && wire::digest(&current_consent) == consent,
+        "host consent changed"
+    );
+    Ok(())
+}
 impl Guard {
     pub fn load(directory: &Path, config: &Path, role: u64) -> Result<Self> {
         ensure!(
@@ -118,24 +180,7 @@ impl Guard {
             local == local_consent(&manifest, role, generation, &artifacts)?,
             "local consent differs from the exact role and artifacts"
         );
-        let present = std::fs::read_dir(config)?
-            .map(|e| {
-                e?.file_name()
-                    .into_string()
-                    .map_err(|_| anyhow::anyhow!("invalid configuration filename"))
-            })
-            .collect::<Result<std::collections::BTreeSet<_>>>()?;
-        ensure!(
-            present == artifacts.keys().cloned().collect(),
-            "service configuration has missing or unconsented artifacts"
-        );
-        for (name, expected) in &artifacts {
-            let bytes = crate::authority_files::read(&config.join(name), wire::MAXIMUM, true)?;
-            ensure!(
-                wire::digest(&bytes) == *expected,
-                "service configuration artifact differs from local consent"
-            );
-        }
+        verify_artifacts(config, &artifacts)?;
         let bootstrap_bytes =
             crate::authority_files::read(&config.join("Bootstrap.cbor"), wire::MAXIMUM, true)?;
         let bootstrap = trust_bootstrap::inspect(&bootstrap_bytes, true)?;
@@ -179,6 +224,7 @@ impl Guard {
             clock,
             last_wall: Cell::new(observation.wall_ms),
             boot_deadline,
+            artifacts,
         };
         out.check()?;
         Ok(out)
@@ -192,7 +238,22 @@ impl Guard {
     pub fn health(&self) -> Result<crate::authority_challenge::ClockHealth> {
         self.clock.health()
     }
+    pub(crate) fn check_configuration(&self) -> Result<()> {
+        verify_artifacts(Path::new("/Config"), &self.artifacts)
+    }
+    pub(crate) fn check_local(&self) -> Result<()> {
+        verify_local(
+            &self.directory,
+            self.manifest.operator,
+            self.generation,
+            self.local_consent,
+            self.consent,
+            self.boot_deadline,
+            crate::authority_challenge::boot_time_ms()?,
+        )
+    }
     pub fn check(&self) -> Result<()> {
+        self.check_local()?;
         let observation = self.health()?.observe()?;
         ensure!(
             observation.wall_ms >= self.last_wall.get()
@@ -203,36 +264,11 @@ impl Guard {
                 && observation.boot_ms < self.boot_deadline,
             "service consent expired or clock regressed"
         );
-        let withdrawal: u64 =
-            serde_json::from_slice(&public_read(&self.directory.join("Withdrawal.json"), 64)?)?;
-        ensure!(withdrawal == 0, "local service consent is withdrawn");
-        let generation: u64 =
-            serde_json::from_slice(&public_read(&self.directory.join("Generation.json"), 64)?)?;
-        ensure!(
-            generation == self.generation,
-            "local service generation changed"
-        );
-        let (local, sigs) = wire::envelope(
-            &public_read(&self.directory.join("LocalConsent.cbor"), wire::MAXIMUM)?,
-            1,
-        )?;
-        ensure!(
-            sigs.len() == 1
-                && sigs[0].0 == self.manifest.operator
-                && wire::digest(&local) == self.local_consent,
-            "local workload consent changed"
-        );
-        let (consent, sigs) = wire::envelope(
-            &public_read(&self.directory.join("HostConsent.cbor"), wire::MAXIMUM)?,
-            1,
-        )?;
-        ensure!(
-            sigs.len() == 1
-                && sigs[0].0 == self.manifest.operator
-                && wire::digest(&consent) == self.consent,
-            "host consent changed"
-        );
         self.last_wall.set(observation.wall_ms);
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "RuntimeServiceAuthorizationTests.rs"]
+mod tests;

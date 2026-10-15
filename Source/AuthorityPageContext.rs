@@ -141,6 +141,92 @@ impl Evaluation<'_> {
             }
         }
     }
+    pub(crate) fn read_subject(
+        &mut self,
+        requester: Key,
+        grant: &VersionRef,
+        scope: (u64, Digest),
+        namespace: Option<&str>,
+    ) -> Result<Key> {
+        let bytes = self.governance.record_bytes(102, grant.id)?;
+        let v = wire::decode(bytes)?;
+        let subject = v.array(17)?[8].fixed::<32>()?;
+        if subject == requester {
+            return Ok(subject);
+        }
+        use crate::authority_domains::sealed_identity as identity;
+        let binding = self
+            .state
+            .records
+            .values()
+            .filter(|r| r.reference.kind == 108)
+            .find_map(|r| {
+                identity::Binding::parse(
+                    &identity::payload(r).ok()?,
+                    self.state.network,
+                    self.state.incarnation,
+                )
+                .ok()
+                .filter(|d| d.signing_key == requester)
+            })
+            .context("reader has no admitted device identity")?;
+        let root_record = self.exact(&binding.root)?;
+        let root = identity::Root::parse(
+            &identity::payload(&root_record)?,
+            self.state.network,
+            self.state.incarnation,
+        )?;
+        let mut admission = identity::admitted_device(self.state, &root, &binding, self.at, scope)?;
+        if admission.is_none()
+            && let Some(namespace) = namespace
+        {
+            admission = identity::admitted_device(
+                self.state,
+                &root,
+                &binding,
+                self.at,
+                (1, namespace_id(namespace)?),
+            )?;
+        }
+        let admission =
+            admission.context("reader device admission does not cover this resource")?;
+        let member = identity::current_member(
+            &self.governance,
+            self.state.network,
+            binding.member,
+            self.at,
+        )?;
+        ensure!(
+            member.key == subject,
+            "reader device cannot borrow another member grant"
+        );
+        self.exact(&binding.reference)?;
+        self.exact(&admission.reference)?;
+        self.dependencies.extend(member.dependencies);
+        self.expires = self
+            .expires
+            .min(member.expires_ms)
+            .min(binding.validity.1)
+            .min(admission.validity.1);
+        Ok(subject)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn read_capability(
+        &mut self,
+        grant: &VersionRef,
+        requester: Key,
+        actions: &[u64],
+        scope: (u64, Digest),
+        namespace: Option<&str>,
+        bytes: u64,
+    ) -> Result<()> {
+        ensure!(
+            actions.iter().all(|a| matches!(a, 0 | 1)),
+            "device mapping is limited to reading and search"
+        );
+        let subject = self.read_subject(requester, grant, scope, namespace)?;
+        self.capability(grant, subject, actions, scope, namespace, bytes)
+    }
     #[allow(
         clippy::too_many_arguments,
         reason = "Capability and application checks bind the participant, grant, action, scope and requested extent explicitly."
@@ -165,7 +251,11 @@ impl Evaluation<'_> {
             Some(page) => (2, page_id(&page)?),
             None => (1, namespace_id(namespace)?),
         };
-        self.capability(grant, subject, &[action], scope, Some(namespace), bytes)?;
+        if action == 0 {
+            self.read_capability(grant, subject, &[action], scope, Some(namespace), bytes)?;
+        } else {
+            self.capability(grant, subject, &[action], scope, Some(namespace), bytes)?;
+        }
         self.application(subject, grant, application, permission, namespace, page)
     }
     pub(crate) fn profile(&mut self, p: &HostProfile, live: bool) -> Result<()> {

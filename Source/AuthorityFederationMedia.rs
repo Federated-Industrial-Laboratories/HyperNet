@@ -95,6 +95,7 @@ fn principal(
                 value.page,
                 head.raw_page,
                 bytes,
+                true,
             )?;
             c.application(
                 intent.requester,
@@ -119,6 +120,7 @@ fn principal(
                 value.page,
                 head.raw_page,
                 bytes,
+                true,
             )?;
             c.application(
                 intent.requester,

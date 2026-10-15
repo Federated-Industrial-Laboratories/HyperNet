@@ -262,7 +262,13 @@ impl Command {
                     (effect == Effect::Purge && offset == 0 && bytes == 0 && digest.is_none())
                         || (effect != Effect::Purge
                             && bytes > 0
-                            && bytes <= 32768
+                            && bytes
+                                <= if effect == Effect::Search {
+                                    crate::markup::MAX_BYTES as u64
+                                } else {
+                                    32768
+                                }
+                            && (effect != Effect::Search || offset == 0)
                             && offset.checked_add(bytes).is_some()
                             && digest.is_some()
                                 == matches!(effect, Effect::Upload | Effect::Repair)),

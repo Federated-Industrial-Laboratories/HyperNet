@@ -511,9 +511,9 @@ impl Disk {
     pub fn context(&self) -> (&domains::State, &[Vec<u8>]) {
         (&self.state.domain, &self.state.governance)
     }
-    #[cfg(test)]
     pub fn live(&self, reference: &Reference, now: u64) -> bool {
         !self.poisoned
+            && now >= self.state.time
             && self
                 .state
                 .records

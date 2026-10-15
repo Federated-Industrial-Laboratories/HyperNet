@@ -8,6 +8,7 @@ pub enum Effect {
     Inspect,
     Repair,
     Purge,
+    Search,
 }
 impl Effect {
     pub fn code(self) -> u64 {
@@ -17,6 +18,7 @@ impl Effect {
             Self::Inspect => 2,
             Self::Repair => 3,
             Self::Purge => 4,
+            Self::Search => 5,
         }
     }
     pub fn parse(value: &V) -> Result<Self> {
@@ -26,6 +28,7 @@ impl Effect {
             2 => Self::Inspect,
             3 => Self::Repair,
             4 => Self::Purge,
+            5 => Self::Search,
             _ => anyhow::bail!("unknown content effect"),
         })
     }
@@ -89,6 +92,20 @@ pub(super) fn evaluate(
         offset.checked_add(*bytes).is_some_and(|end| end <= p.bytes),
         "content effect exceeds its exact immutable range"
     );
+    if *effect == Effect::Search {
+        ensure!(
+            !p.opaque && policy.search && *offset == 0 && *bytes == p.bytes,
+            "search requires exact host-readable bytes and explicit indexing consent"
+        );
+        c.capability(
+            &configured.grant,
+            configured.manager,
+            &[7],
+            (1, namespace_id(&p.namespace)?),
+            Some(&p.namespace),
+            p.bytes,
+        )?;
+    }
     if p.opaque {
         let (outer, _, _) = sealed::live(c, &p.revision)?;
         ensure!(
@@ -113,7 +130,7 @@ pub(super) fn evaluate(
             );
             "PagesSubmit"
         }
-        Effect::Read => {
+        Effect::Read | Effect::Search => {
             c.publication(body.author.raw_page)?;
             ensure!(
                 ledger
@@ -149,6 +166,24 @@ pub(super) fn evaluate(
         }
         Effect::Purge => unreachable!(),
     };
+    if *effect == Effect::Search {
+        c.read_capability(
+            grant(operation)?,
+            intent.requester,
+            &[0, 1],
+            (2, body.author.intent.resource),
+            Some(&p.namespace),
+            *bytes,
+        )?;
+        c.application(
+            intent.requester,
+            grant(operation)?,
+            None,
+            "PagesSearch",
+            &p.namespace,
+            Some(body.author.raw_page),
+        )?;
+    }
     c.principal(
         intent.requester,
         grant(operation)?,

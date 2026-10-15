@@ -88,6 +88,12 @@ fn handle(
                 "content payload differs from its signed extent or digest"
             );
         }
+        page::Command::Content(content::Command::Authorise {
+            effect: content::Effect::Search,
+            ..
+        }) => {
+            crate::search_text::Request::parse(payload)?;
+        }
         _ => ensure!(payload.is_empty(), "this content effect has no payload"),
     }
     let reconcile = f[5].boolean()?;

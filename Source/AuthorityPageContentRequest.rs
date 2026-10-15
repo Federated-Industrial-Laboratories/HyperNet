@@ -83,7 +83,7 @@ impl Request {
         result: &OperationResult,
         bytes: &[u8],
     ) -> Result<()> {
-        let (_, value, _) = self.result_content(result)?;
+        let (_, value, revision) = self.result_content(result)?;
         let Command::Content(content::Command::Authorise {
             placement,
             host,
@@ -123,6 +123,29 @@ impl Request {
                         && f[10] != V::Null,
                     "content response lacks validated exact bytes"
                 );
+            }
+            content::Effect::Search => {
+                use sha2::{Digest as _, Sha256};
+                ensure!(
+                    !value.opaque
+                        && *offset == 0
+                        && *count == value.bytes
+                        && hash == Digest::from(Sha256::digest(payload))
+                        && f[10] != V::Null,
+                    "search response differs from exact host-readable source"
+                );
+                let decoded = wire::decode(payload)?;
+                let reply = decoded.array(6)?;
+                ensure!(
+                    reply[0].uint()? == 201
+                        && reply[1].uint()? == 1
+                        && reply[2].text()? == "PageSearchResult",
+                    "invalid search response"
+                );
+                reply[3].fixed::<32>()?;
+                revision
+                    .context("search source provenance absent")?
+                    .verify_source(reply[4].bytes()?)?;
             }
             content::Effect::Purge => ensure!(
                 payload.is_empty() && *count == 0 && f[10] == V::Null,

@@ -600,6 +600,56 @@ impl Mutation {
                     {
                         decision.refuse(4);
                     }
+                    // A new grant must fit current parent restrictions as well as its
+                    // immutable declaration. Later widening cannot activate dormant rights.
+                    if decision.code == 0 {
+                        let mut delegated_actions = child.actions.clone();
+                        if !delegated_actions.contains(&11) {
+                            delegated_actions.push(11);
+                            delegated_actions.sort();
+                        }
+                        for scope in &child.scopes {
+                            if governance
+                                .current_capability(
+                                    parent.id,
+                                    &Requirement {
+                                        subject: intent.requester,
+                                        actions: &delegated_actions,
+                                        scope: *scope,
+                                        namespace: None,
+                                        usage: child.limits,
+                                        evaluated_at_ms: at,
+                                        expected: &[],
+                                    },
+                                )
+                                .is_err()
+                            {
+                                decision.refuse(4);
+                            }
+                        }
+                    }
+                    if decision.code == 0 {
+                        let mut ancestor = parent.clone();
+                        let mut distance = 0;
+                        let mut remaining = 8;
+                        loop {
+                            let value = wire::decode(governance.record_bytes(102, ancestor.id)?)?;
+                            let fields = value.array(17)?;
+                            let tier = version(&fields[9])?;
+                            let tier_value = wire::decode(governance.record_bytes(101, tier.id)?)?;
+                            let maximum = fields[14].uint()?.min(tier_value.array(14)?[11].uint()?);
+                            remaining = remaining.min(maximum.saturating_sub(distance));
+                            if fields[13] == V::Null {
+                                break;
+                            }
+                            ancestor = version(&fields[13])?;
+                            distance += 1;
+                            ensure!(distance <= 8, "delegation ancestry exceeds its bound");
+                        }
+                        if child.depth >= remaining {
+                            decision.refuse(4);
+                        }
+                    }
                     decision.dependencies.push(child.tier.clone());
                     decision.not_before_ms = decision.not_before_ms.max(child.validity.0);
                     decision.expires_ms = decision.expires_ms.min(child.validity.1);

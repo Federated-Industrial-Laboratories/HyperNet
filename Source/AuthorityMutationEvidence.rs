@@ -35,10 +35,24 @@ impl Entry {
             "mutation provenance bounds differ"
         );
         let intent = Intent::from_signed(&self.signed)?;
+        let intent = if crate::authority_grant_review::Operation::handles(&intent.action) {
+            let reviewed = crate::authority_grant_review::Operation::parse(&intent)?;
+            ensure!(reviewed.apply, "grant evidence names a preview");
+            reviewed.inner
+        } else {
+            intent
+        };
         let historical =
             config.evidence_context(intent.minimum_policy_epoch, self.height, self.at, height)?;
         let operation = transactions::Operation::parse(&intent, &historical)?;
         let (records, snapshot) = match operation {
+            transactions::Operation::Tier(tier) => (
+                vec![
+                    tier.derive(&intent)?
+                        .context("tier evidence names a read")?,
+                ],
+                tier.snapshot().clone(),
+            ),
             transactions::Operation::Deployment(deployment) => {
                 if let crate::authority_deployments::Operation::Register { offer, .. } = &deployment
                 {
@@ -119,7 +133,7 @@ impl Entry {
                 && intent.minimum_policy_epoch == snapshot.epoch
                 && intent.minimum_policy_height == snapshot.height
                 && wire::digest(record) == self.created.digest
-                && self.created.generation == 1,
+                && (self.created.kind == 101 || self.created.generation == 1),
             "mutation evidence derivation or position differs"
         );
         let fields = wire::decode(record)?;
@@ -145,6 +159,31 @@ impl Entry {
     }
 }
 impl Evidence {
+    pub fn genesis_tier(
+        value: &V,
+        id: [u8; 32],
+        network: [u8; 32],
+        incarnation: [u8; 32],
+    ) -> Result<Option<Vec<u8>>> {
+        for item in value.list(crate::authority_capacity::MAX_RECORDS)? {
+            let f = item.array(4)?;
+            let reference = version(&f[0])?;
+            if reference.kind != 101 || reference.id != id {
+                continue;
+            }
+            let intent = Intent::from_signed(f[1].bytes()?)?;
+            let operation = crate::authority_tiers::Operation::parse(&intent)?;
+            if let Some(previous) = operation.previous() {
+                let (_, old) =
+                    crate::authority_tiers::Spec::from_record(previous, network, incarnation)?;
+                let decoded = wire::decode(previous)?;
+                if old.generation == 1 && decoded.array(14)?[13] == V::Null {
+                    return Ok(Some(previous.to_vec()));
+                }
+            }
+        }
+        Ok(None)
+    }
     pub fn creation_height(&self, created: &VersionRef) -> Result<u64> {
         self.0
             .iter()
@@ -222,10 +261,12 @@ impl Evidence {
             result
                 .0
                 .windows(2)
-                .all(|v| v[0].created.index() < v[1].created.index()),
+                .all(|v| (v[0].created.index(), v[0].created.generation)
+                    < (v[1].created.index(), v[1].created.generation)),
             "mutation provenance is duplicate or unsorted"
         );
-        let mut derived = std::collections::BTreeMap::new();
+        let mut derived: std::collections::BTreeMap<(u64, [u8; 32]), Vec<u8>> =
+            std::collections::BTreeMap::new();
         for entry in &result.0 {
             for bytes in entry.validate(config, height)? {
                 let value = wire::decode(&bytes)?;
@@ -236,10 +277,46 @@ impl Evidence {
                     126 | 128 => version(&f[6])?.id,
                     _ => f[6].fixed()?,
                 };
-                ensure!(
-                    derived.insert((kind, id), bytes).is_none(),
-                    "duplicate mutation provenance output"
-                );
+                if kind == 101 {
+                    let intent = Intent::from_signed(&entry.signed)?;
+                    let tier = crate::authority_tiers::Operation::parse(&intent)?;
+                    let prior = tier.previous();
+                    if let Some(previous) = prior {
+                        let (_, old) = crate::authority_tiers::Spec::from_record(
+                            previous,
+                            config.scope.network,
+                            config.scope.incarnation,
+                        )?;
+                        ensure!(
+                            old.generation.checked_add(1) == Some(entry.created.generation)
+                                && f[5].fixed::<32>()? == old.digest,
+                            "tier provenance does not extend its exact predecessor"
+                        );
+                        if let Some(retained) = derived.get(&(kind, id)) {
+                            ensure!(
+                                retained.as_slice() == previous,
+                                "tier provenance history forked"
+                            );
+                        } else {
+                            let old_value = wire::decode(previous)?;
+                            ensure!(
+                                old.generation == 1 && old_value.array(14)?[13] == V::Null,
+                                "tier provenance begins outside authenticated genesis"
+                            );
+                        }
+                    } else {
+                        ensure!(
+                            entry.created.generation == 1 && !derived.contains_key(&(kind, id)),
+                            "tier provenance creation repeats"
+                        );
+                    }
+                    derived.insert((kind, id), bytes);
+                } else {
+                    ensure!(
+                        derived.insert((kind, id), bytes).is_none(),
+                        "duplicate mutation provenance output"
+                    );
+                }
             }
         }
         ensure!(
@@ -278,7 +355,8 @@ impl Evidence {
         at: u64,
     ) -> Result<()> {
         ensure!(
-            !self.0.iter().any(|e| e.created.index() == created.index()),
+            !self.0.iter().any(|e| e.created.index() == created.index()
+                && (created.kind != 101 || e.created.generation == created.generation)),
             "mutation provenance already exists"
         );
         self.0.push(Entry {
@@ -287,7 +365,8 @@ impl Evidence {
             height,
             at,
         });
-        self.0.sort_by_key(|e| e.created.index());
+        self.0
+            .sort_by_key(|e| (e.created.index(), e.created.generation));
         self.charge()?;
         Ok(())
     }

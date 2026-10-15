@@ -117,10 +117,17 @@ pub(super) fn list(
         admission.intent()?.minimum_policy_epoch == intent.minimum_policy_epoch,
         "inventory lease names another local authority epoch"
     );
-    c.capability(
+    let searching = matches!(
+        &operation.command,
+        super::super::super::Command::Federation(Command::SearchList { .. })
+    );
+    if searching {
+        c.federation_search_consent(treaty)?;
+    }
+    c.read_capability(
         grant(operation)?,
         intent.requester,
-        &[0],
+        if searching { &[0, 1] } else { &[0] },
         (1, page::namespace_id(&treaty.destination_namespace)?),
         Some(&treaty.destination_namespace),
         0,
@@ -133,6 +140,16 @@ pub(super) fn list(
         &treaty.destination_namespace,
         None,
     )?;
+    if searching {
+        c.application(
+            intent.requester,
+            grant(operation)?,
+            None,
+            "PagesSearch",
+            &treaty.destination_namespace,
+            None,
+        )?;
+    }
     let ids = proof
         .state
         .records
@@ -162,11 +179,12 @@ pub(super) fn list(
                 intent.requester,
                 grant(operation)?,
                 None,
-                0,
+                if searching { 1 } else { 0 },
                 treaty,
                 page,
                 share.page,
                 revision.bundle.len() as u64,
+                true,
             )?;
             current_review(c, &head, treaty, &revision)?;
             Ok(())

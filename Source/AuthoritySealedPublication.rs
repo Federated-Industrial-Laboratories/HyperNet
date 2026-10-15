@@ -13,7 +13,7 @@ pub use commands::Command;
 #[path = "AuthoritySealedPublicationEvaluation.rs"]
 mod evaluation;
 pub use evaluation::evaluate;
-pub(crate) use evaluation::{content_access, live};
+pub(crate) use evaluation::{content_access, live, local_search};
 pub const PUBLICATION_STATE: u64 = 162;
 pub const OBJECT_HEAD: u64 = 163;
 fn a(v: Vec<V>) -> V {

@@ -18,7 +18,7 @@ mod evaluation;
 pub use evaluation::{evaluate, validate_state, verify_directory_result};
 #[path = "AuthoritySealedIdentityRoster.rs"]
 mod roster;
-pub use roster::{CurrentRoster, current_member, member_evidence, roster};
+pub use roster::{CurrentRoster, admitted_device, current_member, member_evidence, roster};
 
 pub const ROOT_KEY: u64 = 5;
 pub const SIGNING_KEY: u64 = 6;

@@ -9,12 +9,13 @@ pub struct ContentPolicy {
     pub quarantine_bytes: u64,
     pub maximum_objects: u64,
     pub opaque: bool,
+    pub search: bool,
     pub failure_domain: Digest,
     pub reviewers: Vec<Key>,
 }
 impl ContentPolicy {
     pub fn parse(value: &V) -> Result<Self> {
-        let f = value.array(8)?;
+        let f = value.array(9)?;
         let p = Self {
             metadata_bytes: f[0].uint()?,
             data_bytes: f[1].uint()?,
@@ -24,6 +25,7 @@ impl ContentPolicy {
             opaque: f[5].boolean()?,
             failure_domain: id(&f[6])?,
             reviewers: f[7].list(16)?.iter().map(key).collect::<Result<_>>()?,
+            search: f[8].boolean()?,
         };
         ensure!(
             p.metadata_bytes >= 8192
@@ -53,6 +55,7 @@ impl ContentPolicy {
             V::Bool(self.opaque),
             b(&self.failure_domain),
             a(self.reviewers.iter().map(|r| b(r)).collect()),
+            V::Bool(self.search),
         ])
     }
     pub fn admission_bytes(&self) -> Result<u64> {

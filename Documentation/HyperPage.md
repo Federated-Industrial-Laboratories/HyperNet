@@ -10,7 +10,7 @@ Use UTF-8, LF line endings and a final LF. The first line is `HyperNetPage/2`.
 The second is `# Title`, with a nonempty title of at most 128 bytes. The source
 limit is 16 KiB and 512 lines. Each line has at most 1024 bytes, 512 grapheme
 clusters and 16 Unicode scalars per cluster. Control characters, bidi formatting,
-Unicode line separators, zero-width space, soft hyphen, tags, BOM and noncharacters
+Unicode line separators, zero-width space, soft hyphen, Unicode tag characters, BOM and noncharacters
 are rejected. The same restrictions apply after JSON string decoding.
 
 Text lines use `## ` or `### ` for headings, `: ` for paragraphs, `- ` for items,
@@ -28,6 +28,29 @@ spacers and containers each count as one node; title and `@End` do not. Controls
 are buttons, scrollboxes and form fields. Containers must have at least one child. IDs begin
 with an ASCII letter, contain only ASCII letters/digits and have at most 32 bytes.
 Component and form IDs are unique within the document. Field IDs are unique within their form. Labels have at most 128 bytes.
+
+## Search tags
+
+An optional metadata declaration can follow the title immediately:
+
+```text
+HyperNetPage/2
+# Bookshop
+@Tags {"values":["Books","Reading"]}
+: Approved text.
+```
+
+The declaration accepts one through 16 distinct tags, each one through 64 UTF-8
+bytes without leading or trailing whitespace. All ordinary decoded-text,
+grapheme, line and source bounds still apply. Empty tags, duplicate values,
+unknown attributes and duplicate JSON keys are rejected. The declaration can
+occur only once, immediately after the title and before any blank line, asset
+or component. It creates no layout node, link, action or network request.
+
+Tags are inert search metadata. Plain review includes their exact decoded values;
+publication approval still binds the complete original source bytes. Tags in a
+sealed Page stay inside its encryption and are available only to authorised local
+search. No title or tag alone grants indexing or reading permission.
 
 ## Components
 

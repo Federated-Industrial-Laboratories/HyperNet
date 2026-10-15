@@ -247,6 +247,7 @@ impl SourceFixture {
             Some(out.grant.clone()),
         );
         let mut profile = BridgeProfile {
+            search: false,
             manifest,
             service: out.treaty.bridge(!destination),
             volume: [107; 32],

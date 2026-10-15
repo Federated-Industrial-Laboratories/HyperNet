@@ -9,7 +9,7 @@ pub mod media;
 use components::{Action, Directive};
 pub use components::{BorderStyle, Colour, ScrollDirection};
 pub use media::{Effect, Fit, Preset};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use unicode_segmentation::UnicodeSegmentation;
@@ -124,11 +124,18 @@ pub struct Node {
 #[derive(Clone, Debug, Serialize)]
 pub struct Document {
     pub title: String,
+    pub tags: Vec<String>,
     pub lines: Vec<String>,
     pub links: Vec<Link>,
     pub nodes: Vec<Node>,
     pub forms: Vec<forms::Form>,
     pub assets: Vec<media::Asset>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Tags {
+    values: Vec<String>,
 }
 
 fn forbidden(ch: char) -> bool {
@@ -596,11 +603,32 @@ pub fn parse(body: &str) -> Result<Document, &'static str> {
     let mut count = 0;
     let mut controls = 0;
     let mut forms: Vec<forms::Form> = Vec::new();
+    let mut tags = Vec::new();
     let mut form_start = None;
     let mut offset = lines[0].len() + lines[1].len() + 2;
+    let metadata_start = offset;
     for line in lines.iter().skip(2) {
         let line_start = offset;
         offset += line.len() + 1;
+        if let Some(attributes) = line.strip_prefix("@Tags ") {
+            if line_start != metadata_start {
+                return Err("PageTagsMustFollowTitle");
+            }
+            let declared: Tags = serde_json::from_value(components::strict_json(attributes)?)
+                .map_err(|_| "InvalidPageTags")?;
+            if !(1..=16).contains(&declared.values.len()) {
+                return Err("InvalidPageTags");
+            }
+            let mut unique = BTreeSet::new();
+            for tag in &declared.values {
+                text(tag, 64, false)?;
+                if tag.trim() != tag || !unique.insert(tag.as_str()) {
+                    return Err("InvalidPageTags");
+                }
+            }
+            tags = declared.values;
+            continue;
+        }
         if *line == "@End" {
             let node = stack.pop().ok_or("UnmatchedComponentEnd")?;
             if node.children.is_empty() {
@@ -789,6 +817,12 @@ pub fn parse(body: &str) -> Result<Document, &'static str> {
         return Err("UnknownMediaOrMotionTarget");
     }
     let mut lines = vec![format!("# {title}")];
+    if !tags.is_empty() {
+        lines.push(format!(
+            "[ Tags: {} ]",
+            serde_json::to_string(&tags).map_err(|_| "InvalidPageTags")?
+        ));
+    }
     for asset in &assets {
         lines.push(format!(
             "[ Asset {}: {}; {}x{}; {} bytes; SHA256 {}; copies {}; hosts {} ]",
@@ -805,6 +839,7 @@ pub fn parse(body: &str) -> Result<Document, &'static str> {
     plain(&roots, &links, &forms, &mut lines);
     Ok(Document {
         title: title.into(),
+        tags,
         lines,
         links,
         nodes: roots,
@@ -812,6 +847,9 @@ pub fn parse(body: &str) -> Result<Document, &'static str> {
         assets,
     })
 }
+#[cfg(test)]
+#[path = "MarkupTagTests.rs"]
+mod tag_tests;
 #[cfg(test)]
 pub fn validate(body: &str) -> Result<(), &'static str> {
     parse(body).map(|_| ())

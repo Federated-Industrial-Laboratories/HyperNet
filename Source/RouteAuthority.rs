@@ -721,6 +721,22 @@ impl<'a> Client<'a> {
     }
     pub fn reader(&mut self, envelope: &[u8]) -> Result<Vec<u8>> {
         self.recover()?;
+        let outer = wire::decode(envelope)?;
+        let fields = outer.list(16)?;
+        let search = if fields.first().is_some_and(|v| v.uint().ok() == Some(200)) {
+            let f = outer.array(5)?;
+            ensure!(
+                f[1].uint()? == 1 && f[2].text()? == "RouteBridgeSearch",
+                "unknown bridge reader frame"
+            );
+            let query = f[4].bytes()?;
+            crate::search_text::Request::parse(query)?;
+            Some((f[3].bytes()?, query))
+        } else {
+            None
+        };
+        // Only the query-free reader envelope enters ordered authority evidence.
+        let envelope = search.map_or(envelope, |(reader, _)| reader);
         let reader = crate::authority_route_reader::Reader::parse(
             envelope,
             self.guard.manifest.network,
@@ -740,7 +756,21 @@ impl<'a> Client<'a> {
             self.now()? < reader.expires,
             "bridge read expired before forwarding"
         );
-        Ok(reader.packet)
+        if let Some((_, query)) = search {
+            ensure!(
+                reader.action == 1 && reader.page.is_some() && reader.revision.is_some(),
+                "search payload requires one exact search-authorised publication"
+            );
+            wire::encode(&V::Array(vec![
+                V::Uint(200),
+                V::Uint(1),
+                V::Text("BridgeSearch".into()),
+                V::Bytes(reader.packet),
+                V::Bytes(query.to_vec()),
+            ]))
+        } else {
+            Ok(reader.packet)
+        }
     }
 }
 pub(crate) fn retained_voucher(

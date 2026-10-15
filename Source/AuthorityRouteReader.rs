@@ -47,7 +47,7 @@ impl Reader {
             signatures.len() == 1
                 && signatures[0].0 == reader
                 && grant.kind == 102
-                && matches!(action, 0 | 3)
+                && matches!(action, 0 | 1 | 3)
                 && endpoint != [0; 32]
                 && nonce != [0; 32]
                 && f[9].uint()? > 0,

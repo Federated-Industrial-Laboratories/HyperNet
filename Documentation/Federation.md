@@ -100,7 +100,7 @@ The bridge profile's operator-signed payload is:
 
 ```text
 [200,1,"AuthorityBridgeProfile",manifestBytes,serviceKey,volumeId,
- [[agreementId,treatyDigest],...],physicalStateBytes]
+ [[agreementId,treatyDigest],...],physicalStateBytes,search]
 ```
 
 Agreement/profile lists are sorted and unique. Empty media consent uses empty
@@ -275,3 +275,8 @@ retained before preparing their exact outgoing request. Uncertain effects retain
 that request for explicit reconciliation; they do not allocate a new stream or
 silently substitute a new proof. Local activation consent, withdrawal and clock
 health continue to apply to every new action and service loop.
+
+The final search boolean is explicit destination operator consent. Network search
+also requires IndexPages7 in the destination namespace. Queries terminate at the
+destination bridge; only query-free current export checks reach the source.
+See [catalogue and search](Search.md).

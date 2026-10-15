@@ -836,6 +836,16 @@ for the same immutable intent within the original monotonic startup deadline.
 Malformed history and proof data never trigger this refresh. Ordinary request
 recovery does not automatically retry a mutation with a different challenge.
 
+The same bounded refresh is permitted for PageContext, PageRead, PageList,
+PageSearchList, PageLocalSearchLease and PageContentGet. The command must also be
+non-mutating and non-serving. These queries reuse the same loaded transport and
+exact signed intent, with a new nonce and challenge duration limited to the time
+remaining before the original monotonic deadline. Only the exact finite
+HistoryOvertaken reply can trigger refresh; malformed proofs, other refusals and
+transport failures terminate the request. No permission, floor advancement or
+result publication derives from the overtaken attempt. Mutations and serving
+authorisations remain excluded.
+
 State has at most262144 bytes. Kind48 uses at most16 chunks of16384 bytes, with
 zero-based exact indices and only the final chunk shorter. Archive requests name
 one exact range of1-512 leaves; their first index is zero-based. The archive has at

@@ -292,6 +292,154 @@ fn certificates() -> (Certificate, Certificate) {
     fs::remove_dir_all(root).unwrap();
     (relay, endpoint)
 }
+fn readiness_fixture(
+    duration_ms: u64,
+) -> (tokio::io::DuplexStream, Session, route_io::Gate, Vec<u8>) {
+    let (peer, stream) = tokio::io::duplex(4096);
+    let start = crate::authority_challenge::boot_time_ms().unwrap();
+    let deadline = start + duration_ms;
+    let permission = route_io::Gate::new(start);
+    let (stream, boundary) = route_io::Transport::new(stream, deadline);
+    let session = Session {
+        stream: Box::new(stream),
+        boundary,
+        deadline,
+        idle_ms: duration_ms,
+        bytes: 4096,
+        slot: None,
+        timing: Timing::begin(start, false),
+        frames: 0,
+    };
+    let ready = protocol::endpoint_ready([1; 32], [2; 32], [4; 32], 1).unwrap();
+    (peer, session, permission, ready)
+}
+async fn readiness_is_pending(
+    mut pending: std::pin::Pin<&mut impl Future<Output = Result<Request>>>,
+    peer: &mut tokio::io::DuplexStream,
+) {
+    std::future::poll_fn(|cx| {
+        assert!(pending.as_mut().poll(cx).is_pending());
+        let mut bytes = [0; 1];
+        let mut output = tokio::io::ReadBuf::new(&mut bytes);
+        assert!(
+            std::pin::Pin::new(&mut *peer)
+                .poll_read(cx, &mut output)
+                .is_pending()
+        );
+        assert!(output.filled().is_empty());
+        std::task::Poll::Ready(())
+    })
+    .await;
+}
+#[tokio::test]
+async fn private_route_endpoint_readiness_waits_for_current_renewal() {
+    let (mut peer, session, permission, ready) = readiness_fixture(5000);
+    let deadline = session.deadline;
+    let remaining_bytes = session.bytes - (ready.len() + 4 + b"Request".len() + 4) as u64;
+    let pending = ready_session(session, ready.clone(), permission.clone());
+    tokio::pin!(pending);
+    // Expiry precedes the task's first poll, reproducing the dispatch-to-ready race
+    // without depending on a scheduler delay or a short sleep.
+    readiness_is_pending(pending.as_mut(), &mut peer).await;
+    permission.renew(deadline + 1000).unwrap();
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::join!(pending, async {
+            assert_eq!(route_io::receive(&mut peer, 256).await.unwrap(), ready);
+            route_io::send(&mut peer, b"Request").await.unwrap();
+        })
+    })
+    .await
+    .unwrap();
+    let request = result.unwrap();
+    assert_eq!(request.packet, b"Request");
+    assert_eq!(request.session.deadline, deadline);
+    assert_eq!(request.session.bytes, remaining_bytes);
+}
+#[tokio::test]
+async fn private_route_endpoint_readiness_refuses_closed_permission() {
+    use tokio::io::AsyncReadExt;
+    for close_before_binding in [false, true] {
+        let (mut peer, session, permission, ready) = readiness_fixture(5000);
+        if close_before_binding {
+            permission.close();
+        }
+        let pending = ready_session(session, ready, permission.clone());
+        tokio::pin!(pending);
+        if !close_before_binding {
+            readiness_is_pending(pending.as_mut(), &mut peer).await;
+            permission.close();
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), pending)
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert!(
+            permission
+                .renew(crate::authority_challenge::boot_time_ms().unwrap() + 5000)
+                .is_err()
+        );
+        assert_eq!(peer.read(&mut [0; 1]).await.unwrap(), 0);
+    }
+}
+#[tokio::test]
+async fn private_route_endpoint_readiness_retains_original_deadline() {
+    let (mut peer, session, permission, ready) = readiness_fixture(200);
+    let deadline = session.deadline;
+    let pending = ready_session(session, ready.clone(), permission.clone());
+    tokio::pin!(pending);
+    readiness_is_pending(pending.as_mut(), &mut peer).await;
+    permission.renew(deadline + 5000).unwrap();
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::join!(pending, async {
+            assert_eq!(route_io::receive(&mut peer, 256).await.unwrap(), ready);
+            // No request follows. The renewed proof must not extend this session.
+        })
+    })
+    .await
+    .unwrap();
+    assert!(result.is_err());
+    assert!(crate::authority_challenge::boot_time_ms().unwrap() >= deadline);
+    assert!(permission.expiry().unwrap() > deadline);
+}
+#[tokio::test]
+async fn private_route_renewable_binding_blocks_other_expired_writes() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (socket, mut peer) = tokio::io::duplex(128);
+    let start = crate::authority_challenge::boot_time_ms().unwrap();
+    let deadline = start + 5000;
+    let (mut socket, boundary) = route_io::Transport::new(socket, deadline);
+    let permission = route_io::Gate::new(start);
+    assert!(boundary.arm(permission.clone(), deadline).is_err());
+    boundary
+        .arm_renewable(permission.clone(), deadline)
+        .unwrap();
+    assert!(
+        boundary
+            .arm_renewable(permission.clone(), deadline + 5000)
+            .is_err()
+    );
+    let pending = socket.write_all(b"Buffered TLS bytes");
+    tokio::pin!(pending);
+    std::future::poll_fn(|cx| {
+        assert!(pending.as_mut().poll(cx).is_pending());
+        let mut bytes = [0; 1];
+        let mut output = tokio::io::ReadBuf::new(&mut bytes);
+        assert!(
+            std::pin::Pin::new(&mut peer)
+                .poll_read(cx, &mut output)
+                .is_pending()
+        );
+        std::task::Poll::Ready(())
+    })
+    .await;
+    permission.renew(deadline).unwrap();
+    pending.await.unwrap();
+    let mut bytes = [0; 18];
+    peer.read_exact(&mut bytes).await.unwrap();
+    assert_eq!(&bytes, b"Buffered TLS bytes");
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn private_route_plain_session_progresses_while_authority_maintenance_is_delayed() {
     use crate::trust_wire::Value as V;

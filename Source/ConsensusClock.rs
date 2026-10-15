@@ -15,6 +15,16 @@ const MAXIMUM_SOURCE_AGE_SECONDS: u64 = 120;
 // This is an explicit hardware assumption, not a value inferred from NTP reachability.
 const HOLDOVER_PPM: u64 = 1000;
 
+/// An otherwise valid observation has passed its fixed monotonic lifetime.
+#[derive(Debug)]
+pub struct ObservationExpired;
+impl std::fmt::Display for ObservationExpired {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str("clock observation is stale")
+    }
+}
+impl std::error::Error for ObservationExpired {}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Moment {
     pub wall_ms: u64,
@@ -73,8 +83,8 @@ impl Witness {
             "unsupported clock observation lifetime"
         );
         ensure!(
-            now.boot_ms >= self.sample_boot_ms && now.boot_ms < self.valid_until_boot_ms,
-            "clock observation is stale"
+            now.boot_ms >= self.sample_boot_ms,
+            "clock observation is from the future"
         );
         let predicted = self
             .sample_wall_ms
@@ -86,6 +96,9 @@ impl Witness {
                 .is_some_and(|e| e <= MAXIMUM_ERROR_MS),
             "clock error exceeds the permitted bound"
         );
+        if now.boot_ms >= self.valid_until_boot_ms {
+            return Err(ObservationExpired.into());
+        }
         crate::authority_challenge::ClockHealth::new(
             self.sample_wall_ms,
             self.sample_boot_ms,
