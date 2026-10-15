@@ -185,6 +185,7 @@ fn page_context_hydrates_cold_reviewer_media_approval_and_reader_dependencies() 
         value.page,
         raw,
         media.manifest.bytes,
+        true,
     )
     .unwrap();
     c.application(
@@ -242,6 +243,7 @@ fn page_context_hydrates_cold_reviewer_media_approval_and_reader_dependencies() 
         value.page,
         raw,
         media.manifest.bytes,
+        true,
     )
     .unwrap();
     c.application(

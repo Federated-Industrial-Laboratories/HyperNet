@@ -677,7 +677,7 @@ valid state only while its own consent and authority remain valid.
 
 `SearchRequest` (119) body is `[operation, scope, terms, combination,
 namespaces, resultLimit, cursor, retainedView, expectedSnapshot]`.
-Scope is Local=0 or Network=1. Terms is the bounded UTF-8 literal list;
+Scope is Local=0 or Network=1. Terms is the bounded UTF-8 literal list; an empty list requests the permitted catalogue;
 combination is All=0 or Any=1; namespaces a sorted list of at most 64 IDs;
 limit U64 1-100; cursor Digest|null; retainedView is Current=0 or Historical=1.
 Historical is local-only and visibly indicates absent current revocation claims.
@@ -775,3 +775,8 @@ read, review or media effect requires a fresh bilateral proof; immutable byte
 receipts do not advance authority. Healthy epoch adoption retains prior floors
 and verifies the complete terminal/Ready chain. Exceptional recovery creates a
 new identity requiring independent trust acceptance.
+
+The operational mappings for preview106 and search119 are described in
+[Tier administration](Tiers.md) and [catalogue and search](Search.md). Current
+tier generations restrict retained grants through authenticated predecessor
+history; historical tier references never restore superseded permissions.

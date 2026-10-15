@@ -981,3 +981,72 @@ fn candidate_invitation_admits_only_its_request_stream_before_exact_redemption()
     let state = State::parse(&f.app.config, &recovered.state).unwrap();
     assert_eq!(state.streams.keys().len(), 2);
 }
+
+#[test]
+fn reviewed_delegation_compares_policy_view_and_retains_signed_provenance() {
+    let f = Fixture::with_actions(1000, vec![0, 9, 11, 12, 25]);
+    let original = delegate(&f, &f.initial, child(&f, public(&key(41)), 61), 6000);
+    let original = Intent::from_signed(&original).unwrap();
+    let wrap = |prior: &[u8], action: &str, token: Option<[u8; 32]>| {
+        let mut parameters = wire::decode(&original.parameters)
+            .unwrap()
+            .array(6)
+            .unwrap()
+            .to_vec();
+        parameters[5] = snapshot(&f, prior, &original.expected);
+        signed(
+            &f,
+            prior,
+            &f.requester,
+            action,
+            original.resource,
+            array(vec![
+                V::Uint(200),
+                V::Uint(1),
+                V::Text(action.into()),
+                b(&wire::encode(&array(parameters)).unwrap()),
+                token.map_or(V::Null, |v| b(&v)),
+            ]),
+            original.expected.clone(),
+        )
+    };
+    let preview = execute(
+        &f,
+        &f.initial,
+        &wrap(&f.initial, "AuthorityGrantPreview", None),
+        &f.requester,
+        6000,
+    );
+    assert_eq!(code(&preview), 0);
+    let parsed = State::parse(&f.app.config, &preview.state).unwrap();
+    assert_eq!(
+        parsed.records.len(),
+        State::parse(&f.app.config, &f.initial)
+            .unwrap()
+            .records
+            .len()
+    );
+    let result = crate::authority_proof::OperationResult::parse(result_bytes(&preview)).unwrap();
+    let reply = wire::decode(&result.value).unwrap();
+    let view = reply.array(5).unwrap()[4].array(7).unwrap()[1]
+        .fixed()
+        .unwrap();
+    let refused = execute(
+        &f,
+        &preview.state,
+        &wrap(&preview.state, "AuthorityGrantApply", Some([90; 32])),
+        &f.requester,
+        6500,
+    );
+    assert_eq!(code(&refused), 12);
+    let applied = execute(
+        &f,
+        &refused.state,
+        &wrap(&refused.state, "AuthorityGrantApply", Some(view)),
+        &f.requester,
+        7000,
+    );
+    assert_eq!(code(&applied), 0);
+    State::parse(&f.app.config, &applied.state).unwrap();
+    assert_eq!(reader(&f, &applied.state, 61).kind, 102);
+}

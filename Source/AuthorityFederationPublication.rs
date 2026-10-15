@@ -133,6 +133,7 @@ pub(super) fn current_review(
         value.page,
         head.raw_page,
         value.bundle.len() as u64,
+        true,
     )?;
     review_mode(c, &review, treaty, head.raw_page)?;
     Ok(review)

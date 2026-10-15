@@ -366,6 +366,29 @@ fn reader(
     )?;
     Ok(())
 }
+pub(crate) fn local_search(
+    c: &mut Evaluation<'_>,
+    outer: &VersionRef,
+    device: &VersionRef,
+    requester: Key,
+    grant: &VersionRef,
+) -> Result<()> {
+    let (o, s, _) = live(c, outer)?;
+    reader(c, &o, &s, requester, grant, Some(device))?;
+    let bytes = c.governance.record_bytes(102, grant.id)?;
+    let v = wire::decode(bytes)?;
+    let subject = v.array(17)?[8].fixed()?;
+    c.capability(
+        grant,
+        subject,
+        &[0, 1],
+        (2, o.object),
+        Some(&s.namespace),
+        o.bytes,
+    )?;
+    c.exact(&s.placement)?;
+    Ok(())
+}
 pub(crate) fn content_access(
     c: &mut Evaluation<'_>,
     p: &content::Placement,
@@ -398,6 +421,7 @@ pub(crate) fn content_access(
         }
         content::Effect::Read => reader(c, &o, &s, requester, grant, None)?,
         content::Effect::Purge => anyhow::bail!("sealed purge requires exact tombstone"),
+        content::Effect::Search => anyhow::bail!("sealed bodies cannot enter server search"),
     }
     Ok(())
 }

@@ -10,6 +10,7 @@ pub struct BridgeProfile {
     pub volume: Digest,
     pub agreements: Vec<(Digest, Digest)>,
     pub state_bytes: u64,
+    pub search: bool,
     pub envelope: Vec<u8>,
 }
 impl BridgeProfile {
@@ -29,6 +30,7 @@ impl BridgeProfile {
                 .map(|(id, digest)| a(vec![b(id), b(digest)]))
                 .collect()),
             V::Uint(self.state_bytes),
+            V::Bool(self.search),
         ]))
     }
     pub fn parse(envelope: &[u8], n: Digest, i: Digest) -> Result<Self> {
@@ -38,7 +40,7 @@ impl BridgeProfile {
         );
         let (payload, signatures) = wire::envelope(envelope, 1)?;
         let value = wire::decode(&payload)?;
-        let f = value.array(8)?;
+        let f = value.array(9)?;
         ensure!(
             f[0].uint()? == 200 && f[1].uint()? == 1 && f[2].text()? == "AuthorityBridgeProfile",
             "bridge profile format differs"
@@ -56,6 +58,7 @@ impl BridgeProfile {
                 })
                 .collect::<Result<_>>()?,
             state_bytes: f[7].uint()?,
+            search: f[8].boolean()?,
             envelope: envelope.to_vec(),
         };
         let role = out

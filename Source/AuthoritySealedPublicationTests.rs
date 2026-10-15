@@ -32,8 +32,9 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let f =
-            deployment::Fixture::with_actions(vec![0, 2, 4, 5, 9, 10, 11, 12, 13, 23, 26, 29, 30]);
+        let f = deployment::Fixture::with_actions(vec![
+            0, 1, 2, 3, 4, 5, 7, 9, 10, 11, 12, 13, 23, 26, 29, 30,
+        ]);
         let mut m = deployment::manifest();
         m.consent_policy.allow_opaque = true;
         m.consent_policy.reviewer_roots = vec![public(5)];
@@ -69,6 +70,7 @@ impl Fixture {
             maximum_asset_bytes: 1024 * 1024,
             retention_ms: 15000,
             content: Some(page::ContentPolicy {
+                search: false,
                 metadata_bytes: 65536,
                 data_bytes: 2 * 1024 * 1024,
                 staging_bytes: 1024 * 1024,
@@ -638,3 +640,6 @@ fn sealed_replacement_replays_exact_prior_withdrawal_and_tombstone() {
         old_state.placement
     );
 }
+
+#[path = "AuthorityLocalSearchLeaseTests.rs"]
+mod local_search_tests;

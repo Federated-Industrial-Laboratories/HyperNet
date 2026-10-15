@@ -193,6 +193,54 @@ pub fn evaluate(
     let mut continuation = None;
     let result = (|| -> Result<()> {
         match command {
+            Command::LocalSearchLease { items } => {
+                for (publication, device) in items {
+                    if publication.kind == 113 {
+                        super::super::sealed_publication::local_search(
+                            &mut c,
+                            publication,
+                            device.as_ref().context("sealed search device absent")?,
+                            intent.requester,
+                            grant(operation)?,
+                        )?;
+                    } else {
+                        let record = c.exact(publication)?;
+                        let review =
+                            Review::parse(&record.payload, state.network, state.incarnation)?;
+                        let revision = c.revision(&review.statement.revision, true)?;
+                        let (_, ledger, _, _) = c.publication(revision.author.raw_page)?;
+                        ensure!(
+                            ledger.published.as_ref() == Some(publication),
+                            "local search publication changed"
+                        );
+                        c.principal(
+                            intent.requester,
+                            grant(operation)?,
+                            None,
+                            "PagesRead",
+                            &revision.author.namespace,
+                            Some(revision.author.raw_page),
+                            revision.author.source.len() as u64,
+                        )?;
+                        c.read_capability(
+                            grant(operation)?,
+                            intent.requester,
+                            &[0, 1],
+                            (2, revision.author.intent.resource),
+                            Some(&revision.author.namespace),
+                            0,
+                        )?;
+                        c.application(
+                            intent.requester,
+                            grant(operation)?,
+                            None,
+                            "PagesSearch",
+                            &revision.author.namespace,
+                            Some(revision.author.raw_page),
+                        )?;
+                    }
+                }
+            }
             Command::Content(command) => content::evaluate(
                 &mut c,
                 operation,
@@ -208,14 +256,25 @@ pub fn evaluate(
                 resource,
                 namespace,
             } => {
-                c.capability(
-                    grant(operation)?,
-                    intent.requester,
-                    &[*action],
-                    (*scope_kind, *resource),
-                    namespace.as_deref(),
-                    0,
-                )?;
+                if matches!(*action, 0 | 1) {
+                    c.read_capability(
+                        grant(operation)?,
+                        intent.requester,
+                        &[*action],
+                        (*scope_kind, *resource),
+                        namespace.as_deref(),
+                        0,
+                    )?;
+                } else {
+                    c.capability(
+                        grant(operation)?,
+                        intent.requester,
+                        &[*action],
+                        (*scope_kind, *resource),
+                        namespace.as_deref(),
+                        0,
+                    )?;
+                }
                 if c.governance.record_bytes(127, intent.requester).is_ok()
                     && state.records.contains_key(&(148, intent.requester))
                 {
@@ -315,6 +374,7 @@ pub fn evaluate(
                     for permission in &policy.permissions {
                         let action = match permission.as_str() {
                             "PagesRead" | "MediaRead" => 0,
+                            "PagesSearch" => 1,
                             "PagesSubmit" | "MediaSubmit" => 2,
                             _ => 3,
                         };
@@ -657,7 +717,10 @@ pub fn evaluate(
                     )?;
                 }
             }
-            Command::Queue { namespace, after } | Command::List { namespace, after } => {
+            Command::Queue { namespace, after }
+            | Command::List { namespace, after }
+            | Command::SearchList { namespace, after } => {
+                let searching = matches!(command, Command::SearchList { .. });
                 let queued = matches!(command, Command::Queue { .. });
                 let permission = if queued { "ReviewInspect" } else { "PagesRead" };
                 let reader_grant = grant(operation)?;
@@ -695,6 +758,24 @@ pub fn evaluate(
                         0,
                     )?;
                 }
+                if searching {
+                    c.read_capability(
+                        reader_grant,
+                        intent.requester,
+                        &[0, 1],
+                        (1, namespace_id(namespace)?),
+                        Some(namespace),
+                        0,
+                    )?;
+                    c.application(
+                        intent.requester,
+                        reader_grant,
+                        None,
+                        "PagesSearch",
+                        namespace,
+                        None,
+                    )?;
+                }
                 let mut last = None;
                 for record in state.records.values().filter(|r| r.reference.kind == 140) {
                     if after.is_some_and(|id| record.reference.id <= id) {
@@ -725,7 +806,34 @@ pub fn evaluate(
                                 c.select(140, record.reference.id)?;
                                 c.revision(selected.unwrap(), true)?;
                             } else {
-                                c.publication(ledger.raw_page)?;
+                                let (_, _, _, revision) = c.publication(ledger.raw_page)?;
+                                c.principal(
+                                    intent.requester,
+                                    reader_grant,
+                                    None,
+                                    "PagesRead",
+                                    namespace,
+                                    Some(ledger.raw_page),
+                                    revision.author.source.len() as u64,
+                                )?;
+                                if searching {
+                                    c.read_capability(
+                                        reader_grant,
+                                        intent.requester,
+                                        &[0, 1],
+                                        (2, revision.author.intent.resource),
+                                        Some(namespace),
+                                        0,
+                                    )?;
+                                    c.application(
+                                        intent.requester,
+                                        reader_grant,
+                                        None,
+                                        "PagesSearch",
+                                        namespace,
+                                        Some(ledger.raw_page),
+                                    )?;
+                                }
                             }
                             Ok(())
                         },

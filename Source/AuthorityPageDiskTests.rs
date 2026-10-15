@@ -168,6 +168,7 @@ fn page_cache_recovers_torn_successor_and_preserves_pending_bundle_within_physic
     drop(disk);
     let disk = Disk::open(&path, &profile, 2000).unwrap();
     assert!(disk.live(second.reference(), 2000));
+    assert!(!disk.live(second.reference(), 1999));
     disk.file.write_all_at(&[0; 16], 0).unwrap();
     disk.file.write_all_at(&[0; 16], disk.bank).unwrap();
     disk.file.sync_all().unwrap();
@@ -198,6 +199,7 @@ fn bridge_pending_extent_recovers_torn_bank_without_exceeding_physical_consent()
             .len() as u64
             + HEADER);
     let mut profile = domains::federation::BridgeProfile {
+        search: false,
         manifest: manifest.clone(),
         service,
         volume: [107; 32],

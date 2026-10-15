@@ -7,6 +7,7 @@ use crate::{
 };
 
 struct Fixture {
+    search: bool,
     state: State,
     records: Vec<Vec<u8>>,
     reserved: Reservations,
@@ -22,6 +23,7 @@ pub(crate) fn complete_content(
     revision: &VersionRef,
 ) {
     let mut fixture = Fixture {
+        search: false,
         state: state.clone(),
         records: records.to_vec(),
         reserved: reserved.clone(),
@@ -40,6 +42,7 @@ pub(crate) fn complete_content(
             maximum_asset_bytes: crate::authority_objects::PAGE_BUNDLE_BYTES as u64,
             retention_ms: MAXIMUM_LIFETIME_MS,
             content: Some(ContentPolicy {
+                search: false,
                 metadata_bytes: 65536,
                 data_bytes: 2 * 1024 * 1024,
                 staging_bytes: 1024 * 1024,
@@ -68,12 +71,27 @@ impl Fixture {
             .find(|r| r.kind == 102 && r.id == [23; 32])
             .unwrap();
         Self {
+            search: false,
             state: State::empty(f.scope.network, f.scope.incarnation),
             records: f.records,
             reserved: f.reservations,
             grant,
             sequence: 1,
         }
+    }
+    fn new_search() -> Self {
+        let mut value = Self::new();
+        let f = deployment::Fixture::with_actions(vec![0, 1, 2, 3, 5, 7, 10, 11, 12, 13, 21, 26]);
+        value.records = f.records;
+        value.grant =
+            Governance::parse(value.state.network, value.state.incarnation, &value.records)
+                .unwrap()
+                .versions()
+                .into_iter()
+                .find(|r| r.kind == 102 && r.id == [23; 32])
+                .unwrap();
+        value.search = true;
+        value
     }
     fn author(&self, body: &[u8], revision: u64) -> objects::Author {
         self.author_for([71; 16], body, revision)
@@ -352,7 +370,16 @@ impl Fixture {
         expires_ms: u64,
         content_bytes: u64,
     ) -> Vec<HostProfile> {
-        let f = deployment::Fixture::with_actions(vec![0, 2, 3, 5, 10, 11, 12, 13, 21, 26]);
+        let governance =
+            Governance::parse(self.state.network, self.state.incarnation, &self.records).unwrap();
+        let value = wire::decode(governance.record_bytes(102, self.grant.id).unwrap()).unwrap();
+        let actions = value.array(17).unwrap()[10]
+            .list(32)
+            .unwrap()
+            .iter()
+            .map(|v| v.uint().unwrap())
+            .collect();
+        let f = deployment::Fixture::with_actions(actions);
         let mut manifest = deployment::manifest();
         manifest.validity.1 = expires_ms;
         (self.records, _, _, _) = deployment::admitted(&f, &deployment::offer(manifest.clone()));
@@ -377,6 +404,7 @@ impl Fixture {
                     },
                     retention_ms: MAXIMUM_LIFETIME_MS,
                     content: (role == 1).then_some(ContentPolicy {
+                        search: self.search,
                         metadata_bytes: 65536,
                         data_bytes: content_bytes,
                         staging_bytes: (1024 * 1024).min(content_bytes),
@@ -1030,6 +1058,66 @@ fn page_application_policy_requires_dual_consent_and_exact_author_policy_version
     .unwrap();
     let policy =
         ApplicationPolicy::parse(&policy.envelope, f.state.network, f.state.incarnation).unwrap();
+    let mut complete = policy.clone();
+    complete.permissions = profile::APPLICATION_PERMISSIONS
+        .iter()
+        .map(|p| (*p).into())
+        .collect();
+    complete.review = Some((0, [90; 32]));
+    let signed_policy = |policy: &ApplicationPolicy| {
+        let payload = policy
+            .payload(f.state.network, f.state.incarnation)
+            .unwrap();
+        let mut signatures = [5, 150]
+            .into_iter()
+            .map(|seed| {
+                wire::envelope(
+                    &wire::sign_envelope(&payload, &deployment::key(seed)).unwrap(),
+                    1,
+                )
+                .unwrap()
+                .1
+                .remove(0)
+            })
+            .collect::<Vec<_>>();
+        signatures.sort_by_key(|p| p.0);
+        wire::encode(&a(vec![
+            V::Uint(0),
+            V::Uint(1),
+            b(&payload),
+            a(signatures
+                .into_iter()
+                .map(|(key, sig)| a(vec![b(&key), b(&sig)]))
+                .collect()),
+        ]))
+        .unwrap()
+    };
+    assert!(
+        ApplicationPolicy::parse(
+            &signed_policy(&complete),
+            f.state.network,
+            f.state.incarnation
+        )
+        .is_ok()
+    );
+    complete.permissions[0] = "InvalidPermission".into();
+    assert!(
+        ApplicationPolicy::parse(
+            &signed_policy(&complete),
+            f.state.network,
+            f.state.incarnation
+        )
+        .is_err()
+    );
+    complete.permissions[0] = complete.permissions[1].clone();
+    assert!(
+        ApplicationPolicy::parse(
+            &signed_policy(&complete),
+            f.state.network,
+            f.state.incarnation
+        )
+        .is_err()
+    );
     f.apply(Command::Application { policy }, vec![], 5000);
     let policy = f.state.record(148, application).unwrap().reference.clone();
     let source = b"HyperNetPage/2\n# Application\n: Scoped submission.\n";
@@ -1882,3 +1970,6 @@ fn expired_body_placement_preserves_metadata_but_refuses_serving() {
         3
     );
 }
+
+#[path = "AuthorityPageSearchTests.rs"]
+mod search_tests;

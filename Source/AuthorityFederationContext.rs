@@ -272,6 +272,22 @@ impl page::Evaluation<'_> {
         );
         Ok((head, page, selected, revision))
     }
+    pub(super) fn federation_search_consent(&mut self, treaty: &Treaty) -> Result<()> {
+        let record = self.select(152, treaty.destination_bridge)?;
+        let bridge = self.federation_bridge(&record.reference, treaty)?;
+        ensure!(
+            bridge.profile.search,
+            "destination bridge has no indexing consent"
+        );
+        self.capability(
+            &bridge.grant,
+            bridge.manager,
+            &[7],
+            (1, page::namespace_id(&treaty.destination_namespace)?),
+            Some(&treaty.destination_namespace),
+            0,
+        )
+    }
     #[allow(
         clippy::too_many_arguments,
         reason = "Authority checks bind the participant, grant, application, qualified page, treaty and effect amount independently."
@@ -286,27 +302,53 @@ impl page::Evaluation<'_> {
         page: Digest,
         raw: [u8; 16],
         bytes: u64,
+        require_indexing: bool,
     ) -> Result<()> {
-        self.capability(
-            grant,
-            requester,
-            &[action],
-            (2, page),
-            Some(&treaty.destination_namespace),
-            bytes,
-        )?;
+        if matches!(action, 0 | 1) {
+            self.read_capability(
+                grant,
+                requester,
+                if action == 1 { &[0, 1] } else { &[0] },
+                (2, page),
+                Some(&treaty.destination_namespace),
+                bytes,
+            )?;
+        } else {
+            self.capability(
+                grant,
+                requester,
+                &[action],
+                (2, page),
+                Some(&treaty.destination_namespace),
+                bytes,
+            )?;
+        }
         self.application(
             requester,
             grant,
             application,
             match action {
                 0 => "PagesRead",
+                1 => "PagesSearch",
                 3 => "ReviewDecide",
                 _ => anyhow::bail!("unsupported local foreign publication action"),
             },
             &treaty.destination_namespace,
             Some(raw),
         )?;
+        if action == 1 {
+            self.application(
+                requester,
+                grant,
+                application,
+                "PagesRead",
+                &treaty.destination_namespace,
+                Some(raw),
+            )?;
+            if require_indexing {
+                self.federation_search_consent(treaty)?;
+            }
+        }
         Ok(())
     }
     pub(super) fn federation_media(

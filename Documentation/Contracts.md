@@ -12,6 +12,8 @@ publication and the remaining platform qualification are separate requirements.
 | [Wire](WireContract.md) | Canonical bytes, signature purpose, exact requests, recipient challenges and executed-result proofs |
 | [Authority](AuthorityContract.md) | Four-replica Basic HotStuff phases, durable votes/locks, time/freshness and recovery boundaries |
 | [Policy](PolicyContract.md) | Independent policies, tiers, recipient continuity, sealed revisions, custody, consent and lifecycle |
+| [Search](Search.md) | Exact permitted catalogue, network source derivation and explicit local retention |
+| [Tiers](Tiers.md) | Scoped administration, reviewed policy changes, delegation and revocation |
 | [Runtime](RuntimeContract.md) | Native management, readiness, complete relay coverage, diagnostics and software replacement |
 
 [Wire vectors](WireVectors.json) contain exact canonical bytes and synthetic

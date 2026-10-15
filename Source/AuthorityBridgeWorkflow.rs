@@ -189,6 +189,54 @@ async fn local(
         "bridge local packet differs"
     );
     match f[2].text()? {
+        "BridgeSearch" => {
+            let f = v.array(5)?;
+            let query = crate::search_text::Request::parse(f[4].bytes()?)?;
+            let packet = wire::decode(f[3].bytes()?)?;
+            let p = packet.array(10)?;
+            ensure!(
+                p[0].uint()? == 200
+                    && p[1].uint()? == 1
+                    && p[2].text()? == "BridgeLease"
+                    && p[6] == V::Null
+                    && p[9].boolean()?,
+                "search requires one exact imported body"
+            );
+            let agreement = p[3].fixed()?;
+            let raw = p[4].fixed()?;
+            let native = domains::version(&p[5])?;
+            ensure!(native.kind == 141, "imported search revision differs");
+            let context = client.context().0;
+            let target = parse_anchors(&p[7], &p[8], context.network, context.incarnation)?;
+            let (proof, _) = lease(
+                client,
+                network,
+                agreement,
+                Some(raw),
+                Some(native.clone()),
+                None,
+                Some(target),
+                false,
+            )
+            .await?;
+            let context = client.context().0;
+            let accepted = federation::Agreement::parse(
+                &context.record(151, agreement)?.payload,
+                context.network,
+                context.incarnation,
+            )?;
+            query.network_scope(
+                context.network,
+                context.incarnation,
+                page::namespace_id(&accepted.treaty.destination_namespace)?,
+            )?;
+            let (objects, source) = client.search_bundle(agreement, raw, &native)?;
+            let result = crate::search_text::response(&query, &source)?;
+            reply(
+                "BridgeSearch",
+                vec![b(&proof.bytes), objects.value(), b(&result)],
+            )
+        }
         "BridgeLease" => {
             let f = v.array(10)?;
             let id = f[3].fixed()?;

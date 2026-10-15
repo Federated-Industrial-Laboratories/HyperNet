@@ -127,6 +127,9 @@ Each sampled connection also reports at most four application-frame sequences
 and four permission renewals. Endpoint stages separate request arrival, dispatch,
 local response and final flush. Renewal stages identify expired permission and
 resumption after a fresh proof. These samples do not contain application data.
+If endpoint permission expires between dispatch and readiness, the bound channel
+waits for renewed permission within its original limits. Closed permission still
+refuses. Sampled readiness stages distinguish binding, byte-budget and write failures.
 
 Connection limits bound resources; they do not guarantee concurrent throughput.
 The authority must finish fresh permission checks within their certified

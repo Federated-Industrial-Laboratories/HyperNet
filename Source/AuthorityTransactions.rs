@@ -168,6 +168,8 @@ fn creation_value(value: V, state: &State, created: &VersionRef, replay: bool) -
     Ok(array(fields))
 }
 pub(super) enum Operation {
+    GrantReview(crate::authority_grant_review::Operation),
+    Tier(crate::authority_tiers::Operation),
     Runtime(crate::authority_runtime_activation::Operation),
     Reconfigure(crate::authority_epoch::Declaration),
     Domain(crate::authority_domains::Operation),
@@ -198,6 +200,16 @@ impl Operation {
                 && intent.incarnation == config.scope.incarnation,
             "governance request context differs"
         );
+        if crate::authority_grant_review::Operation::handles(&intent.action) {
+            let review = crate::authority_grant_review::Operation::parse(intent)?;
+            Self::parse(&review.inner, config)?;
+            return Ok(Self::GrantReview(review));
+        }
+        if crate::authority_tiers::Operation::handles(&intent.action) {
+            return Ok(Self::Tier(crate::authority_tiers::Operation::parse(
+                intent,
+            )?));
+        }
         if crate::authority_runtime_activation::Operation::handles(&intent.action) {
             return Ok(Self::Runtime(
                 crate::authority_runtime_activation::Operation::parse(intent)?,
@@ -303,6 +315,8 @@ impl Operation {
     }
     pub fn grant(&self) -> [u8; 32] {
         match self {
+            Self::GrantReview(_) => unreachable!("grant review uses its inner authority"),
+            Self::Tier(tier) => tier.grant(),
             Self::Runtime(_) => unreachable!("runtime activation has its own authority"),
             Self::Reconfigure(d) => d.grant,
             Self::Domain(_) => unreachable!("domain operations use their own authority"),
@@ -363,6 +377,37 @@ pub(super) fn evaluate(
         replay,
         recipient,
     } = evaluation;
+    if let Operation::GrantReview(review) = operation {
+        return super::tier_evaluation::grant_evaluate(
+            review,
+            state,
+            config,
+            prior,
+            intent,
+            Evaluation {
+                at: evaluated,
+                expires: request_expires,
+                replay,
+                recipient,
+            },
+            inputs,
+        );
+    }
+    if let Operation::Tier(tier) = operation {
+        return super::tier_evaluation::evaluate(
+            tier,
+            state,
+            config,
+            prior,
+            intent,
+            Evaluation {
+                at: evaluated,
+                expires: request_expires,
+                replay,
+                recipient,
+            },
+        );
+    }
     let deployments = state.deployments()?;
     let domain_reserved = state.domains.extend_reservations(&state.reservations);
     let reserved = deployments.extend_reservations(&domain_reserved);
@@ -739,6 +784,8 @@ pub(super) fn evaluate(
         }
     };
     match operation {
+        Operation::GrantReview(_) => unreachable!("grant reviews are evaluated above"),
+        Operation::Tier(_) => unreachable!("tier operations are evaluated above"),
         Operation::Runtime(_) => unreachable!("runtime operations are evaluated above"),
         Operation::Reconfigure(_) => unreachable!("epoch operations are evaluated above"),
         Operation::Domain(_) => unreachable!("domain operations are evaluated above"),

@@ -59,6 +59,9 @@ pub(crate) enum Phase {
     EndpointTlsComplete,
     EndpointRefused,
     EndpointReadyStart,
+    EndpointReadyBindingRefused,
+    EndpointReadyBudgetRefused,
+    EndpointReadyWriteRefused,
     EndpointReadyComplete,
     RequestReceived,
     RequestDequeued,
@@ -991,8 +994,15 @@ async fn ready_session(
     ready: Vec<u8>,
     permission: route_io::Gate,
 ) -> Result<Request> {
-    session.boundary.arm(permission.clone(), session.deadline)?;
-    session.charge(ready.len())?;
+    // A checked proof can expire before this task runs. Bind its renewable guard
+    // before any readiness write; guarded_send waits within the original limits.
+    session
+        .boundary
+        .arm_renewable(permission.clone(), session.deadline)
+        .inspect_err(|_| session.mark(Phase::EndpointReadyBindingRefused))?;
+    session
+        .charge(ready.len())
+        .inspect_err(|_| session.mark(Phase::EndpointReadyBudgetRefused))?;
     route_io::guarded_send(
         &mut session.stream,
         &ready,
@@ -1000,7 +1010,8 @@ async fn ready_session(
         session.deadline,
         session.idle_ms,
     )
-    .await?;
+    .await
+    .inspect_err(|_| session.mark(Phase::EndpointReadyWriteRefused))?;
     session.mark(Phase::EndpointReadyComplete);
     next_packet(session, permission).await
 }

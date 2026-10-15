@@ -177,29 +177,54 @@ pub fn evaluate(
                         .matches(state.network, state.incarnation),
                     "foreign inventory belongs to destination network"
                 );
-                c.capability(
-                    grant(operation)?,
-                    intent.requester,
-                    &[*action],
-                    (
-                        1,
-                        page::namespace_id(&accepted.treaty.destination_namespace)?,
-                    ),
-                    Some(&accepted.treaty.destination_namespace),
-                    0,
-                )?;
+                let scope = (
+                    1,
+                    page::namespace_id(&accepted.treaty.destination_namespace)?,
+                );
+                if matches!(*action, 0 | 1) {
+                    c.read_capability(
+                        grant(operation)?,
+                        intent.requester,
+                        if *action == 1 { &[0, 1] } else { &[0] },
+                        scope,
+                        Some(&accepted.treaty.destination_namespace),
+                        0,
+                    )?;
+                } else {
+                    c.capability(
+                        grant(operation)?,
+                        intent.requester,
+                        &[*action],
+                        scope,
+                        Some(&accepted.treaty.destination_namespace),
+                        0,
+                    )?;
+                }
                 c.application(
                     intent.requester,
                     grant(operation)?,
                     None,
                     if *action == 0 {
                         "PagesRead"
+                    } else if *action == 1 {
+                        "PagesSearch"
                     } else {
                         "ReviewInspect"
                     },
                     &accepted.treaty.destination_namespace,
                     None,
                 )?;
+                if *action == 1 {
+                    c.application(
+                        intent.requester,
+                        grant(operation)?,
+                        None,
+                        "PagesRead",
+                        &accepted.treaty.destination_namespace,
+                        None,
+                    )?;
+                    c.federation_search_consent(&accepted.treaty)?;
+                }
                 c.select(157, accepted.foreign.id)?;
             }
             Command::PageContext {
@@ -255,7 +280,7 @@ pub fn evaluate(
                     let id = qualified_page(*agreement, &accepted.treaty.source, *raw)?;
                     let selected = c.select(154, id)?;
                     let head = ForeignPage::parse(&selected.payload)?;
-                    let revision = if *action == 0 {
+                    let revision = if matches!(*action, 0 | 1) {
                         Some(c.federation_revision(id, true)?.3)
                     } else if let Some(pending) = &head.pending {
                         Some(ForeignRevision::parse(&c.exact(pending)?.payload)?)
@@ -280,8 +305,9 @@ pub fn evaluate(
                         id,
                         *raw,
                         0,
+                        true,
                     )?;
-                    if *action == 0 {
+                    if matches!(*action, 0 | 1) {
                         current_review(
                             &mut c,
                             &head,
@@ -973,8 +999,17 @@ pub fn evaluate(
                     },
                 )?;
             }
-            Command::Inspect { page, export } | Command::Read { page, export } => {
-                let published = matches!(command, Command::Read { .. });
+            Command::Inspect { page, export }
+            | Command::Read { page, export }
+            | Command::SearchRead { page, export }
+            | Command::LocalSearchRead { page, export } => {
+                let searching = matches!(command, Command::SearchRead { .. });
+                let published = matches!(
+                    command,
+                    Command::Read { .. }
+                        | Command::SearchRead { .. }
+                        | Command::LocalSearchRead { .. }
+                );
                 let (_, head, revision, value) = c.federation_revision(*page, published)?;
                 let selected = c.select(151, value.agreement)?;
                 let agreement = c.federation_agreement(&selected.reference)?;
@@ -989,11 +1024,18 @@ pub fn evaluate(
                     intent.requester,
                     grant(operation)?,
                     None,
-                    if published { 0 } else { 3 },
+                    if searching || matches!(command, Command::LocalSearchRead { .. }) {
+                        1
+                    } else if published {
+                        0
+                    } else {
+                        3
+                    },
                     &agreement.treaty,
                     *page,
                     head.raw_page,
                     value.bundle.len() as u64,
+                    !matches!(command, Command::LocalSearchRead { .. }),
                 )?;
                 if published {
                     current_review(&mut c, &head, &agreement.treaty, &value)?;
@@ -1023,6 +1065,7 @@ pub fn evaluate(
                     value.page,
                     head.raw_page,
                     value.bundle.len() as u64,
+                    true,
                 )?;
                 review_mode(&mut c, review, &agreement.treaty, head.raw_page)?;
                 let verified = c.federation_foreign(export, &agreement.treaty, inputs, replay)?;
@@ -1076,7 +1119,7 @@ pub fn evaluate(
                 )?;
                 foreign_floor(&mut c, &mut next, &mut changed, &verified, replay)?;
             }
-            Command::List { agreement, export } => {
+            Command::List { agreement, export } | Command::SearchList { agreement, export } => {
                 let record = c.select(151, *agreement)?;
                 let accepted = c.federation_agreement(&record.reference)?;
                 let verified = c.federation_foreign(export, &accepted.treaty, inputs, replay)?;
@@ -1106,6 +1149,7 @@ pub fn evaluate(
                     page.id,
                     value.raw_page,
                     0,
+                    true,
                 )?;
                 value.pending = None;
                 value.published = None;

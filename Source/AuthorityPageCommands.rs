@@ -27,6 +27,9 @@ impl MediaEffect {
 }
 #[derive(Clone, Debug)]
 pub enum Command {
+    LocalSearchLease {
+        items: Vec<(VersionRef, Option<VersionRef>)>,
+    },
     Content(content::Command),
     Context {
         action: u64,
@@ -74,6 +77,10 @@ pub enum Command {
     Withdraw {
         page: [u8; 16],
         as_reviewer: bool,
+    },
+    SearchList {
+        namespace: String,
+        after: Option<Digest>,
     },
     List {
         namespace: String,
@@ -151,6 +158,30 @@ impl Command {
             return Ok(Self::Content(content::Command::parse(value, n, i)?));
         }
         Ok(match name {
+            "PageLocalSearchLease" => {
+                let f = value.array(2)?;
+                let items = f[1]
+                    .list(MAXIMUM_CONTEXT_RECORDS)?
+                    .iter()
+                    .map(|v| {
+                        let f = v.array(2)?;
+                        let publication = version(&f[0])?;
+                        let device = optional_version(&f[1], 108)?;
+                        ensure!(
+                            (publication.kind == 142 && device.is_none())
+                                || (publication.kind == 113 && device.is_some()),
+                            "local search lease publication or device differs"
+                        );
+                        Ok((publication, device))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                ensure!(
+                    !items.is_empty() && items.windows(2).all(|w| w[0].0.index() < w[1].0.index()),
+                    "local search lease items repeat or are not sorted"
+                );
+                Self::LocalSearchLease { items }
+            }
+
             "PageContext" => {
                 let f = value.array(5)?;
                 let action = f[1].uint()?;
@@ -162,7 +193,7 @@ impl Command {
                     Some(namespace(&f[4])?)
                 };
                 ensure!(
-                    matches!(action, 0 | 2 | 3 | 5 | 21 | 26)
+                    matches!(action, 0 | 1 | 2 | 3 | 5 | 21 | 26)
                         && matches!(scope_kind, 0 | 1 | 2 | 3 | 5)
                         && (scope_kind != 0 || resource == n)
                         && (scope_kind != 2 || namespace.is_some()),
@@ -254,6 +285,13 @@ impl Command {
                 Self::Withdraw {
                     page: raw_page(&f[1])?,
                     as_reviewer: f[2].boolean()?,
+                }
+            }
+            "PageSearchList" => {
+                let f = value.array(3)?;
+                Self::SearchList {
+                    namespace: namespace(&f[1])?,
+                    after: optional_id(&f[2])?,
                 }
             }
             "PageList" => {
@@ -375,6 +413,7 @@ impl Command {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Content(c) => c.name(),
+            Self::LocalSearchLease { .. } => "PageLocalSearchLease",
             Self::Context { .. } => "PageContext",
             Self::ApplicationGet { .. } => "PageApplicationGet",
             Self::Application { .. } => "PageApplicationPolicy",
@@ -388,6 +427,7 @@ impl Command {
             Self::Review { .. } => "PageReview",
             Self::Withdraw { .. } => "PageWithdraw",
             Self::List { .. } => "PageList",
+            Self::SearchList { .. } => "PageSearchList",
             Self::Read { .. } => "PageRead",
             Self::Sync { .. } => "PageSync",
             Self::ReplicaQueue { .. } => "PageReplicaQueue",
@@ -408,6 +448,10 @@ impl Command {
         }
         let mut v = vec![V::Text(self.name().into())];
         v.extend(match self {
+            Self::LocalSearchLease { items } => vec![a(items
+                .iter()
+                .map(|(p, d)| a(vec![reference(p), d.as_ref().map_or(V::Null, reference)]))
+                .collect())],
             Self::Content(_) => unreachable!("handled content command"),
             Self::Context {
                 action,
@@ -439,7 +483,9 @@ impl Command {
                 after.as_ref().map_or(V::Null, |v| b(v)),
             ],
             Self::Submit { author } => vec![b(&author.bytes)],
-            Self::Queue { namespace, after } | Self::List { namespace, after } => vec![
+            Self::Queue { namespace, after }
+            | Self::List { namespace, after }
+            | Self::SearchList { namespace, after } => vec![
                 V::Text(namespace.clone()),
                 after.as_ref().map_or(V::Null, |v| b(v)),
             ],
@@ -526,6 +572,9 @@ impl Command {
     }
     pub fn resource(&self) -> Digest {
         match self {
+            Self::LocalSearchLease { .. } => {
+                identity("PageLocalSearchLease", vec![self.value()]).expect("bounded search lease")
+            }
             Self::Content(c) => c.resource(),
             Self::Context { resource, .. } => *resource,
             Self::ApplicationGet { application } => *application,
@@ -538,6 +587,7 @@ impl Command {
             Self::Hosts { namespace, .. }
             | Self::Queue { namespace, .. }
             | Self::List { namespace, .. }
+            | Self::SearchList { namespace, .. }
             | Self::MediaPolicy { namespace, .. } => {
                 namespace_id(namespace).expect("parsed namespace")
             }

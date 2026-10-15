@@ -34,6 +34,8 @@ confinement requirements and [Packages](Documentation/Packages.md) for independe
 verified installation. Installation does not start a service or grant authority.
 
 - [Authority](Documentation/Authority.md): independent trust, explicit capabilities and durable results.
+- [Tier administration](Documentation/Tiers.md): exact policy history and reviewed capability changes.
+- [Search](Documentation/Search.md): approved catalogues, explicit indexing consent and local retained content.
 - [Authority replicas](Documentation/AuthorityReplica.md): pinned peers and consensus operation.
 - [Runtime](Documentation/Runtime.md): setup, preview, local consent and authority lifecycle.
 - [Service runtime](Documentation/ServiceRuntime.md): exact hosting consent and serving activation.

@@ -31,6 +31,8 @@ mod authority_files;
 mod authority_floor;
 #[path = "AuthorityGovernance.rs"]
 mod authority_governance;
+#[path = "AuthorityGrantReview.rs"]
+mod authority_grant_review;
 #[path = "AuthorityHistory.rs"]
 mod authority_history;
 #[path = "AuthorityLocalTransport.rs"]
@@ -60,6 +62,8 @@ mod authority_replica;
 mod authority_route_reader;
 #[path = "AuthorityRuntimeActivation.rs"]
 mod authority_runtime_activation;
+#[path = "AuthorityTiers.rs"]
+mod authority_tiers;
 #[path = "AuthorityTransferService.rs"]
 mod authority_transfer_service;
 #[path = "Confinement.rs"]
@@ -113,6 +117,8 @@ mod runtime_service_authorization;
 mod runtime_service_entry;
 #[path = "RuntimeServiceEpochCommand.rs"]
 mod runtime_service_epoch_command;
+#[path = "SearchText.rs"]
+mod search_text;
 #[path = "SshProof.rs"]
 mod ssh_proof;
 #[path = "SshService.rs"]

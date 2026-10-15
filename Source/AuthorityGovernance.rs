@@ -634,7 +634,9 @@ impl Governance {
             );
             let current = self.record(102, cursor)?;
             let g = &current.fields;
-            let tier = self.exact(&reference(&g[9])?)?;
+            let pinned_tier = reference(&g[9])?;
+            let tier = self.record(101, pinned_tier.id)?;
+            crate::authority_tiers::current_reference(&tier.reference, &pinned_tier)?;
             let ts = &tier.fields;
             let ga = actions(&g[10])?;
             let ta = actions(&ts[9])?;
@@ -643,13 +645,29 @@ impl Governance {
             let gl = limits(&g[15])?;
             let tl = limits(&ts[12])?;
             let span = validity(&g[12])?;
+            if tier.reference == pinned_tier {
+                ensure!(
+                    ga.iter().all(|a| ta.contains(a))
+                        && scope_subset(&gs, &tsc, self.network)
+                        && within(gl, tl)
+                        && g[14].uint()? <= ts[11].uint()?,
+                    "grant exceeds its exact issuing tier"
+                );
+            }
+            let scope_allowed = |scopes: &[Scope]| {
+                scopes.contains(&(0, self.network))
+                    || scopes.contains(&request.scope)
+                    || request.scope.0 == 2
+                        && request.namespace.is_some_and(|n| scopes.contains(&(1, n)))
+            };
+            let required_depth = depth + u64::from(request.actions.contains(&11));
             ensure!(
                 conservative(request.evaluated_at_ms, span)
-                    && ga.iter().all(|a| ta.contains(a))
-                    && scope_subset(&gs, &tsc, self.network)
-                    && within(gl, tl)
-                    && g[14].uint()? <= ts[11].uint()?,
-                "grant exceeds its current tier or validity"
+                    && request.actions.iter().all(|a| ta.contains(a))
+                    && scope_allowed(&tsc)
+                    && required_depth <= ts[11].uint()?
+                    && required_depth <= g[14].uint()?,
+                "operation exceeds its current tier or validity"
             );
             let subject = g[8].fixed()?;
             let admission = self.admitted(subject, request.evaluated_at_ms, &mut dependencies)?;
@@ -679,11 +697,10 @@ impl Governance {
                     subject == request.subject && request.actions.iter().all(|a| ga.contains(a)),
                     "grant does not cover the requester and actions"
                 );
-                let scope_allowed = gs.contains(&(0, self.network))
-                    || gs.contains(&request.scope)
-                    || request.scope.0 == 2
-                        && request.namespace.is_some_and(|n| gs.contains(&(1, n)));
-                ensure!(scope_allowed, "grant does not cover the exact resource");
+                ensure!(
+                    scope_allowed(&gs),
+                    "grant does not cover the exact resource"
+                );
             }
             for i in 0..4 {
                 effective[i] = effective[i].min(gl[i]).min(tl[i]);

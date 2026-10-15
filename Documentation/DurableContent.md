@@ -23,6 +23,7 @@ The optional content policy has these fields, in wire order:
 | opaque | Whether encrypted Page objects are accepted |
 | failureDomain | Operator-declared failure-domain identity |
 | reviewerKeys | Exact reviewer keys accepted for opaque objects |
+| search | Explicit permission to search host-readable source on this host |
 
 Metadata has two equal banks and requires at least8192bytes. Data and staging
 must be nonzero; staging and quarantine cannot exceed dataBytes. Staging and
@@ -81,3 +82,7 @@ does not transfer its consent or placement identity. There is no automatic backu
 replication; declared sealed backup destinations currently refuse admission.
 Logical withdrawal, file deletion and physical-media sanitisation are distinct.
 An unreachable or malicious host cannot be forced to erase previously copied data.
+
+Network search additionally requires the current manager's IndexPages7 capability
+and exact requester ReadPage0/SearchCatalogue1. Search does not permit opaque
+plaintext access. See [catalogue and search](Search.md).
