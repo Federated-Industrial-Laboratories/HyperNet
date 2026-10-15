@@ -3,6 +3,7 @@
 use super::*;
 use crate::consensus::journal::tests::Directory;
 use ed25519_dalek::SigningKey;
+use std::os::unix::fs::PermissionsExt;
 
 #[test]
 fn service_clock_recovery_retains_deadline_and_rejects_changed_consent() {
@@ -19,7 +20,9 @@ fn service_clock_recovery_retains_deadline_and_rejects_changed_consent() {
         ("LocalConsent.cbor", signed_local.as_slice()),
         ("HostConsent.cbor", signed_host.as_slice()),
     ] {
-        std::fs::write(directory.0.join(name), bytes).unwrap();
+        let path = directory.0.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
     let check = |now| {
         verify_local(
@@ -61,7 +64,6 @@ fn service_clock_recovery_refuses_changed_configuration() {
     let directory = Directory::new();
     let path = directory.0.join("ServiceConfig.json");
     std::fs::write(&path, b"Original").unwrap();
-    use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let artifacts = BTreeMap::from([("ServiceConfig.json".into(), wire::digest(b"Original"))]);
     verify_artifacts(&directory.0, &artifacts).unwrap();
