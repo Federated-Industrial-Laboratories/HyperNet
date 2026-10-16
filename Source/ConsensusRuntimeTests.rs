@@ -170,6 +170,67 @@ fn repair_driver(
     }
 }
 #[test]
+fn peer_quorums_publish_local_phase_without_an_intermediate_repair_commit() {
+    let (configuration, keys) = fixture();
+    let (directories, mut engines) = fixtures::engines(&configuration, &keys);
+    fixtures::enter(&configuration, &keys, &mut engines, 1);
+    let command = fixtures::request(&configuration, 75);
+    let proposal = engines[0].propose(&command, 10000).unwrap();
+    let votes: Vec<_> = engines
+        .iter_mut()
+        .map(|e| {
+            SignedVote::parse(
+                &configuration,
+                &e.prepare(&proposal, &command, |_| Ok(()), |_, _| Ok(()))
+                    .unwrap(),
+            )
+            .unwrap()
+        })
+        .collect();
+    let mut qc = Certificate::collect(&configuration, &votes[..3]).unwrap();
+    let mut driver = repair_driver(
+        engines.pop().unwrap(),
+        &directories[3].0,
+        &keys,
+        configuration.voters[0],
+        ingress::Mailbox::new(),
+    );
+    for phase in [Phase::PreCommit, Phase::Commit] {
+        let generation = driver.engine.generation();
+        driver
+            .receive(
+                configuration.voters[0],
+                Message::Certificate(qc.bytes.clone()),
+            )
+            .unwrap();
+        assert_eq!(driver.engine.generation(), generation + 1);
+        assert!(driver.repairs.is_empty());
+        let vote = driver.engine.snapshot.own_votes
+            [&super::super::vote_id(1, phase, &configuration.voters[3])]
+            .clone();
+        assert!(
+            driver
+                .outbox
+                .values()
+                .any(|(_, message, _)| matches!(message, Message::Vote(bytes) if bytes == &vote))
+        );
+        driver
+            .receive(
+                configuration.voters[0],
+                Message::Certificate(qc.bytes.clone()),
+            )
+            .unwrap();
+        assert_eq!(driver.engine.generation(), generation + 1);
+        let votes: Vec<_> = engines
+            .iter_mut()
+            .map(|e| {
+                SignedVote::parse(&configuration, &e.advance_phase(&qc.bytes).unwrap()).unwrap()
+            })
+            .collect();
+        qc = Certificate::collect(&configuration, &votes).unwrap();
+    }
+}
+#[test]
 fn exact_outbox_reuse_preserves_validation_and_replay() {
     let (configuration, keys) = fixture();
     let directory = Directory::new();

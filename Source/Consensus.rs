@@ -115,6 +115,11 @@ pub struct Outputs {
     pub wish: Option<Vec<u8>>,
     pub new_view: Option<Vec<u8>>,
 }
+enum Decision {
+    Known,
+    Advanced,
+    Conflict,
+}
 pub struct Engine {
     configuration: Configuration,
     key: SigningKey,
@@ -979,9 +984,9 @@ impl Engine {
         }
         Ok(None)
     }
-    fn sign_vote(&mut self, mut next: Snapshot, vote: Vote) -> Result<Vec<u8>> {
-        if let Some(old) = self.check_vote(&next, &vote)? {
-            return Ok(old);
+    fn stage_vote(&self, next: &mut Snapshot, vote: Vote) -> Result<(Vec<u8>, bool)> {
+        if let Some(old) = self.check_vote(next, &vote)? {
+            return Ok((old, false));
         }
         ensure!(
             next.own_votes.len() < MAX_VOTES && next.votes.len() < MAX_VOTES,
@@ -992,31 +997,33 @@ impl Engine {
         next.own_votes
             .insert(entry.clone(), signed.envelope.clone());
         next.votes.insert(entry, signed.envelope.clone());
-        self.persist(next)?;
-        Ok(signed.envelope)
+        Ok((signed.envelope, true))
     }
-    pub fn advance_phase(&mut self, input: &[u8]) -> Result<Vec<u8>> {
+    fn sign_vote(&mut self, mut next: Snapshot, vote: Vote) -> Result<Vec<u8>> {
+        let (signed, changed) = self.stage_vote(&mut next, vote)?;
+        if changed {
+            self.persist(next)?;
+        }
+        Ok(signed)
+    }
+    // All fallible checks and signing precede mutation, so a learned QC can still
+    // be retained when this replica must defer its own phase vote.
+    fn stage_phase_vote(&self, next: &mut Snapshot, qc: &Certificate) -> Result<(Vec<u8>, bool)> {
         self.voting()?;
-        let qc = check_certificate(&self.configuration, &self.snapshot, input)?;
         ensure!(
             qc.view == self.view() && qc.view > 0,
             "Phase certificate is outside the entered view"
         );
         ensure!(
-            qc.view > self.committed()?.view
-                && extends(
-                    &self.configuration,
-                    &self.snapshot,
-                    qc.node,
-                    self.snapshot.committed,
-                )?,
+            qc.view > node(&self.configuration, next, &next.committed)?.view
+                && extends(&self.configuration, next, qc.node, next.committed)?,
             "Phase vote would leave the known committed prefix"
         );
-        let mut highest_prepare = self.snapshot.highest_prepare;
-        let mut locked = self.snapshot.locked;
+        let mut highest_prepare = next.highest_prepare;
+        let mut locked = next.locked;
         let phase = match qc.phase {
             Phase::Prepare => {
-                let high = certificate(&self.configuration, &self.snapshot, &highest_prepare)?;
+                let high = certificate(&self.configuration, next, &highest_prepare)?;
                 ensure!(qc.view >= high.view, "Prepare floor moved backwards");
                 if qc.view > high.view {
                     highest_prepare = qc.digest();
@@ -1032,7 +1039,7 @@ impl Engine {
                 };
                 let prepare = certificate(
                     &self.configuration,
-                    &self.snapshot,
+                    next,
                     &Certificate::vote_digest(&expected)?,
                 )
                 .context("Matching Prepare certificate is required before Commit voting")?;
@@ -1040,11 +1047,11 @@ impl Engine {
                     prepare.vote.as_ref() == Some(&expected),
                     "Indexed Prepare certificate differs from the exact vote"
                 );
-                let high = certificate(&self.configuration, &self.snapshot, &highest_prepare)?;
+                let high = certificate(&self.configuration, next, &highest_prepare)?;
                 if prepare.view > high.view {
                     highest_prepare = prepare.digest();
                 }
-                let lock = certificate(&self.configuration, &self.snapshot, &locked)?;
+                let lock = certificate(&self.configuration, next, &locked)?;
                 ensure!(qc.view >= lock.view, "Lock floor moved backwards");
                 if qc.view > lock.view {
                     locked = qc.digest();
@@ -1059,19 +1066,56 @@ impl Engine {
             phase,
             node: qc.node,
         };
-        if self.snapshot.own_votes.contains_key(&vote_id(
-            vote.view,
-            vote.phase,
-            &self.snapshot.signer,
-        )) && let Some(old) = self.check_vote(&self.snapshot, &vote)?
-        {
-            return Ok(old);
+        let (signed, changed) = self.stage_vote(next, vote)?;
+        if changed {
+            next.highest_prepare = highest_prepare;
+            next.locked = locked;
         }
+        Ok((signed, changed))
+    }
+    pub fn advance_phase(&mut self, input: &[u8]) -> Result<Vec<u8>> {
+        self.voting()?;
+        let qc = check_certificate(&self.configuration, &self.snapshot, input)?;
         let mut next = self.snapshot.clone();
+        let (signed, changed) = self.stage_phase_vote(&mut next, &qc)?;
+        if changed {
+            stage_certificate(&mut next, &qc, input)?;
+            self.persist(next)?;
+        }
+        Ok(signed)
+    }
+    fn stage_certificate_progress(&self, next: &mut Snapshot, qc: &Certificate) -> Result<bool> {
+        let mut changed = false;
+        if qc.phase == Phase::Prepare
+            && qc.view > certificate(&self.configuration, next, &next.highest_prepare)?.view
+        {
+            next.highest_prepare = qc.digest();
+            changed = true;
+        }
+        // Ordinary local Certificate delivery still reports missing inputs or
+        // conflicting decisions. Neither condition may discard the learned QC.
+        if qc.phase == Phase::Commit {
+            changed |= matches!(self.stage_decision(next, qc), Ok(Decision::Advanced));
+        } else if qc.view == self.view()
+            && let Ok((_, voted)) = self.stage_phase_vote(next, qc)
+        {
+            changed |= voted;
+        }
+        Ok(changed)
+    }
+    // The node's consensus ancestry and command closure are already durable.
+    // Publish its newly learned QC and eligible local transition together.
+    fn receive_certificate(&mut self, input: &[u8]) -> Result<()> {
+        self.active()?;
+        let qc = check_certificate(&self.configuration, &self.snapshot, input)?;
+        let mut next = self.snapshot.clone();
+        let added = !next.certificates.contains_key(&id(&qc.digest()));
         stage_certificate(&mut next, &qc, input)?;
-        next.highest_prepare = highest_prepare;
-        next.locked = locked;
-        self.sign_vote(next, vote)
+        let progressed = self.stage_certificate_progress(&mut next, &qc)?;
+        if added || progressed {
+            self.persist(next)?;
+        }
+        Ok(())
     }
     /// Gossip votes to all replicas; any honest collector can reconstruct withheld decisions.
     pub fn receive_vote(&mut self, input: &[u8]) -> Result<Option<Vec<u8>>> {
@@ -1129,12 +1173,7 @@ impl Engine {
         let qc = if matching.len() >= 3 {
             let qc = Certificate::collect(&self.configuration, &matching)?;
             insert_certificate(&self.configuration, &mut next, &qc.bytes)?;
-            if qc.phase == Phase::Prepare
-                && qc.view > certificate(&self.configuration, &next, &next.highest_prepare)?.view
-            {
-                // A collector has learned this QC before deferred local delivery.
-                next.highest_prepare = qc.digest();
-            }
+            self.stage_certificate_progress(&mut next, &qc)?;
             Some(qc.bytes)
         } else {
             None
@@ -1142,41 +1181,42 @@ impl Engine {
         self.persist(next)?;
         Ok(qc)
     }
-    pub fn decide(&mut self, input: &[u8]) -> Result<()> {
+    fn stage_decision(&self, next: &mut Snapshot, qc: &Certificate) -> Result<Decision> {
         self.voting()?;
-        let qc = check_certificate(&self.configuration, &self.snapshot, input)?;
         ensure!(
             qc.phase == Phase::Commit && qc.view > 0,
             "Only a Commit certificate decides"
         );
-        if extends(
-            &self.configuration,
-            &self.snapshot,
-            self.snapshot.committed,
-            qc.node,
-        )? {
-            return Ok(());
+        if extends(&self.configuration, next, next.committed, qc.node)? {
+            return Ok(Decision::Known);
         }
-        if !extends(
-            &self.configuration,
-            &self.snapshot,
-            qc.node,
-            self.snapshot.committed,
-        )? {
-            let old = self
-                .snapshot
-                .commit_certificates
-                .get(&id(&self.snapshot.committed))
-                .and_then(|digest| self.snapshot.certificates.get(&id(digest)))
-                .map(|object| body(&self.snapshot, object).map(|b| b.as_ref().clone()))
-                .transpose()?
-                .unwrap_or_default();
-            return self.incident(old, input.to_vec(), true);
+        if !extends(&self.configuration, next, qc.node, next.committed)? {
+            return Ok(Decision::Conflict);
         }
-        let mut next = self.snapshot.clone();
-        stage_certificate(&mut next, &qc, input)?;
         next.committed = qc.node;
         next.commit_certificates.insert(id(&qc.node), qc.digest());
+        Ok(Decision::Advanced)
+    }
+    pub fn decide(&mut self, input: &[u8]) -> Result<()> {
+        self.voting()?;
+        let qc = check_certificate(&self.configuration, &self.snapshot, input)?;
+        let mut next = self.snapshot.clone();
+        match self.stage_decision(&mut next, &qc)? {
+            Decision::Known => return Ok(()),
+            Decision::Advanced => {}
+            Decision::Conflict => {
+                let old = self
+                    .snapshot
+                    .commit_certificates
+                    .get(&id(&self.snapshot.committed))
+                    .and_then(|digest| self.snapshot.certificates.get(&id(digest)))
+                    .map(|object| body(&self.snapshot, object).map(|b| b.as_ref().clone()))
+                    .transpose()?
+                    .unwrap_or_default();
+                return self.incident(old, input.to_vec(), true);
+            }
+        }
+        stage_certificate(&mut next, &qc, input)?;
         self.persist(next)
     }
     fn validate_snapshot(&self) -> Result<()> {
@@ -1490,3 +1530,7 @@ pub(crate) mod tests;
 #[cfg(test)]
 #[path = "ConsensusStorageTests.rs"]
 mod storage_tests;
+
+#[cfg(test)]
+#[path = "ConsensusTransactionTests.rs"]
+mod transaction_tests;

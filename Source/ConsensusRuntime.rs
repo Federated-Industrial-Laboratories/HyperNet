@@ -851,7 +851,9 @@ impl Driver {
                     qc.view <= self.engine.view().saturating_add(1),
                     "Certificate is beyond repair window"
                 );
-                if !self.dependencies(
+                if self.engine.known_node(&qc.node).is_ok() {
+                    self.engine.receive_certificate(&bytes)?;
+                } else if !self.dependencies(
                     sender,
                     message,
                     vec![item(self.config(), 12, bytes.clone())?],

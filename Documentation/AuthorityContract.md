@@ -160,6 +160,13 @@ first checkpoint and preserves the complete highest Prepare/lock, current and
 previous-view certificate, committed/applied and outstanding execution closures.
 The signature floor does not prohibit verified late QCs or Decide. Collected
 Prepare QCs raise the durable Prepare floor before deferred local delivery.
+When a newly collected or received QC has complete local dependencies, its
+publication also retains the eligible next phase vote and lock, or committed
+position, in the same atomic journal transaction. No certificate or vote is
+released before that transaction succeeds. Missing inputs or phase prerequisites
+defer voting while the learned QC and its stronger Prepare floor remain durable.
+Application discovery and executed-result publication retain their separate
+bounded durable transitions.
 
 Correct replicas retain and exchange votes and certificates through bounded
 repair requests independently of a leader or edge broker. A collector withholding

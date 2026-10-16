@@ -72,6 +72,24 @@ operations recheck its owner's rights and withdrawal state. Manual review is
 the default; automated review requires explicit delegation and policy. See
 [Applications](Applications.md) and [PolicyContract](PolicyContract.md).
 
+## Certified views
+
+`["PageView",pageBytes16]` is one read-only AuthorityDomain operation. It checks
+PageRead's exact published revision, signed approval, media metadata and current
+reader/application authority, then evaluates PageContentGet for that exact
+placement in the same ordered state. The selected placement must be live; its
+owner's separate right to inspect withdrawn metadata cannot authorise a view.
+The result carries the union of both dependency closures, current host records
+and copy metadata, with the earliest applicable expiry. The ordinary challenge,
+quorum proof, retained floors and result bounds apply unchanged. Source bytes do
+not enter this authority result.
+
+A verified view replaces two separate metadata requests. It does not authorise
+an old content host or bypass a later byte effect: a selected service still
+checks current exact publication, placement, host consent and recipient rights
+when serving. PageRead and PageContentGet remain available for metadata
+inspection, including their existing unavailable-storage distinctions.
+
 ## Objects, delivery and resource bounds
 
 Source and bundles are immutable objects with typed, length-bound SHA-256
