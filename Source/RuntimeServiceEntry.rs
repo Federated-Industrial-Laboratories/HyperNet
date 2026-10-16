@@ -60,12 +60,60 @@ fn store_confinement() -> Result<confinement::Profile> {
     )
 }
 pub fn initialise() -> Result<()> {
+    prepare(false)
+}
+pub fn verify_existing() -> Result<()> {
+    prepare(true)
+}
+fn retained(guard: &Guard, role: u64, verify_only: bool) -> Result<()> {
+    if !verify_only {
+        return Ok(());
+    }
+    let requester = crate::authority_floor::Store::open(
+        Path::new("/State/Requester"),
+        guard.bootstrap.descriptor().clone(),
+    )?;
+    requester.require_requester(guard.key())?;
+    let recipient = crate::authority_recipient::Store::open(
+        Path::new("/State/Recipient"),
+        guard.bootstrap.descriptor().clone(),
+        guard.key(),
+    )?;
+    ensure!(
+        requester.descriptor().canonical() == recipient.descriptor().canonical(),
+        "Retained requester and recipient authority epochs differ"
+    );
+    let path = match role {
+        1 => {
+            let config = page_store::Config::load(Path::new("/Config/ServiceConfig.json"))?;
+            if config.profile.content.is_some() {
+                "/State/Content"
+            } else {
+                "/State/PageState.bin"
+            }
+        }
+        2 => "/State/MediaState.bin",
+        3 => "/State/MailState.bin",
+        4 => "/State/TransferState.bin",
+        5 => "/State/RouteState.cbor",
+        7 => "/State/BridgeState.bin",
+        8 => return Ok(()),
+        _ => unreachable!(),
+    };
+    ensure!(
+        Path::new(path).try_exists()?,
+        "Retained service data is absent; explicit data recovery is required"
+    );
+    guard.check()
+}
+fn prepare(verify_only: bool) -> Result<()> {
     let role = role()?;
     let guard = Guard::load(Path::new("/Authorization"), Path::new("/Config"), role)?;
     if role == 5 {
         let config = crate::route_config::Config::load()?;
         let profile = store_confinement()?;
         config.resources(&profile)?;
+        retained(&guard, role, verify_only)?;
         drop(crate::route_state::Disk::open(
             Path::new("/State"),
             config.manifest.network,
@@ -77,30 +125,36 @@ pub fn initialise() -> Result<()> {
         let config = bridge::Config::load(Path::new("/Config/ServiceConfig.json"))?;
         let profile = config.confinement()?;
         config.resources(&profile)?;
+        retained(&guard, role, verify_only)?;
         bridge::initialise(&guard)?;
     } else if role == 8 {
         let config = crate::ssh_service::Config::load(Path::new("/Config/ServiceConfig.json"))?;
         confinement::enter_ssh_parent(Path::new("/State"), &[config.listen.port()], &[])?;
+        retained(&guard, role, verify_only)?;
         activation::initialise(&guard)?;
     } else if role == 1 {
         let config = page_store::Config::load(Path::new("/Config/ServiceConfig.json"))?;
         let profile = store_confinement()?;
         config.resources(&profile)?;
+        retained(&guard, role, verify_only)?;
         page_store::initialise(&guard)?;
     } else if role == 2 {
         let config = media_store::Config::load(Path::new("/Config/ServiceConfig.json"))?;
         let profile = store_confinement()?;
         config.resources(&profile)?;
+        retained(&guard, role, verify_only)?;
         media_store::initialise(&guard)?;
     } else if role == 3 {
         let config = mail_store::Config::load(Path::new("/Config/ServiceConfig.json"))?;
         let profile = store_confinement()?;
         config.resources(&profile)?;
+        retained(&guard, role, verify_only)?;
         mail_store::initialise(&guard)?;
     } else {
         let config = transfer::Config::load(Path::new("/Config/ServiceConfig.json"))?;
         let profile = store_confinement()?;
         config.resources(&profile)?;
+        retained(&guard, role, verify_only)?;
         transfer::initialise(&guard)?;
     }
     println!(

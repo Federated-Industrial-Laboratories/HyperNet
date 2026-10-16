@@ -58,15 +58,21 @@ fn sign(
     fields[6] = V::Uint(through + 1);
     fields[7] = V::Uint(through);
     fields[14] = V::Uint(state.height);
+    let (arity, snapshot) = match action {
+        "AuthorityDeploymentRegister" => (9, Some(7)),
+        "AuthorityDeploymentWithdraw" => (6, Some(5)),
+        "Reconfigure" => (4, None),
+        _ => panic!("Unsupported deployment fixture action"),
+    };
     let mut parameters = wire::decode(fields[16].bytes().unwrap())
         .unwrap()
-        .list(8)
+        .array(arity)
         .unwrap()
         .to_vec();
-    if revision == 1 {
-        let last = parameters.len() - 1;
-        let refs = parameters[last].array(2).unwrap()[1].clone();
-        parameters[last] = array(vec![
+    if let Some(snapshot) = snapshot {
+        assert_eq!(revision, 1);
+        let refs = parameters[snapshot].array(2).unwrap()[1].clone();
+        parameters[snapshot] = array(vec![
             array(vec![
                 V::Uint(f.app.config.scope.epoch),
                 V::Uint(state.height),
@@ -101,6 +107,7 @@ fn registration(f: &tests::Fixture, state: &State, prior: &[u8]) -> Vec<u8> {
             b(&offer.consent),
             offer.possessions_value(),
             vectors::snapshot(refs),
+            V::Bool(false),
         ])
     };
     let preliminary = sign(

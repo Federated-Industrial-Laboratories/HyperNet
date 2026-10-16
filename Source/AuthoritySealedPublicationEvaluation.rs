@@ -204,9 +204,12 @@ fn hosts(
     namespace: &str,
 ) -> Result<(Vec<VersionRef>, BTreeSet<Digest>)> {
     ensure!(
-        o.placement.within(&p.placement) && o.placement.backups.is_empty(),
-        "sealed placement exceeds author restriction or declares an unimplemented backup destination"
+        o.placement.within(&p.placement),
+        "sealed placement exceeds author restriction"
     );
+    for destination in &o.placement.backups {
+        domains::backup::sealed_destination(c, *destination, o.reviewer)?;
+    }
     let mut refs = Vec::new();
     let mut consents = Vec::new();
     let mut domains = BTreeSet::new();
@@ -415,9 +418,35 @@ pub(crate) fn content_access(
         }
         content::Effect::Repair => {
             ensure!(
-                s.status == 1 && requester == o.reviewer && *grant == s.reviewer_grant,
-                "sealed repair requires its trusted finaliser"
+                s.status == 1
+                    && ((requester == o.reviewer && *grant == s.reviewer_grant)
+                        || requester == policy.publisher),
+                "sealed repair requires its trusted finaliser or owning publisher"
             );
+            if requester == policy.publisher {
+                c.capability(
+                    grant,
+                    requester,
+                    &[2],
+                    (2, o.object),
+                    Some(&s.namespace),
+                    o.bytes,
+                )?;
+            }
+        }
+        content::Effect::Read if requester == policy.publisher => {
+            ensure!(
+                s.status == 1,
+                "publisher ciphertext access requires current publication"
+            );
+            c.capability(
+                grant,
+                requester,
+                &[2],
+                (2, o.object),
+                Some(&s.namespace),
+                o.bytes,
+            )?;
         }
         content::Effect::Read => reader(c, &o, &s, requester, grant, None)?,
         content::Effect::Purge => anyhow::bail!("sealed purge requires exact tombstone"),
@@ -524,6 +553,9 @@ pub fn evaluate(
                     0,
                 )?;
                 let p = object_context(&mut c, *object)?;
+                for destination in &p.placement.backups {
+                    domains::backup::sealed_destination(&mut c, *destination, intent.requester)?;
+                }
                 ensure!(
                     p.namespace == page::namespace_id(namespace)?,
                     "sealed preparation namespace differs"

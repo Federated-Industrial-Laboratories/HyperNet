@@ -168,6 +168,8 @@ fn creation_value(value: V, state: &State, created: &VersionRef, replay: bool) -
     Ok(array(fields))
 }
 pub(super) enum Operation {
+    PolicyContext,
+    Policy(crate::authority_policies::Operation),
     GrantReview(crate::authority_grant_review::Operation),
     Tier(crate::authority_tiers::Operation),
     Runtime(crate::authority_runtime_activation::Operation),
@@ -210,6 +212,11 @@ impl Operation {
                 intent,
             )?));
         }
+        if crate::authority_policies::Operation::handles(&intent.action) {
+            return Ok(Self::Policy(crate::authority_policies::Operation::parse(
+                intent,
+            )?));
+        }
         if crate::authority_runtime_activation::Operation::handles(&intent.action) {
             return Ok(Self::Runtime(
                 crate::authority_runtime_activation::Operation::parse(intent)?,
@@ -246,6 +253,20 @@ impl Operation {
             return Ok(Self::Mutation(Mutation::parse(intent)?));
         }
         let decoded = wire::decode(&intent.parameters)?;
+        if intent.action == "AuthorityPolicyContext" {
+            let f = decoded.array(4)?;
+            ensure!(
+                f[0].uint()? == 200
+                    && f[1].uint()? == 1
+                    && f[2].text()? == intent.action
+                    && f[3].fixed::<32>()? == config.scope.network
+                    && intent.resource == config.scope.network
+                    && intent.revision == 0
+                    && intent.expected.is_empty(),
+                "invalid policy-only discovery"
+            );
+            return Ok(Self::PolicyContext);
+        }
         let f = decoded.array(6)?;
         ensure!(
             f[0].uint()? == 200 && f[1].uint()? == 1 && f[2].text()? == intent.action,
@@ -315,6 +336,10 @@ impl Operation {
     }
     pub fn grant(&self) -> [u8; 32] {
         match self {
+            Self::PolicyContext => {
+                unreachable!("policy-only discovery uses authenticated stream identity")
+            }
+            Self::Policy(policy) => policy.grant,
             Self::GrantReview(_) => unreachable!("grant review uses its inner authority"),
             Self::Tier(tier) => tier.grant(),
             Self::Runtime(_) => unreachable!("runtime activation has its own authority"),
@@ -377,6 +402,34 @@ pub(super) fn evaluate(
         replay,
         recipient,
     } = evaluation;
+    if matches!(operation, Operation::PolicyContext) {
+        let g = Governance::parse(
+            config.scope.network,
+            config.scope.incarnation,
+            &state.records,
+        )?;
+        let pair = [100, 114]
+            .into_iter()
+            .map(|kind| Ok(g.record_bytes(kind, config.scope.network)?.to_vec()))
+            .collect::<Result<Vec<_>>>()?;
+        let refs =
+            Governance::record_versions(config.scope.network, config.scope.incarnation, &pair)?;
+        return Ok(Decision {
+            code: 0,
+            value: value(
+                "AuthorityPolicyContext",
+                &refs,
+                array(pair.iter().map(|v| b(v)).collect()),
+            ),
+            expires: request_expires,
+            records: None,
+            domains: None,
+            terminal: None,
+            restrictions: Default::default(),
+            admissions: vec![],
+            created: None,
+        });
+    }
     if let Operation::GrantReview(review) = operation {
         return super::tier_evaluation::grant_evaluate(
             review,
@@ -409,12 +462,13 @@ pub(super) fn evaluate(
         );
     }
     let deployments = state.deployments()?;
-    let domain_reserved = state.domains.extend_reservations(&state.reservations);
+    let effective = state.effective_reservations()?;
+    let domain_reserved = state.domains.extend_reservations(&effective);
     let reserved = deployments.extend_reservations(&domain_reserved);
     if let Operation::Runtime(runtime) = operation {
         let mut selected = runtime.authorise(
             &state.records,
-            &state.reservations,
+            &effective,
             intent,
             recipient,
             evaluated,
@@ -455,7 +509,7 @@ pub(super) fn evaluate(
     }
     if let Operation::Domain(domain) = operation {
         if !domain
-            .expected_recipient(&state.domains, &state.records, &state.reservations, intent)
+            .expected_recipient(&state.domains, &state.records, &effective, intent)
             .is_ok_and(|expected| expected == recipient)
         {
             // An absent or withdrawn service is an ordinary denial at committed order.
@@ -475,7 +529,7 @@ pub(super) fn evaluate(
         let mut selected = domain.prepare_with_inputs(
             &state.domains,
             &state.records,
-            &state.reservations,
+            &effective,
             intent,
             evaluated,
             replay,
@@ -538,6 +592,53 @@ pub(super) fn evaluate(
             created: None,
         });
     }
+    if let Operation::Policy(policy) = operation {
+        let mut selected = crate::authority_policies::authorise(
+            policy,
+            &state.records,
+            &reserved,
+            intent,
+            evaluated,
+            replay,
+        )?;
+        if !replay
+            && !within_floor(
+                (
+                    policy.snapshot.epoch,
+                    policy.snapshot.height,
+                    policy.snapshot.state,
+                ),
+                config,
+                state,
+                prior,
+            )
+        {
+            selected.code = 12;
+            selected.records = None;
+            selected.value = V::Null;
+        }
+        let created = if selected.records.is_some() {
+            Some(crate::authority_policies::record_reference(
+                &policy.policy,
+                intent.network,
+                intent.incarnation,
+                100,
+            )?)
+        } else {
+            None
+        };
+        return Ok(Decision {
+            code: selected.code,
+            value: selected.value,
+            expires: selected.expires_ms.min(request_expires),
+            records: selected.records,
+            domains: None,
+            restrictions: Default::default(),
+            terminal: None,
+            admissions: vec![],
+            created,
+        });
+    }
     if let Operation::Deployment(deployment) = operation {
         let retained = state.evidence.deployment_offer(intent.resource)?;
         let mut selected = deployment.authorise(
@@ -572,7 +673,23 @@ pub(super) fn evaluate(
         let mut changed = None;
         if selected.code == 0 && !replay && !selected.records.is_empty() {
             let mut records = state.records.clone();
-            records.extend(selected.records.clone());
+            for replacement in &selected.records {
+                let reference = crate::authority_deployment_records::reference(replacement)?;
+                let mut retained = Vec::with_capacity(records.len() + 1);
+                for record in records {
+                    let value = wire::decode(&record)?;
+                    let fields = value.list(32)?;
+                    let kind = fields[0].uint()?;
+                    let replaces = matches!(kind, 105 | 117 | 129)
+                        && crate::authority_deployment_records::reference(&record)?.index()
+                            == reference.index();
+                    if !replaces {
+                        retained.push(record);
+                    }
+                }
+                retained.push(replacement.clone());
+                records = retained;
+            }
             membership::sort_records(&mut records)?;
             if records.len() > crate::authority_capacity::MAX_RECORDS {
                 selected.refuse(2)
@@ -784,6 +901,8 @@ pub(super) fn evaluate(
         }
     };
     match operation {
+        Operation::PolicyContext => unreachable!("policy-only discovery is evaluated above"),
+        Operation::Policy(_) => unreachable!("policy operations are evaluated above"),
         Operation::GrantReview(_) => unreachable!("grant reviews are evaluated above"),
         Operation::Tier(_) => unreachable!("tier operations are evaluated above"),
         Operation::Runtime(_) => unreachable!("runtime operations are evaluated above"),

@@ -18576,8 +18576,8 @@ DEALINGS IN THE SOFTWARE.
 
 
 ========================================================================
-rustls 0.23.45
-Source: https://crates.io/crates/rustls/0.23.45
+rustls 0.23.46
+Source: https://crates.io/crates/rustls/0.23.46
 Declared licence: Apache-2.0 OR ISC OR MIT
 
 LICENSE-APACHE
@@ -18828,6 +18828,7 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+
 
 
 ========================================================================

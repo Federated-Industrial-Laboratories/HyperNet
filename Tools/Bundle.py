@@ -17,6 +17,8 @@ import sys
 import tarfile
 import tempfile
 import uuid
+sys.dont_write_bytecode = True
+import PackageTrust
 
 PRODUCT = 'HyperNet'
 VERSION = '0.7.5'
@@ -166,8 +168,8 @@ def public_key(path):
     return fields[0] + ' ' + fields[1]
 
 
-def verify_signature(archive, signature, key_path, temporary, ssh_keygen):
-    key = public_key(key_path)
+def verify_signature(archive, signature, key_path, temporary, ssh_keygen, key_value=None):
+    key = key_value if key_value is not None else public_key(key_path)
     signers = temporary / 'AllowedSigners'
     signers.write_text(f'{PRINCIPAL} namespaces="{NAMESPACE}" {key}\n')
     signers.chmod(0o600)
@@ -348,26 +350,32 @@ def rename_new(source, destination):
         os.close(fd)
 
 
-def prepared(args, temporary):
+def prepared(args, temporary, key=None):
     archive = temporary / 'Archive.tar'
     signature = temporary / 'Archive.tar.sig'
     copy_private(args.archive, archive, MAX_ARCHIVE)
     copy_private(args.signature, signature, 32768)
-    verify_signature(archive, signature, args.public_key, temporary, args.ssh_keygen)
+    verify_signature(archive, signature, args.public_key, temporary, args.ssh_keygen, key)
     return archive, signature
 
 
 def install(args):
+    with PackageTrust.Admission(sys.modules[__name__], args) as admission:
+        return install_current(args, admission)
+
+
+def install_current(args, admission):
     prefix = private_parent(args.prefix)
     require(not prefix.exists() and not prefix.is_symlink(), 'Installation prefix already exists')
     require(os.geteuid() != 0, 'Install for the dedicated rootless operator, not root')
     with tempfile.TemporaryDirectory(prefix='HyperNetInstall', dir=prefix.parent) as temporary_name:
         temporary = Path(temporary_name)
-        archive, signature = prepared(args, temporary)
+        archive, signature = prepared(args, temporary, admission.trust['publicKey'])
         staged = temporary / 'Install'
         staged.mkdir(mode=0o700)
         manifest, original = parse_archive(archive, staged)
         runtime_matches(manifest)
+        admission.check(archive, manifest, original, temporary)
         require((staged / 'ImageId.txt').read_text().strip() == manifest['metadata']['imageId'], 'Packaged image ID differs from the manifest')
         run(['podman', 'load', '--input', str(staged / manifest['metadata']['imageArchive'])])
         image_matches(manifest)
@@ -391,11 +399,13 @@ def install(args):
             os.fsync(fd)
         finally:
             os.close(fd)
+        admission.commit()
+        admission.fresh()
         rename_new(staged, prefix)
     return {'product': PRODUCT, 'version': manifest['version'], 'prefix': str(prefix), 'imageId': manifest['metadata']['imageId']}
 
 
-def installed_manifest(args):
+def installed_manifest(args, admission=None):
     prefix = private_parent(args.prefix)
     info = prefix.lstat()
     require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o700, 'Installation prefix is not private')
@@ -431,7 +441,33 @@ def installed_manifest(args):
                     require(info.st_size == entry['size'] and stat.S_IMODE(info.st_mode) == entry['mode'] and digest_file(path, MAX_ARCHIVE) == entry['sha256'], 'Installed file was modified')
                     found.add(name)
         require(found == set(expected), 'Installed file is missing')
+        if admission is not None:
+            admission.check(archive, manifest, original, temporary)
         return manifest, expected, directories
+
+
+def admit_installed(args):
+    """Authenticate a stopped cutover without changing the retained update floor."""
+    with PackageTrust.Admission(sys.modules[__name__], args) as admission:
+        manifest = installed_manifest(args, admission)[0]
+        require(admission.target['sequence'] == admission.trust['sequence']
+                and admission.target_digest == admission.trust['targetDigest'],
+                'Cutover requires the exact retained installed target')
+        admission.fresh()
+        return {'manifest': manifest,
+                'trustDigest': PackageTrust.digest(sys.modules[__name__], admission.trust),
+                'targetDigest': admission.target_digest,
+                **{name: admission.target[name] for name in
+                   ('notBefore', 'expires', 'rootGeneration', 'sequence')}}
+
+
+def inspect_installed_target(args):
+    inspection = PackageTrust.TargetInspection(sys.modules[__name__], args)
+    manifest = installed_manifest(args, inspection)[0]
+    return {'manifest': manifest, 'activationAllowed': False,
+            'targetDigest': inspection.target_digest,
+            **{name: inspection.target[name] for name in
+               ('notBefore', 'expires', 'rootGeneration', 'rootPin', 'sequence')}}
 
 
 def remove(args):
@@ -509,6 +545,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--ssh-keygen', default='/usr/bin/ssh-keygen', help='Independently trusted OpenSSH verifier')
     commands = parser.add_subparsers(dest='command', required=True)
+    PackageTrust.arguments(commands)
     package = commands.add_parser('Create')
     package.add_argument('--package', required=True)
     package.add_argument('--output', required=True)
@@ -520,12 +557,22 @@ def main():
         option.add_argument('--public-key', required=True)
         if command == 'Install':
             option.add_argument('--prefix', required=True)
-    for command in ('VerifyInstalled', 'Remove'):
+            option.add_argument('--trust-directory', required=True)
+            option.add_argument('--policy', required=True)
+            option.add_argument('--policy-signature', required=True)
+    for command in ('VerifyInstalled', 'AdmitInstalled', 'InspectInstalledTarget', 'Remove'):
         option = commands.add_parser(command)
         option.add_argument('--prefix', required=True)
         option.add_argument('--public-key', required=True)
+        if command == 'AdmitInstalled':
+            option.add_argument('--trust-directory', required=True)
+        if command in ('AdmitInstalled', 'InspectInstalledTarget'):
+            option.add_argument('--policy', required=True)
+            option.add_argument('--policy-signature', required=True)
     args = parser.parse_args()
-    if args.command == 'Create':
+    if args.command in PackageTrust.COMMANDS:
+        result = PackageTrust.trust_command(sys.modules[__name__], args)
+    elif args.command == 'Create':
         result = create(args)
     elif args.command == 'Install':
         result = install(args)
@@ -533,6 +580,10 @@ def main():
         result = remove(args)
     elif args.command == 'VerifyInstalled':
         result = installed_manifest(args)[0]
+    elif args.command == 'AdmitInstalled':
+        result = admit_installed(args)
+    elif args.command == 'InspectInstalledTarget':
+        result = inspect_installed_target(args)
     else:
         with tempfile.TemporaryDirectory(prefix='HyperNetVerify') as temporary_name:
             temporary = Path(temporary_name)

@@ -43,7 +43,7 @@ pub fn local_consent(
     manifest.validate()?;
     ensure!(
         (1..=8).contains(&role)
-            && generation > 0
+            && generation == manifest.generation
             && manifest.services().contains_key(&role)
             && (4..=32).contains(&artifacts.len())
             && artifacts.keys().all(|n| artifact_name(n))

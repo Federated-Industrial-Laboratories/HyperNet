@@ -83,10 +83,12 @@ impl Context<'_> {
             r.operator == p.operator
                 && r.services.get(&5) == Some(&p.service)
                 && r.transports.get(&p.service) == Some(&p.identity.transport_key)
-                && r.profile == p.deployment_profile
-                && r.consent == p.consent,
+                && p.deployment_profile.digest == wire::digest(&p.manifest.desired()?)
+                && p.consent.digest == wire::digest(&p.manifest.unsigned_consent(0)?),
             "route differs from admitted service, transport or consent"
         );
+        let effective =
+            crate::authority_operational_consent::validity(&r.manifest, &p.manifest, p.validity)?;
         self.dependencies
             .extend([r.reference.clone(), r.profile.clone(), r.consent.clone()]);
         if let Some(w) = self.index.withdrawals.get(&r.deployment) {
@@ -99,10 +101,10 @@ impl Context<'_> {
             let span = f[16].array(2)?;
             let validity = (span[0].uint()?, span[1].uint()?);
             ensure!(
-                current(self.at, p.validity)
+                current(self.at, effective)
                     && current(self.at, validity)
-                    && p.validity.0 >= validity.0
-                    && p.validity.1 <= validity.1
+                    && effective.0 >= validity.0
+                    && effective.1 <= validity.1
                     && f[11].list(16)?.iter().any(|v| v.array(2).is_ok_and(|f| f[0]
                         .fixed::<32>()
                         .ok()
@@ -110,7 +112,7 @@ impl Context<'_> {
                         && f[1].fixed::<32>().ok() == Some(p.endpoint))),
                 "route profile exceeds current local consent"
             );
-            self.expires = self.expires.min(p.validity.1).min(validity.1);
+            self.expires = self.expires.min(effective.1).min(validity.1);
             self.capability(&r.grant, r.registrar, 13, (5, r.deployment))?;
         }
         Ok(())

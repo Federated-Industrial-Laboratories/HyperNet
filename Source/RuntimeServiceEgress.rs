@@ -54,7 +54,12 @@ pub(crate) fn configuration(manifest: &Manifest, profile: &RegisteredProfile) ->
         maximum_bytes: profile.limits.bytes,
         duration_ms: profile.limits.duration_ms,
         idle_ms: profile.limits.idle_ms,
-        expires_ms: profile.validity.1.min(manifest.validity.1),
+        expires_ms: crate::authority_operational_consent::validity(
+            manifest,
+            &profile.manifest,
+            profile.validity,
+        )?
+        .1,
     })
     .map_err(Into::into)
 }

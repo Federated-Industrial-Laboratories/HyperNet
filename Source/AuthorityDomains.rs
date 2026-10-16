@@ -8,6 +8,8 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use std::collections::BTreeMap;
 
+#[path = "AuthorityBackup.rs"]
+pub mod backup;
 #[path = "AuthorityDomainFederation.rs"]
 pub mod federation;
 #[path = "AuthorityDomainMail.rs"]
@@ -46,7 +48,7 @@ pub(crate) fn id(value: &V) -> Result<Digest> {
 /// Domain references extend governance only with explicitly implemented record kinds.
 pub fn version(value: &V) -> Result<VersionRef> {
     let fields = value.array(4)?;
-    if !matches!(fields[0].uint()?, 104 | 107..=111 | 113 | 132..=168) {
+    if !matches!(fields[0].uint()?, 104 | 107..=111 | 113 | 132..=171) {
         return governance_version(value);
     }
     let reference = VersionRef {
@@ -146,6 +148,9 @@ impl Record {
             }
             150..=157 => {
                 federation::validate_record(kind, &f[7], network, incarnation, lookup, generation)?
+            }
+            169..=171 => {
+                backup::validate_record(kind, &f[7], network, incarnation, lookup, generation)?
             }
             164 => publication_modes::validate(&f[7], lookup)?,
             165..=168 => {
@@ -273,6 +278,7 @@ impl State {
             page::validate_state(&state)?;
         }
         federation::validate_state(&state, partial)?;
+        backup::validate_state(&state, partial)?;
         sealed_identity::validate_state(&state, partial)?;
         Ok(state)
     }
@@ -391,6 +397,7 @@ impl State {
 
 #[derive(Clone, Debug)]
 pub enum Command {
+    Backup(backup::Command),
     Route(routes::Command),
     SealedIdentity(sealed_identity::Command),
     SealedPublication(sealed_publication::Command),
@@ -399,6 +406,11 @@ pub enum Command {
     Mail(mail::Command),
     Page(page::Command),
     Federation(federation::Command),
+}
+impl From<backup::Command> for Command {
+    fn from(c: backup::Command) -> Self {
+        Self::Backup(c)
+    }
 }
 impl From<routes::Command> for Command {
     fn from(c: routes::Command) -> Self {
@@ -461,7 +473,9 @@ impl Command {
     pub fn parse(value: &V, n: Digest, i: Digest) -> Result<Self> {
         let fields = value.list(10)?;
         let name = fields.first().context("empty domain command")?.text()?;
-        if name.starts_with("Route") {
+        if name.starts_with("Backup") {
+            Ok(Self::Backup(backup::Command::parse(value, n, i)?))
+        } else if name.starts_with("Route") {
             Ok(Self::Route(routes::Command::parse(value, n, i)?))
         } else if name.starts_with("SealedPublication") {
             Ok(Self::SealedPublication(sealed_publication::Command::parse(
@@ -485,6 +499,7 @@ impl Command {
     }
     pub fn name(&self) -> &'static str {
         match self {
+            Self::Backup(c) => c.name(),
             Self::Route(c) => c.name(),
             Self::SealedPublication(c) => c.name(),
             Self::SealedIdentity(c) => c.name(),
@@ -497,6 +512,7 @@ impl Command {
     }
     pub fn value(&self) -> V {
         match self {
+            Self::Backup(c) => c.value(),
             Self::Route(c) => c.value(),
             Self::SealedPublication(c) => c.value(),
             Self::SealedIdentity(c) => c.value(),
@@ -509,6 +525,7 @@ impl Command {
     }
     pub fn resource(&self) -> Digest {
         match self {
+            Self::Backup(c) => c.resource(),
             Self::Route(c) => c.resource(),
             Self::SealedPublication(c) => c.resource(),
             Self::SealedIdentity(c) => c.resource(),
@@ -521,6 +538,7 @@ impl Command {
     }
     pub fn mutation(&self) -> bool {
         match self {
+            Self::Backup(c) => c.mutation(),
             Self::Route(c) => c.mutation(),
             Self::SealedPublication(c) => c.mutation(),
             Self::SealedIdentity(c) => c.mutation(),
@@ -533,6 +551,7 @@ impl Command {
     }
     pub fn mutation_kind(&self) -> Option<u64> {
         match self {
+            Self::Backup(c) => c.mutation_kind(),
             Self::Route(c) => c.mutation_kind(),
             Self::Ssh(c) => {
                 if c.mutation() {
@@ -635,7 +654,7 @@ impl Operation {
     ) -> Result<Key> {
         match &self.command {
             Command::SealedPublication(_) | Command::SealedIdentity(_) => Ok(intent.requester),
-            Command::Ssh(_) | Command::Route(_) => Ok(intent.requester),
+            Command::Ssh(_) | Command::Route(_) | Command::Backup(_) => Ok(intent.requester),
             Command::Mail(c) => mail::expected_recipient(c, state, records, reserved, intent),
             Command::Page(c) => page::expected_recipient(c, state, records, reserved, intent),
             Command::Federation(c) => {
@@ -698,6 +717,9 @@ impl Operation {
             "domain evaluation input closure differs"
         );
         match &self.command {
+            Command::Backup(c) => {
+                backup::evaluate(self, c, state, records, reserved, intent, at, replay, exact)
+            }
             Command::Route(c) => {
                 routes::evaluate(self, c, state, records, reserved, intent, at, replay, exact)
             }

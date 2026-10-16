@@ -115,7 +115,8 @@ impl Record {
         ensure!(fields.len() >= 6, "truncated governance record");
         let kind = fields[0].uint()?;
         let arity = match kind {
-            100 | 102 | 129 => 17,
+            100 | 102 => 17,
+            129 => 18,
             101 => 14,
             114 => 13,
             125 => 12,
@@ -272,7 +273,7 @@ impl Record {
             117 => {
                 id(&f[7])?;
                 ensure!(
-                    f[8].uint()? == 1 && f[15].uint()? == 1,
+                    f[8].uint()? == 1 && f[15].uint()? == f[4].uint()?,
                     "unsupported runtime generation"
                 );
                 f[9].list(9)?;
@@ -319,6 +320,35 @@ impl Record {
                     "deployment references differ"
                 );
                 wire::valid_key(&f[14].fixed()?)?;
+                let manifest = crate::runtime_manifest::Manifest::parse(f[17].bytes()?)?;
+                ensure!(
+                    manifest.network == network
+                        && manifest.incarnation == incarnation
+                        && manifest.deployment == id(&f[6])?
+                        && manifest.host == id(&f[7])?
+                        && manifest.operator == f[8].fixed::<32>()?
+                        && manifest.generation == f[4].uint()?
+                        && manifest.clock.monitor_key == f[11].fixed::<32>()?
+                        && manifest
+                            .services()
+                            .into_iter()
+                            .map(|(r, k)| V::Array(vec![V::Uint(r), V::Bytes(k.to_vec())]))
+                            .collect::<Vec<_>>()
+                            == f[9].list(9)?
+                        && manifest
+                            .owned_transports()?
+                            .into_iter()
+                            .map(|(k, t)| V::Array(vec![
+                                V::Bytes(k.to_vec()),
+                                V::Bytes(t.to_vec())
+                            ]))
+                            .collect::<Vec<_>>()
+                            == f[10].list(9)?
+                        && reference(&f[12])?.digest == wire::digest(&manifest.desired()?)
+                        && reference(&f[13])?.digest
+                            == wire::digest(&manifest.unsigned_consent(0)?),
+                    "deployment admission differs from exact current manifest"
+                );
             }
             130 => {
                 ensure!(
@@ -335,19 +365,20 @@ impl Record {
             }
             _ => unreachable!(),
         }
-        if !matches!(kind, 105 | 117 | 131) && f[arity - 1] != V::Null {
-            snapshot(&f[arity - 1])?;
+        let snapshot_index = if kind == 129 { 16 } else { arity - 1 };
+        if !matches!(kind, 105 | 117 | 131) && f[snapshot_index] != V::Null {
+            snapshot(&f[snapshot_index])?;
         }
         ensure!(
-            f[4].uint()? == 1 || f[arity - 1] != V::Null,
+            f[4].uint()? == 1 || f[snapshot_index] != V::Null,
             "updated governance requires a snapshot"
         );
         ensure!(
-            !matches!(kind, 125..=130) || f[arity - 1] != V::Null,
+            !matches!(kind, 125..=130) || f[snapshot_index] != V::Null,
             "membership admission or grant revocation requires a snapshot"
         );
         ensure!(
-            !matches!(kind, 105 | 117 | 127 | 128 | 129 | 130 | 131) || f[4].uint()? == 1,
+            !matches!(kind, 127 | 128 | 130 | 131) || f[4].uint()? == 1,
             "application records are create-only"
         );
         ensure!(
@@ -613,8 +644,11 @@ impl Governance {
             self.exact(expected)?;
         }
         let policy = self.record(100, self.network)?;
-        let mut dependencies =
-            BTreeMap::from([(policy.reference.index(), policy.reference.clone())]);
+        let recovery = self.record(114, self.network)?;
+        let mut dependencies = BTreeMap::from([
+            (policy.reference.index(), policy.reference.clone()),
+            (recovery.reference.index(), recovery.reference.clone()),
+        ]);
         let roots = policy.fields[15]
             .list(16)?
             .iter()

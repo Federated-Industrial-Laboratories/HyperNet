@@ -97,7 +97,7 @@ impl Config {
             manifest.incarnation,
         )?;
         ensure!(
-            profile.manifest == manifest,
+            manifest.permits_definition(&profile.manifest).is_ok(),
             "bridge profile manifest differs"
         );
         let role = manifest
@@ -222,7 +222,11 @@ pub fn initialise(guard: &Guard) -> Result<()> {
 }
 pub async fn run(config: Config, guard: &Guard, active: &mut Active) -> Result<()> {
     ensure!(
-        guard.role == 7 && config.profile.manifest == guard.manifest,
+        guard.role == 7
+            && guard
+                .manifest
+                .permits_definition(&config.profile.manifest)
+                .is_ok(),
         "bridge activation differs"
     );
     let network = tls::Transport::load(&config).context("load Bridge TLS transport")?;

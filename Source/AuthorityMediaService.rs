@@ -96,7 +96,7 @@ impl Config {
             .find(|r| r.role == 2)
             .context("media role absent")?;
         ensure!(
-            profile.manifest == manifest
+            manifest.permits_definition(&profile.manifest).is_ok()
                 && profile.role == 2
                 && role.bind_endpoint_ids.is_empty()
                 && role.outbound_endpoint_ids.is_empty(),
@@ -144,7 +144,10 @@ pub fn initialise(guard: &Guard) -> Result<()> {
     ensure!(guard.role == 2, "media preparation has another role");
     let config = Config::load(Path::new("/Config/ServiceConfig.json"))?;
     ensure!(
-        config.profile.manifest == guard.manifest,
+        guard
+            .manifest
+            .permits_definition(&config.profile.manifest)
+            .is_ok(),
         "media profile differs from local authorization"
     );
     runtime_service_activate::initialise(guard)?;
@@ -205,7 +208,7 @@ fn handle(
     ensure!(payload.len() <= 32768, "media chunk exceeds its bound");
     match request.command() {
         media::Command::MediaAuthorise {
-            effect: media::MediaEffect::Upload,
+            effect: media::MediaEffect::Upload | media::MediaEffect::Repair,
             bytes,
             digest,
             ..
@@ -342,7 +345,11 @@ fn handle(
 pub async fn run(config: Config, guard: &Guard, active: &mut Active) -> Result<()> {
     active.check(guard)?;
     ensure!(
-        guard.role == 2 && config.profile.manifest == guard.manifest,
+        guard.role == 2
+            && guard
+                .manifest
+                .permits_definition(&config.profile.manifest)
+                .is_ok(),
         "media service differs from activated role"
     );
     let mut disk = disk::Disk::open(

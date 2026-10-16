@@ -57,7 +57,7 @@ pub struct Setup {
     pub state_bytes: u64,
     #[arg(long, default_value_t = 3600)]
     pub lifetime_seconds: u64,
-    #[arg(long, default_value = "Session", value_parser = ["Session"])]
+    #[arg(long, default_value = "Session", value_parser = ["Session", "Managed"])]
     pub session_policy: String,
 }
 #[derive(Deserialize)]
@@ -286,7 +286,16 @@ pub fn setup(args: Setup) -> Result<serde_json::Value> {
     config.tls.certificate_authority = "/Config/Tls/Authority.pem".into();
     let created = now()?;
     let operator = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+    if args.session_policy == "Managed" {
+        let Source::Signed { kernel_boot, .. } = &mut config.clock else {
+            unreachable!()
+        };
+        *kernel_boot = "CurrentHost".into();
+    }
     let manifest = Manifest {
+        generation: 1,
+        previous_profile: None,
+        previous_consent: None,
         version: 1,
         deployment: random_id(),
         network: hex::encode(configuration.scope.network),
@@ -343,6 +352,7 @@ pub fn setup(args: Setup) -> Result<serde_json::Value> {
         "Work/Config/Tls",
         "Authorization",
         "Diagnostics",
+        "Manager",
     ] {
         directory(&root.join(name))?;
     }
@@ -379,6 +389,7 @@ pub fn setup(args: Setup) -> Result<serde_json::Value> {
     super::files::save(&root.join("Generation.json"), &1u64)?;
     super::files::save(&root.join("SignerGeneration.json"), &1u64)?;
     let state = State::new(&profile)?;
+    crate::runtime_audit::initialise(root, &profile.manifest.canonical()?)?;
     super::model::save(root, &state)?;
     Ok(
         json!({"status":"AwaitingConsent","generation":state.generation,"profileDigest":state.profile_digest,"deployment":profile.deployment,"signer":profile.signer,"expires":profile.expires,"backend":"BasicHotStuff","networkServing":false,"minimumSignerGeneration":1}),

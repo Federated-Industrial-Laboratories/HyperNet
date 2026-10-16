@@ -30,14 +30,16 @@ fn prefix(value: &V, kind: u64, count: usize, n: Digest, i: Digest) -> Result<&[
             && f[1].uint()? == 1
             && f[2].fixed::<32>()? == n
             && f[3].fixed::<32>()? == i
-            && f[4].uint()? == 1
-            && f[5] == V::Null,
+            && f[4].uint()? > 0
+            && ((f[4].uint()? == 1 && f[5] == V::Null)
+                || (kind == 129 && f[4].uint()? > 1 && f[5].fixed::<32>()? != [0; 32])),
         "deployment record context differs"
     );
     Ok(f)
 }
 #[derive(Clone, Debug)]
 pub struct Registration {
+    pub manifest: crate::runtime_manifest::Manifest,
     pub deployment: Digest,
     pub host: Digest,
     pub operator: Key,
@@ -54,7 +56,7 @@ pub struct Registration {
 impl Registration {
     pub fn parse(bytes: &[u8], n: Digest, i: Digest) -> Result<Self> {
         let value = wire::decode(bytes)?;
-        let f = prefix(&value, 129, 17, n, i)?;
+        let f = prefix(&value, 129, 18, n, i)?;
         let deployment = f[6].fixed()?;
         let host = f[7].fixed()?;
         let operator = f[8].fixed()?;
@@ -108,7 +110,23 @@ impl Registration {
             "deployment reference kind or identity differs"
         );
         Snapshot::parse(&f[16])?;
+        let manifest = crate::runtime_manifest::Manifest::parse(f[17].bytes()?)?;
+        ensure!(
+            manifest.network == n
+                && manifest.incarnation == i
+                && manifest.deployment == deployment
+                && manifest.host == host
+                && manifest.operator == operator
+                && manifest.services() == services
+                && manifest.owned_transports()? == transports
+                && manifest.clock.monitor_key == monitor
+                && manifest.generation == f[4].uint()?
+                && reference(&manifest.desired()?)? == profile
+                && reference(&manifest.unsigned_consent(0)?)? == consent,
+            "Admission manifest differs from its exact resources and operator consent"
+        );
         Ok(Self {
+            manifest,
             deployment,
             host,
             operator,

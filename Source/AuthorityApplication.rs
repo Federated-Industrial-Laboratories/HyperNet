@@ -114,10 +114,20 @@ impl State {
                     !genesis
                         && matches!(
                             version.kind,
-                            101 | 102 | 105 | 117 | 125 | 126 | 127 | 128 | 129 | 130
+                            100 | 101 | 102 | 105 | 114 | 117 | 125 | 126 | 127 | 128 | 129 | 130
                         ),
                     "unsupported post-genesis governance record"
                 );
+                if matches!(version.kind, 100 | 114)
+                    && let Some(original) = mutation_evidence::Evidence::genesis_policy(
+                        evidence_value.context("policy history has no evidence")?,
+                        version.kind,
+                        config.scope.network,
+                        config.scope.incarnation,
+                    )?
+                {
+                    initial.push(b(&original));
+                }
                 if version.kind == 101
                     && let Some(original) = mutation_evidence::Evidence::genesis_tier(
                         evidence_value.context("tier history has no evidence")?,
@@ -170,14 +180,35 @@ impl State {
         } else {
             mutation_evidence::Evidence::default()
         };
-        let policy = wire::decode(governance.record_bytes(100, config.scope.network)?)?;
-        for root in policy.array(17)?[15].list(16)? {
-            let grant = wire::decode(governance.record_bytes(102, root.fixed()?)?)?;
-            member_keys.insert(grant.array(17)?[8].fixed()?);
+        let effective_reservations = evidence.recovery_reservations(&reservations)?;
+        for (bytes, version) in records.iter().zip(&versions) {
+            let value = wire::decode(bytes)?;
+            let fields = value.list(32)?;
+            if matches!(version.kind, 125 | 127) || version.kind == 102 && fields[13] != V::Null {
+                let key = fields[if version.kind == 125 {
+                    7
+                } else if version.kind == 127 {
+                    6
+                } else {
+                    8
+                }]
+                .fixed()?;
+                ensure!(
+                    !effective_reservations.contains(&key),
+                    "membership or delegated grant reuses retained custody key"
+                );
+            }
         }
+        // Requester history persists when policy removes a bootstrap administrator's authority.
+        member_keys.extend(
+            reservations
+                .0
+                .iter()
+                .filter_map(|(role, key)| (*role == 4).then_some(*key)),
+        );
         let deployments = crate::authority_deployment_records::Index::parse(
             &records,
-            &reservations,
+            &effective_reservations,
             config.scope.network,
             config.scope.incarnation,
         )?;
@@ -222,7 +253,7 @@ impl State {
                 crate::authority_epoch::Origin::parse(&f[12], &scope)?,
             )
         };
-        domains.validate_roles(&records, &reservations)?;
+        domains.validate_roles(&records, &effective_reservations)?;
         let state = Self {
             domains,
             terminal,
@@ -236,12 +267,15 @@ impl State {
         state.capacity()?;
         Ok(state)
     }
+    pub(super) fn effective_reservations(&self) -> Result<Reservations> {
+        self.evidence.recovery_reservations(&self.reservations)
+    }
     fn deployments(&self) -> Result<crate::authority_deployment_records::Index> {
         let value = wire::decode(&self.records[0])?;
         let f = value.list(32)?;
         crate::authority_deployment_records::Index::parse(
             &self.records,
-            &self.reservations,
+            &self.effective_reservations()?,
             f[2].fixed()?,
             f[3].fixed()?,
         )
@@ -931,3 +965,7 @@ mod page_application_tests;
 #[cfg(test)]
 #[path = "AuthorityTierTests.rs"]
 mod tier_tests;
+
+#[cfg(test)]
+#[path = "AuthorityPolicyApplicationTests.rs"]
+mod policy_tests;

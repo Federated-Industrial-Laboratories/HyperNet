@@ -93,6 +93,7 @@ impl Fixture {
         super::files::save(&root.join("Generation.json"), &1u64).unwrap();
         super::files::save(&root.join("SignerGeneration.json"), &1u64).unwrap();
         save(&root, &State::new(&profile).unwrap()).unwrap();
+        crate::runtime_audit::initialise(&root, &profile.manifest.canonical().unwrap()).unwrap();
         Self { root, profile }
     }
     fn request(&self, operation: Operation) -> Request {
@@ -166,7 +167,7 @@ fn withdrawal_retry_releases_exact_network_at_receipt_capacity() {
     super::containers::network(&f.root, &f.profile, &mut state).unwrap();
     let _network = Network(state.resources[0].id.clone().unwrap());
     let exact_resource = state.resources[0].clone();
-    // Retain prior operation identities and use the final reserved withdrawal slot.
+    // Fill the old receipt window; withdrawal must compact it and retain its exact retry.
     while state.receipts.len() < 121 {
         state.receipts.insert(
             hex::encode(rand::random::<[u8; 16]>()),
@@ -182,7 +183,7 @@ fn withdrawal_retry_releases_exact_network_at_receipt_capacity() {
     assert!(control::dispatch(&f.root, request.clone()).is_err());
     let (_, failed) = load(&f.root).unwrap();
     assert_eq!(failed.withdrawal_generation, 1);
-    assert_eq!(failed.receipts.len(), 122);
+    assert_eq!(failed.receipts.len(), 64);
     assert_eq!(failed.resources.len(), 1);
     assert!(failed.accepted_consent.is_none());
     assert!(control::dispatch(&f.root, request.clone()).is_err());
@@ -199,7 +200,7 @@ fn withdrawal_retry_releases_exact_network_at_receipt_capacity() {
     assert_eq!(finished.status, "Withdrawn");
     assert_eq!(finished.withdrawal_generation, 1);
     assert_eq!(withdrawal(&f.root).unwrap(), 1);
-    assert_eq!(finished.receipts.len(), 122);
+    assert_eq!(finished.receipts.len(), 64);
     assert!(finished.resources.is_empty());
     assert_eq!(signer_generation(&f.root).unwrap(), 1);
     assert!(verify_consent(&f.root, &f.profile, &finished).is_err());
@@ -207,8 +208,6 @@ fn withdrawal_retry_releases_exact_network_at_receipt_capacity() {
         control::dispatch(&f.root, request.clone()).unwrap(),
         success
     );
-    assert!(control::dispatch(&f.root, f.request(Operation::Start)).is_err());
-
     // Recover a crash after network removal but before the final journal update.
     let mut interrupted = finished;
     interrupted.resources.push(exact_resource);
@@ -223,8 +222,9 @@ fn withdrawal_retry_releases_exact_network_at_receipt_capacity() {
     let (_, final_state) = load(&f.root).unwrap();
     assert!(final_state.resources.is_empty());
     assert!(final_state.pending.is_none());
-    assert_eq!(final_state.receipts.len(), 122);
+    assert_eq!(final_state.receipts.len(), 64);
     assert_eq!(final_state.withdrawal_generation, 1);
+    assert!(control::dispatch(&f.root, f.request(Operation::Start)).is_err());
 }
 #[test]
 fn installed_profile_refuses_hidden_mounts_unsigned_clock_and_non_ipv4_peers() {
@@ -245,4 +245,43 @@ fn installed_profile_refuses_hidden_mounts_unsigned_clock_and_non_ipv4_peers() {
         .artifacts
         .insert("Work/Config/Unexpected".into(), hex::encode([27; 32]));
     assert!(altered.validate(&f.root).is_err());
+}
+
+#[test]
+fn interrupted_successor_withdrawal_exports_permanent_resource_binding() {
+    let f = Fixture::new();
+    control::dispatch(&f.root, f.request(Operation::Consent)).unwrap();
+    let request = f.request(Operation::Withdraw);
+    let previous = f.profile.manifest.canonical().unwrap();
+    let mut successor = previous.clone();
+    successor.generation = 2;
+    successor.previous_profile = Some(crate::trust_wire::digest(&previous.desired().unwrap()));
+    successor.previous_consent = Some(crate::trust_wire::digest(
+        &previous.unsigned_consent(0).unwrap(),
+    ));
+    successor.validity.1 += 1000;
+    super::files::save(&f.root.join("Transition.json"), &serde_json::json!({
+        "operation":hex::encode([21;16]),"digest":hex::encode([22;32]),
+        "proposal":{"root":f.root,"service":false,"predecessor":f.profile.configuration_digest().unwrap(),
+            "previous":previous,"successor":successor,"executable":"/Unused/HyperNet","package":null},
+        "replacements":{},"authority":f.profile,"service":null,"launchIdentity":null,
+        "initialised":false,"lifecycleGeneration":2,"completed":false
+    })).unwrap();
+    control::dispatch(&f.root, request).unwrap();
+    let result = control::withdrawal_receipt(&f.root).unwrap();
+    assert_eq!(result["withdrawalGeneration"], 1);
+    let (payload, signatures) = crate::trust_wire::envelope(
+        &public_read(&f.root.join("Authorization/WithdrawalReceipt.cbor"), 4096).unwrap(),
+        1,
+    )
+    .unwrap();
+    let value = crate::trust_wire::decode(&payload).unwrap();
+    let fields = value.array(10).unwrap();
+    assert_eq!(
+        fields[7].fixed::<32>().unwrap(),
+        previous.operational_digest().unwrap()
+    );
+    assert_eq!(signatures[0].0, previous.operator);
+    assert!(load(&f.root).is_err());
+    assert_eq!(signer_generation(&f.root).unwrap(), 1);
 }

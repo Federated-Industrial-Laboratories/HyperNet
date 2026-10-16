@@ -45,6 +45,17 @@ pub enum Command {
     },
     /// Inspect the live local signer without taking its journal lock.
     LiveStatus(Location),
+    /// Apply one exact operator-approved stopped profile successor without replacing signer state.
+    ApplyConsent {
+        #[command(flatten)]
+        location: Location,
+        #[arg(long)]
+        expected_profile_digest: String,
+        #[arg(long)]
+        authorization: PathBuf,
+        #[arg(long)]
+        history_directory: Option<PathBuf>,
+    },
     /// Refresh only the signed monitor's host-boot binding after a real host reboot.
     RefreshClockBoot {
         #[command(flatten)]
@@ -111,6 +122,28 @@ struct Record {
     authorization: Manifest,
     consent_digest: String,
     preparation: Option<epoch::Preparation>,
+    #[serde(default)]
+    appointment_authorization: Option<Manifest>,
+}
+impl Record {
+    fn verify_appointment(
+        &self,
+        terminal: &crate::authority_epoch::ValidatedTerminal,
+    ) -> Result<()> {
+        let appointed = self
+            .appointment_authorization
+            .as_ref()
+            .unwrap_or(&self.authorization);
+        epoch::nomination(appointed, terminal)?;
+        self.authorization
+            .canonical()?
+            .same_operational_identity(&appointed.canonical()?)?;
+        ensure!(
+            self.authorization.generation >= appointed.generation,
+            "Appointed operational generation regressed"
+        );
+        Ok(())
+    }
 }
 struct Deployment {
     directory: PathBuf,
@@ -281,6 +314,7 @@ fn initialise(input: Initialise) -> Result<Json> {
         authorization: approved.manifest,
         consent_digest: approved.consent_digest,
         preparation: None,
+        appointment_authorization: None,
     };
     // One final immutable marker makes incomplete initialisation non-serving.
     files::write_new(&input.directory.join(RECORD), &serde_json::to_vec(&record)?)?;
@@ -320,7 +354,7 @@ fn deployment(directory: &Path) -> Result<Deployment> {
     let configuration = if let Some(preparation) = &record.preparation {
         let (configuration, terminal) =
             preparation.configuration(&bootstrap, &record.bootstrap_digest)?;
-        epoch::nomination(&record.authorization, &terminal)?;
+        record.verify_appointment(&terminal)?;
         configuration
     } else {
         authenticated(&bootstrap, &record.bootstrap_digest)?.0
@@ -388,30 +422,89 @@ fn refresh(
     trust_bootstrap::hex32(expected)?;
     let (mut deployment, engine) = open(input)?;
     ensure!(
-        deployment.record.preparation.is_none(),
-        "Epoch-appointed clock bindings require a fresh committed replacement; consent cannot be mutated locally"
-    );
-    ensure!(
         deployment.record.config_digest == expected,
         "Expected prior configuration digest differs"
     );
-    match &mut deployment.runtime.clock {
-        Source::Signed { kernel_boot, .. } => {
-            ensure!(
-                kernel_boot != host_boot,
-                "Signed clock boot binding is already current"
-            );
-            *kernel_boot = host_boot.to_owned();
-        }
-        Source::Private { .. } => {
-            anyhow::bail!("Private clock sources have no configurable boot binding")
-        }
+    let new = Manifest::read(authorization)?;
+    let Source::Signed { kernel_boot, .. } = &new.config.clock else {
+        anyhow::bail!("Signed clock required")
+    };
+    ensure!(
+        kernel_boot == host_boot,
+        "Clock successor has another host boot"
+    );
+    let mut old_clock = deployment.record.authorization.canonical()?;
+    old_clock.clock.kernel_boot = host_boot.into();
+    let mut candidate = new.canonical()?;
+    candidate.generation = old_clock.generation;
+    candidate.previous_profile = old_clock.previous_profile;
+    candidate.previous_consent = old_clock.previous_consent;
+    ensure!(
+        candidate == old_clock,
+        "Clock refresh cannot alter another operational field"
+    );
+    apply_approved(&mut deployment, &engine, &new, authorization, None)
+}
+fn apply_consent(
+    input: &Location,
+    expected: &str,
+    authorization: &Path,
+    history: Option<&Path>,
+) -> Result<Json> {
+    trust_bootstrap::hex32(expected)?;
+    let (mut deployment, engine) = open(input)?;
+    let new = Manifest::read(authorization)?;
+    if deployment.record.authorization.digest()? == new.digest()? {
+        ensure!(
+            new.previous_profile.map(hex::encode).as_deref() == Some(expected),
+            "Retried consent successor has another predecessor"
+        );
+        let _ = approved(&deployment, authorization)?;
+        return status(&deployment, &engine, "ConsentSuccessorApplied");
     }
-    deployment.runtime.clock.health()?.observe()?;
-    let config = serde_json::to_vec(&deployment.runtime)?;
+    ensure!(
+        new.previous_profile.map(hex::encode).as_deref() == Some(expected),
+        "Expected immediately preceding local operator profile differs"
+    );
+    apply_approved(&mut deployment, &engine, &new, authorization, history)
+}
+fn apply_approved(
+    deployment: &mut Deployment,
+    engine: &Engine,
+    new: &Manifest,
+    authorization: &Path,
+    history: Option<&Path>,
+) -> Result<Json> {
+    let mut preceding = deployment.record.authorization.canonical()?;
+    let final_manifest = new.canonical()?;
+    ensure!(
+        final_manifest.generation > preceding.generation,
+        "Operator generation did not advance"
+    );
+    for generation in preceding.generation + 1..final_manifest.generation {
+        let directory = history
+            .context("Retained signed operational offers required for unapplied generations")?;
+        let bytes = files::read_single(
+            &directory.join(format!("Generation{generation:020}.cbor")),
+            trust_wire::MAXIMUM,
+            false,
+        )?;
+        let value = trust_wire::decode(&bytes)?;
+        let f = value.array(6)?;
+        ensure!(
+            f[0].uint()? == 200 && f[1].uint()? == 1 && f[2].text()? == "AuthorityDeploymentOffer",
+            "Unexpected historical offer"
+        );
+        let offer =
+            crate::authority_deployments::Offer::parse(f[3].bytes()?, f[4].bytes()?, &f[5])?;
+        offer.manifest.successor_of(&preceding)?;
+        preceding = offer.manifest;
+    }
+    final_manifest.successor_of(&preceding)?;
+    let config = serde_json::to_vec(&new.config)?;
     ensure!(
         config.len() <= MAX_CONFIG,
-        "Refreshed configuration exceeds its bound"
+        "Successor configuration exceeds its bound"
     );
     let approved = authorization::verify(
         authorization,
@@ -419,12 +512,13 @@ fn refresh(
         &deployment.record.signer,
         &deployment.record.bootstrap_digest,
     )?;
-    let mut permitted = deployment.record.authorization.clone();
-    permitted.config = deployment.runtime.clone();
-    ensure!(
-        permitted.digest()? == approved.profile_digest,
-        "Clock refresh cannot alter any other consented field"
-    );
+    new.config.clock.health()?.observe()?;
+    if deployment.record.preparation.is_some()
+        && deployment.record.appointment_authorization.is_none()
+    {
+        deployment.record.appointment_authorization = Some(deployment.record.authorization.clone());
+    }
+    deployment.runtime = new.config.clone();
     deployment.record.authorization = approved.manifest;
     deployment.record.consent_digest = approved.consent_digest;
     deployment.record.config = hex::encode(&config);
@@ -442,8 +536,9 @@ fn refresh(
         &serde_json::to_vec(&deployment.record)?,
         true,
     )?;
-    status(&deployment, &engine, "ClockBootRefreshed")
+    status(deployment, engine, "ConsentSuccessorApplied")
 }
+
 fn verify_tls(manifest: &Manifest) -> Result<()> {
     for (name, path, private) in [
         ("Certificate.pem", &manifest.config.tls.certificate, false),
@@ -634,6 +729,17 @@ pub fn run(command: Command) -> Result<()> {
             let (deployment, engine) = open(&input)?;
             status(&deployment, &engine, "Offline")?
         }
+        Command::ApplyConsent {
+            location,
+            expected_profile_digest,
+            authorization,
+            history_directory,
+        } => apply_consent(
+            &location,
+            &expected_profile_digest,
+            &authorization,
+            history_directory.as_deref(),
+        )?,
         Command::RefreshClockBoot {
             location,
             expected_config_digest,
@@ -652,7 +758,7 @@ pub fn run(command: Command) -> Result<()> {
 
 #[cfg(test)]
 #[path = "AuthorityReplicaTests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 #[path = "AuthorityReplicaLiveStatus.rs"]
 mod live_status;

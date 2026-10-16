@@ -8,9 +8,9 @@ use crate::authority_epoch::{
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(super) struct Preparation {
-    chain: Vec<Activated>,
-    evidence: String,
-    history: String,
+    pub(super) chain: Vec<Activated>,
+    pub(super) evidence: String,
+    pub(super) history: String,
 }
 #[derive(Subcommand)]
 pub enum Command {
@@ -232,12 +232,29 @@ fn prepare(
         authorization: consent.manifest,
         consent_digest: consent.consent_digest,
         preparation: Some(preparation),
+        appointment_authorization: None,
     };
     files::write_new(&input.directory.join(RECORD), &serde_json::to_vec(&record)?)?;
     let deployment = deployment(&input.directory)?;
     let mut result = status(&deployment, &engine, "EpochPrepared")?;
     result["readyShare"] = json!(hex::encode(engine.readiness_share()?));
     Ok(result)
+}
+pub(super) fn activate_ready(
+    record: &Record,
+    bootstrap: &[u8],
+    ready: &[u8],
+    engine: &mut Engine,
+) -> Result<()> {
+    let preparation = record
+        .preparation
+        .as_ref()
+        .context("Replica is not a future authority")?;
+    let (_, terminal) = preparation.configuration(bootstrap, &record.bootstrap_digest)?;
+    // The nomination pins the installation anchor; current consent may be its approved successor.
+    record.verify_appointment(&terminal)?;
+    let activation = epoch::verify_activation(terminal, ready)?;
+    engine.activate_epoch(&activation)
 }
 pub fn run(command: Command) -> Result<Json> {
     match command {
@@ -334,22 +351,13 @@ pub fn run(command: Command) -> Result<Json> {
         } => {
             let (deployment, mut engine) = open(&location)?;
             approved(&deployment, &authorization)?;
-            let preparation = deployment
-                .record
-                .preparation
-                .as_ref()
-                .context("Replica is not a future authority")?;
             let bootstrap = files::read_single(
                 &location.directory.join("Bootstrap.cbor"),
                 trust_wire::MAXIMUM,
                 true,
             )?;
-            let (_, terminal) =
-                preparation.configuration(&bootstrap, &deployment.record.bootstrap_digest)?;
-            nomination(&deployment.record.authorization, &terminal)?;
             let ready = files::read_single(&ready, 2048, true)?;
-            let activation = epoch::verify_activation(terminal, &ready)?;
-            engine.activate_epoch(&activation)?;
+            activate_ready(&deployment.record, &bootstrap, &ready, &mut engine)?;
             status(&deployment, &engine, "EpochActivated")
         }
     }

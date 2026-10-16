@@ -499,17 +499,36 @@ impl<'a> Client<'a> {
         self.registered(service)
     }
     fn registered(&self, service: Digest) -> Result<routes::RegisteredProfile> {
-        let (state, _) = self.disk.context();
+        let (state, records) = self.disk.context();
         let selected = routes::Service::parse(
             &state.record(165, service)?.payload,
             state.network,
             state.incarnation,
         )?;
         ensure!(!selected.withdrawn, "route service has been withdrawn");
+        let index = crate::authority_deployment_records::Index::parse(
+            records,
+            &Reservations(self.guard.bootstrap.reservations().to_vec()),
+            state.network,
+            state.incarnation,
+        )?;
+        let deployment = index
+            .deployments
+            .get(&selected.profile.deployment)
+            .context("Route deployment admission is absent")?;
+        ensure!(
+            !index.withdrawals.contains_key(&deployment.deployment),
+            "Route deployment has been withdrawn"
+        );
+        let validity = crate::authority_operational_consent::validity(
+            &deployment.manifest,
+            &selected.profile.manifest,
+            selected.profile.validity,
+        )?;
         let now = self.now()?;
         ensure!(
-            selected.profile.validity.0 <= now && now < selected.profile.validity.1,
-            "route service is outside its lifetime"
+            validity.0 <= now && now < validity.1,
+            "Route service is outside current operational consent"
         );
         Ok(selected.profile)
     }
@@ -673,11 +692,14 @@ impl<'a> Client<'a> {
             .and_then(|deadline| deadline.checked_sub(now.boot_ms))
             .filter(|remaining| *remaining > 0)
             .context("original route lifetime expired")?;
-        Ok(now
-            .wall_ms
-            .saturating_add(remaining)
-            .min(expires)
-            .min(self.config.profile.validity.1))
+        Ok(now.wall_ms.saturating_add(remaining).min(expires).min(
+            crate::authority_operational_consent::validity(
+                &self.config.manifest,
+                &self.config.profile.manifest,
+                self.config.profile.validity,
+            )?
+            .1,
+        ))
     }
     pub fn refresh(&mut self, renewal: &Renewal, deadline: u64) -> Result<u64> {
         self.before(deadline, |client| {

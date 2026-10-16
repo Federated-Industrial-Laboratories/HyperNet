@@ -11,6 +11,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 
 #[derive(Clone, Debug)]
 pub struct Profile {
+    pub manifest: crate::runtime_manifest::Manifest,
     #[cfg(test)]
     pub network: Digest,
     #[cfg(test)]
@@ -30,10 +31,13 @@ pub struct Profile {
 }
 impl Profile {
     pub fn parse(envelope: &[u8], network: Digest, incarnation: Digest) -> Result<Self> {
-        ensure!(envelope.len() <= 4096, "SSH profile exceeds its bound");
+        ensure!(
+            envelope.len() <= crate::runtime_manifest::MAXIMUM + 4096,
+            "SSH profile exceeds its bound"
+        );
         let (payload, signatures) = wire::envelope(envelope, 1)?;
         let value = wire::decode(&payload)?;
-        let f = value.array(16)?;
+        let f = value.array(17)?;
         ensure!(
             f[0].uint()? == 200
                 && f[1].uint()? == 1
@@ -44,6 +48,7 @@ impl Profile {
         );
         let span = f[13].array(2)?;
         let profile = Self {
+            manifest: crate::runtime_manifest::Manifest::parse(f[16].bytes()?)?,
             #[cfg(test)]
             network,
             #[cfg(test)]
@@ -75,6 +80,26 @@ impl Profile {
                 && profile.consent.id == profile.deployment,
             "SSH profile identity, signature or validity differs"
         );
+        ensure!(
+            profile.manifest.network == network
+                && profile.manifest.incarnation == incarnation
+                && profile.manifest.deployment == profile.deployment
+                && profile.manifest.operator == profile.operator
+                && profile.deployment_profile
+                    == crate::authority_deployment_records::reference(
+                        &profile.manifest.desired()?
+                    )?
+                && profile.consent
+                    == crate::authority_deployment_records::reference(
+                        &profile.manifest.unsigned_consent(0)?
+                    )?
+                && profile.manifest.roles.iter().any(|role| role.role == 8
+                    && role.service_key == profile.service
+                    && role.bind_endpoint_ids.contains(&profile.endpoint))
+                && profile.validity.0 >= profile.manifest.validity.0
+                && profile.validity.1 <= profile.manifest.validity.1,
+            "SSH service definition differs from its exact original operator consent"
+        );
         Ok(profile)
     }
     #[cfg(test)]
@@ -96,6 +121,7 @@ impl Profile {
             a(vec![V::Uint(self.validity.0), V::Uint(self.validity.1)]),
             reference(&self.deployment_profile),
             reference(&self.consent),
+            b(&self.manifest.encode()?),
         ]))
     }
 }
@@ -268,10 +294,6 @@ pub fn validate_state(state: &State) -> Result<()> {
 }
 
 #[derive(Clone, Debug)]
-#[allow(
-    clippy::large_enum_variant,
-    reason = "One bounded decoded command owns its validated profile; variants are not retained in bulk."
-)]
 pub enum Command {
     Context {
         action: u64,
@@ -279,7 +301,7 @@ pub enum Command {
         resource: Digest,
     },
     Register {
-        profile: Profile,
+        profile: Box<Profile>,
     },
     Withdraw {
         service: Key,
@@ -341,7 +363,7 @@ impl Command {
             "SshServiceRegister" => {
                 let f = value.array(2)?;
                 Self::Register {
-                    profile: Profile::parse(f[1].bytes()?, network, incarnation)?,
+                    profile: Box::new(Profile::parse(f[1].bytes()?, network, incarnation)?),
                 }
             }
             "SshServiceWithdraw" => {
@@ -533,10 +555,12 @@ impl Context<'_> {
         ensure!(
             r.operator == p.operator
                 && r.services.get(&8) == Some(&p.service)
-                && r.profile == p.deployment_profile
-                && r.consent == p.consent,
+                && p.deployment_profile.digest == wire::digest(&p.manifest.desired()?)
+                && p.consent.digest == wire::digest(&p.manifest.unsigned_consent(0)?),
             "SSH profile differs from admitted role and local consent"
         );
+        let effective =
+            crate::authority_operational_consent::validity(&r.manifest, &p.manifest, p.validity)?;
         self.dependencies
             .extend([r.reference.clone(), r.profile.clone(), r.consent.clone()]);
         if let Some(w) = self.index.withdrawals.get(&r.deployment) {
@@ -549,10 +573,10 @@ impl Context<'_> {
             let span = f[16].array(2)?;
             let validity = (span[0].uint()?, span[1].uint()?);
             ensure!(
-                current(self.at, p.validity)
+                current(self.at, effective)
                     && current(self.at, validity)
-                    && p.validity.0 >= validity.0
-                    && p.validity.1 <= validity.1
+                    && effective.0 >= validity.0
+                    && effective.1 <= validity.1
                     && f[11].list(16)?.iter().any(|v| v.array(2).is_ok_and(|f| f[0]
                         .fixed::<32>()
                         .ok()
@@ -560,7 +584,7 @@ impl Context<'_> {
                         && f[1].fixed::<32>().ok() == Some(p.endpoint))),
                 "SSH profile exceeds current deployment consent"
             );
-            self.expires = self.expires.min(p.validity.1).min(validity.1);
+            self.expires = self.expires.min(effective.1).min(validity.1);
             self.capability(&r.grant, r.registrar, 13, (5, r.deployment))?;
         }
         Ok(r)
@@ -708,7 +732,7 @@ pub fn evaluate(
                         "SSH service already configured"
                     );
                     let service = Service {
-                        profile: profile.clone(),
+                        profile: profile.as_ref().clone(),
                         manager: intent.requester,
                         grant: manager.clone(),
                         withdrawn: false,

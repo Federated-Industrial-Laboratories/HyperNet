@@ -48,6 +48,9 @@ pub(crate) fn fixture() -> Manifest {
             fs::remove_dir_all(root).unwrap();
             let volume = [40; 32];
             Manifest {
+                generation: 1,
+                previous_profile: None,
+                previous_consent: None,
                 network: [20; 32],
                 incarnation: [21; 32],
                 deployment: [22; 32],
@@ -177,4 +180,35 @@ fn manifest_rejects_unused_resources_ambiguous_sets_and_unbounded_input() {
     changed.clock.witness_file_name = "../ClockHealth.cbor".into();
     assert!(changed.encode().is_err());
     assert!(Manifest::parse(&vec![0; MAXIMUM + 1]).is_err());
+}
+
+#[test]
+fn operational_successor_requires_exact_predecessor_and_preserves_rights() {
+    let original = fixture();
+    let mut next = original.clone();
+    next.generation = 2;
+    next.previous_profile = Some(wire::digest(&original.desired().unwrap()));
+    next.previous_consent = Some(wire::digest(&original.unsigned_consent(0).unwrap()));
+    next.validity = (2000, 7200000);
+    next.clock.kernel_boot = "22345678-1234-1234-1234-123456789abc".into();
+    next.software_digest = [91; 32];
+    next.roles[0].image_digest = [92; 32];
+    next.successor_of(&original).unwrap();
+    assert_eq!(Manifest::parse(&next.encode().unwrap()).unwrap(), next);
+    assert!(next.permits_definition(&original).is_ok());
+    let mut changed = next.clone();
+    changed.previous_consent = Some([93; 32]);
+    assert!(changed.successor_of(&original).is_err());
+    let mut changed = next.clone();
+    changed.roles[0].memory_bytes *= 2;
+    assert!(changed.successor_of(&original).is_err());
+    let mut changed = next.clone();
+    changed.generation = 3;
+    assert!(changed.successor_of(&original).is_err());
+    next.session_mode = 1;
+    assert!(next.validate().is_err());
+    next.clock.kernel_boot = "CurrentHost".into();
+    next.successor_of(&original).unwrap();
+    next.session_mode = 0;
+    assert!(next.validate().is_err());
 }

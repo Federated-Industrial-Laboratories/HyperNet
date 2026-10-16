@@ -67,6 +67,7 @@ impl Fixture {
             .find(|r| r.kind == 102 && r.id == [23; 32])
             .unwrap();
         let mut profile = ssh::Profile {
+            manifest: manifest.clone(),
             network: manifest.network,
             incarnation: manifest.incarnation,
             deployment: manifest.deployment,
@@ -173,7 +174,7 @@ impl Fixture {
         self.apply(
             5,
             ssh::Command::Register {
-                profile: self.profile.clone(),
+                profile: Box::new(self.profile.clone()),
             },
             Some(self.root.clone()),
         );

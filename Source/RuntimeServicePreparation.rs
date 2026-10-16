@@ -36,7 +36,7 @@ fn members(path: &Path, expected: &[&str]) -> Result<()> {
     );
     Ok(())
 }
-pub(super) fn prepare(p: &Profile) -> Result<()> {
+pub(in crate::runtime_management) fn prepare(p: &Profile) -> Result<()> {
     p.check_artifacts()?;
     let route = p.role()?.role == 5;
     let directories: &[&str] = if route {
@@ -192,4 +192,15 @@ pub(super) fn prepare(p: &Profile) -> Result<()> {
         fs::File::open(&p.root)?.sync_all()?;
     }
     Ok(())
+}
+
+pub(in crate::runtime_management) fn successor(p: &Profile) -> Result<()> {
+    let mut prepared: Prepared = files::json(&p.root.join("Preparation.json"))?;
+    let metadata = fs::symlink_metadata(p.root.join("Launch"))?;
+    ensure!(
+        metadata.is_dir() && Some((metadata.dev(), metadata.ino())) == prepared.identity,
+        "Stopped successor cannot replace the retained service directory"
+    );
+    prepared.profile = p.digest()?;
+    files::save(&p.root.join("Preparation.json"), &prepared)
 }

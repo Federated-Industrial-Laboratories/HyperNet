@@ -93,7 +93,7 @@ impl Config {
             .find(|r| r.role == 3)
             .context("mail role absent")?;
         ensure!(
-            profile.manifest == manifest
+            manifest.permits_definition(&profile.manifest).is_ok()
                 && profile.endpoint.is_none()
                 && role.bind_endpoint_ids.is_empty()
                 && role.outbound_endpoint_ids.is_empty(),
@@ -141,7 +141,10 @@ pub fn initialise(guard: &Guard) -> Result<()> {
     ensure!(guard.role == 3, "mail preparation has another role");
     let config = Config::load(Path::new("/Config/ServiceConfig.json"))?;
     ensure!(
-        config.profile.manifest == guard.manifest,
+        guard
+            .manifest
+            .permits_definition(&config.profile.manifest)
+            .is_ok(),
         "mail profile differs from local authorization"
     );
     runtime_service_activate::initialise(guard)?;
@@ -341,7 +344,11 @@ fn handle(
 pub async fn run(config: Config, guard: &Guard, active: &mut Active) -> Result<()> {
     active.check(guard)?;
     ensure!(
-        guard.role == 3 && config.profile.manifest == guard.manifest,
+        guard.role == 3
+            && guard
+                .manifest
+                .permits_definition(&config.profile.manifest)
+                .is_ok(),
         "mail service differs from activated role"
     );
     let mut disk = disk::Disk::open(

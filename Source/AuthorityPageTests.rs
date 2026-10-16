@@ -56,7 +56,13 @@ pub(crate) fn complete_content(
         };
         profile.envelope =
             wire::sign_envelope(&profile.payload().unwrap(), &deployment::key(90)).unwrap();
-        fixture.apply(Command::HostRegister { profile }, vec![], 5000);
+        fixture.apply(
+            Command::HostRegister {
+                profile: Box::new(profile),
+            },
+            vec![],
+            5000,
+        );
     }
     fixture.content(revision, 5000, true);
     *state = fixture.state;
@@ -420,7 +426,13 @@ impl Fixture {
                     wire::sign_envelope(&p.payload().unwrap(), &deployment::key(90)).unwrap();
                 let p = HostProfile::parse(&p.envelope, self.state.network, self.state.incarnation)
                     .unwrap();
-                self.apply(Command::HostRegister { profile: p.clone() }, vec![], 5000);
+                self.apply(
+                    Command::HostRegister {
+                        profile: Box::new(p.clone()),
+                    },
+                    vec![],
+                    5000,
+                );
                 p
             })
             .collect()
@@ -1973,3 +1985,6 @@ fn expired_body_placement_preserves_metadata_but_refuses_serving() {
 
 #[path = "AuthorityPageSearchTests.rs"]
 mod search_tests;
+
+#[path = "AuthorityBackupPageTests.rs"]
+mod backup_tests;

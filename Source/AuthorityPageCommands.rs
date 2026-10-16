@@ -5,13 +5,18 @@ use super::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MediaEffect {
     Upload,
+    Repair,
     Read,
     Inspect,
 }
 impl MediaEffect {
+    pub fn writes(self) -> bool {
+        matches!(self, Self::Upload | Self::Repair)
+    }
     pub fn code(self) -> u64 {
         match self {
             Self::Upload => 0,
+            Self::Repair => 3,
             Self::Read => 1,
             Self::Inspect => 2,
         }
@@ -21,6 +26,7 @@ impl MediaEffect {
             0 => Self::Upload,
             1 => Self::Read,
             2 => Self::Inspect,
+            3 => Self::Repair,
             _ => anyhow::bail!("unsupported media effect"),
         })
     }
@@ -44,7 +50,7 @@ pub enum Command {
         policy: ApplicationPolicy,
     },
     HostRegister {
-        profile: HostProfile,
+        profile: Box<HostProfile>,
     },
     HostWithdraw {
         role: u64,
@@ -221,7 +227,7 @@ impl Command {
             "PageHostRegister" => {
                 let f = value.array(2)?;
                 Self::HostRegister {
-                    profile: HostProfile::parse(f[1].bytes()?, n, i)?,
+                    profile: Box::new(HostProfile::parse(f[1].bytes()?, n, i)?),
                 }
             }
             "PageHostWithdraw" => {
@@ -368,8 +374,7 @@ impl Command {
                 let digest = optional_id(&f[6])?;
                 let bytes = f[5].uint()?;
                 ensure!(
-                    (1..=32768).contains(&bytes)
-                        && (effect == MediaEffect::Upload) == digest.is_some(),
+                    (1..=32768).contains(&bytes) && effect.writes() == digest.is_some(),
                     "media operation payload restrictions differ"
                 );
                 Self::MediaAuthorise {

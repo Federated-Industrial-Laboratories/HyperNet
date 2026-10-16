@@ -14,17 +14,17 @@ use std::{
     path::{Path, PathBuf},
 };
 #[path = "RuntimeServiceControl.rs"]
-mod control;
+pub(super) mod control;
 #[path = "RuntimeServiceEgress.rs"]
 pub(crate) mod egress;
 #[path = "RuntimeServiceEpoch.rs"]
 mod epoch;
 #[path = "RuntimeServicePreparation.rs"]
-mod preparation;
+pub(super) mod preparation;
 #[path = "RuntimeServiceSetup.rs"]
-mod setup;
+pub(super) mod setup;
 #[path = "RuntimeServiceContainers.rs"]
-mod workload;
+pub(super) mod workload;
 #[derive(Args)]
 pub struct Location {
     #[arg(long)]
@@ -32,6 +32,14 @@ pub struct Location {
 }
 #[derive(Subcommand)]
 pub enum Command {
+    Transition {
+        #[command(subcommand)]
+        command: super::transition::Command,
+    },
+    Managed {
+        #[command(subcommand)]
+        command: super::managed::Command,
+    },
     /// Forward a signed Content, Media, Mail or Transfer packet through this service's private local socket.
     Exchange {
         #[command(flatten)]
@@ -47,6 +55,8 @@ pub enum Command {
     },
     Setup(setup::Setup),
     Preview(Location),
+    /// Preview or explicitly export recorded local state without probing services.
+    Diagnose(super::diagnostics::Options),
     Consent {
         #[command(flatten)]
         location: Location,
@@ -95,26 +105,26 @@ pub enum Command {
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct Profile {
-    version: u64,
-    root: PathBuf,
-    manifest: Manifest,
-    artifacts: BTreeMap<String, [u8; 32]>,
-    authority_control: PathBuf,
-    clock_directory: PathBuf,
-    selinux: bool,
+pub(super) struct Profile {
+    pub(super) version: u64,
+    pub(super) root: PathBuf,
+    pub(super) manifest: Manifest,
+    pub(super) artifacts: BTreeMap<String, [u8; 32]>,
+    pub(super) authority_control: PathBuf,
+    pub(super) clock_directory: PathBuf,
+    pub(super) selinux: bool,
     media_controls: BTreeMap<String, MediaMount>,
     route_target: Option<MediaMount>,
 }
 impl Profile {
-    fn role(&self) -> Result<&Role> {
+    pub(super) fn role(&self) -> Result<&Role> {
         ensure!(
             self.manifest.roles.len() == 1 && matches!(self.manifest.roles[0].role, 1..=5 | 7 | 8),
             "installed service template requires one Page, Media, Mail, Transfer, Route or SSH role"
         );
         Ok(&self.manifest.roles[0])
     }
-    fn validate(&self) -> Result<()> {
+    pub(super) fn validate(&self) -> Result<()> {
         ensure!(self.version == 1, "unsupported installed service profile");
         self.manifest.validate()?;
         let role = self.role()?;
@@ -287,16 +297,22 @@ impl Profile {
         );
         Ok(())
     }
-    fn digest(&self) -> Result<String> {
+    pub(super) fn digest(&self) -> Result<String> {
         Ok(files::hex_digest(&serde_json::to_vec(self)?))
+    }
+    fn binding_digest(&self) -> Result<String> {
+        let mut value = serde_json::to_value(self)?;
+        value["manifest"] = json!(hex::encode(self.manifest.operational_digest()?));
+        value["artifacts"]["Manifest.cbor"] = Value::Null;
+        Ok(files::hex_digest(&serde_json::to_vec(&value)?))
     }
     fn name(&self) -> String {
         format!("HyperNetService{}", hex::encode(self.manifest.deployment))
     }
-    fn image(&self) -> Result<String> {
+    pub(super) fn image(&self) -> Result<String> {
         Ok(format!("sha256:{}", hex::encode(self.role()?.image_digest)))
     }
-    fn check_artifacts(&self) -> Result<()> {
+    pub(super) fn check_artifacts(&self) -> Result<()> {
         self.validate()?;
         ensure!(
             files::root(&self.root)? == self.root
@@ -327,7 +343,7 @@ impl Profile {
                     crate::trust_bootstrap::hex32(key)?,
                 )?;
                 ensure!(
-                    media.digest()? == mount.profile_digest,
+                    media.binding_digest()? == mount.profile_digest,
                     "local media mount changed its installed identity"
                 );
             }
@@ -341,7 +357,7 @@ impl Profile {
             if let Some(target) = &self.route_target {
                 let (installed, _) = load(&target.directory)?;
                 ensure!(
-                    installed.digest()? == target.profile_digest,
+                    installed.binding_digest()? == target.profile_digest,
                     "route application installation changed"
                 );
                 route_target(&self.manifest, &installed.manifest)?;
@@ -362,22 +378,23 @@ struct MediaMount {
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct State {
-    version: u64,
-    profile_digest: String,
-    consented: bool,
-    withdrawn: bool,
-    initialised: bool,
-    container: Option<Resource>,
-    network: Option<Resource>,
-    helper: Option<Resource>,
+pub(super) struct State {
+    pub(super) version: u64,
+    pub(super) profile_digest: String,
+    pub(super) consented: bool,
+    pub(super) withdrawn: bool,
+    pub(super) initialised: bool,
+    pub(super) container: Option<Resource>,
+    pub(super) network: Option<Resource>,
+    pub(super) helper: Option<Resource>,
     #[serde(default)]
-    egress: Option<Resource>,
-    authority_control: Option<PathBuf>,
-    last_time: u64,
+    pub(super) egress: Option<Resource>,
+    pub(super) authority_control: Option<PathBuf>,
+    pub(super) last_time: u64,
 }
-fn load(root: &Path) -> Result<(Profile, State)> {
+pub(super) fn load(root: &Path) -> Result<(Profile, State)> {
     let root = files::root(root)?;
+    super::transition::require_idle(&root)?;
     let p: Profile = files::json(&root.join("ServiceProfile.json"))?;
     let mut s: State = files::json(&root.join("ServiceState.json"))?;
     p.validate()?;
@@ -396,7 +413,7 @@ fn load(root: &Path) -> Result<(Profile, State)> {
     s.withdrawn = withdrawal == 1;
     Ok((p, s))
 }
-fn save(p: &Profile, s: &mut State) -> Result<()> {
+pub(super) fn save(p: &Profile, s: &mut State) -> Result<()> {
     let now = files::now()?;
     ensure!(now >= s.last_time, "service manager clock moved backwards");
     s.last_time = now;
@@ -405,14 +422,17 @@ fn save(p: &Profile, s: &mut State) -> Result<()> {
 fn preview(p: &Profile, s: &State) -> Result<Value> {
     Ok(
         json!({"status":if s.withdrawn{"Withdrawn"}else if s.consented{"Consented"}else{"AwaitingLocalConsent"},
-        "profileDigest":p.digest()?,"localGeneration":1,"manifest":p.manifest,"artifacts":p.artifacts,
+        "profileDigest":p.digest()?,"localGeneration":p.manifest.generation,"manifest":p.manifest,"artifacts":p.artifacts,
         "role":match p.role()?.role{1=>"Page",2=>"Media",3=>"Mail",4=>"Transfer",5=>"PrivateRoute",7=>"Bridge",8=>"Ssh",_=>unreachable!()},"authentication":if p.role()?.role==8{"Native OpenSSH host key from exact signed SshProfile; generic manifest TLS metadata does not authenticate this listener"}else if p.role()?.role==7{"Pinned TLS1.3 counterpart bridges plus private local operator control; no direct reader route"}else if p.role()?.role==5{"Pinned TLS1.3 relay transport; inner TLS terminates at the exact consented final service"}else{"Private local control only; no remote reader route"},
-        "tcpEgress":p.role()?.role==7,"isolatedEgressHelper":p.role()?.role==5,"mediaControls":p.media_controls,"authorityAccess":"Private control socket only","session":"Foreground","automaticBoot":false,
+        "tcpEgress":p.role()?.role==7,"isolatedEgressHelper":p.role()?.role==5,"mediaControls":p.media_controls,"authorityAccess":"Private control socket only","session":if p.manifest.session_mode==1{"Managed"}else{"Session"},"managedBootPolicy":p.manifest.session_mode==1,
         "authorityControl":s.authority_control.as_ref().unwrap_or(&p.authority_control),"currentPermission":false,"initialised":s.initialised}),
     )
 }
 pub fn run(command: Command) -> Result<Value> {
     match command {
+        Command::Transition { command } => super::transition::run(command, true),
+        Command::Managed { command } => super::managed::run(command, true),
+        Command::Diagnose(options) => super::diagnostics::run(options, diagnostic_snapshot),
         Command::Epoch { command } => epoch::run(command),
         Command::Setup(args) => setup::run(args),
         Command::Start {
@@ -435,6 +455,21 @@ pub fn run(command: Command) -> Result<Value> {
             };
             let root = files::root(&location.directory)?;
             let _lock = files::lock(&root)?;
+            if root.join("Transition.json").try_exists()? {
+                return match command {
+                    Command::Stop(_) => super::transition::restrict(&root, true, false),
+                    Command::Withdraw(_) => super::transition::restrict(&root, true, true),
+                    Command::WithdrawalReceipt { output, .. } => {
+                        super::transition::withdrawal_receipt(&root, true, Some(&output))
+                    }
+                    Command::Status(_) | Command::Preview(_) => {
+                        super::transition::pending_status(&root)
+                    }
+                    _ => anyhow::bail!(
+                        "Resume the exact stopped successor before another service operation"
+                    ),
+                };
+            }
             let (p, mut s) = load(&root)?;
             match command {
                 Command::Exchange {
@@ -468,6 +503,30 @@ pub fn run(command: Command) -> Result<Value> {
     }
 }
 
+fn diagnostic_snapshot(path: &Path) -> super::diagnostics::Snapshot {
+    let result = (|| -> Result<_> {
+        let root = files::root(path)?;
+        let _lock = files::try_lock(&root)?;
+        let (profile, state) = load(&root)?;
+        Ok(super::diagnostics::service(
+            profile.role()?.role,
+            state.consented,
+            state.withdrawn,
+            state.initialised,
+            [
+                &state.container,
+                &state.network,
+                &state.helper,
+                &state.egress,
+            ]
+            .iter()
+            .filter(|resource| resource.is_some())
+            .count(),
+        ))
+    })();
+    result.unwrap_or_else(|_| super::diagnostics::unavailable(false))
+}
+
 fn store_route(bridge: &Manifest, store: &Manifest, key: [u8; 32]) -> Result<()> {
     ensure!(
         bridge.roles.len() == 1
@@ -495,4 +554,96 @@ fn route_target(route: &Manifest, target: &Manifest) -> Result<()> {
         "route application mount must be one separate consented service in the same network"
     );
     Ok(())
+}
+
+pub(crate) fn approved_backup_volume(
+    root: &Path,
+    host: [u8; 32],
+    volume: [u8; 32],
+    live: bool,
+) -> Result<(Manifest, PathBuf, u64)> {
+    use std::{fs, os::unix::fs::MetadataExt};
+    let root = files::root(root)?;
+    let _lock = files::lock(&root)?;
+    let (profile, state) = load(&root)?;
+    if live {
+        profile.check_artifacts()?;
+    }
+    ensure!(
+        profile.manifest.host == host
+            && profile.manifest.volumes[0].volume_id == volume
+            && state.initialised,
+        "Backup allocation requires the exact initialized host volume"
+    );
+    if live {
+        super::transition::require_servable(&root)?;
+        ensure!(
+            state.consented && !state.withdrawn,
+            "Backup storage requires live local host consent"
+        );
+        let now = files::now()?
+            .checked_mul(1000)
+            .context("Backup time overflow")?;
+        ensure!(
+            now >= profile.manifest.validity.0 && now < profile.manifest.validity.1,
+            "Backup storage consent is outside its lifetime"
+        );
+    }
+    let (consent, signatures) = wire::envelope(
+        &files::public_read(&root.join("Authorization/HostConsent.cbor"), wire::MAXIMUM)?,
+        1,
+    )?;
+    ensure!(
+        signatures.len() == 1
+            && signatures[0].0 == profile.manifest.operator
+            && consent == profile.manifest.unsigned_consent(0)?,
+        "Backup host consent differs"
+    );
+    let preparation: Value = files::json(&root.join("Preparation.json"))?;
+    let launch = fs::symlink_metadata(root.join("Launch"))?;
+    ensure!(
+        launch.is_dir()
+            && preparation["profile"] == profile.digest()?
+            && preparation["identity"][0].as_u64() == Some(launch.dev())
+            && preparation["identity"][1].as_u64() == Some(launch.ino()),
+        "Prepared host backing identity differs"
+    );
+    let allocation = profile.manifest.volumes[0]
+        .storage_admission_bytes
+        .checked_sub(profile.role()?.state_admission_bytes)
+        .context("Backup has no separately consented surplus")?;
+    ensure!(
+        allocation > 0,
+        "Backup requires explicit volume capacity above service state allocation"
+    );
+    let backing = files::podman(&files::strings(&[
+        "unshare",
+        "/usr/bin/stat",
+        "--format=%d:%F",
+        "--",
+        root.join("Launch/State")
+            .to_str()
+            .context("Invalid backing path")?,
+    ]))?;
+    let backing = String::from_utf8(backing)?;
+    let (device, kind) = backing
+        .trim()
+        .split_once(':')
+        .context("Invalid backing metadata")?;
+    ensure!(
+        kind == "directory",
+        "Prepared state backing is not a directory"
+    );
+    let backing_device = device.parse::<u64>()?;
+    let directory = root.join("Backups");
+    if !directory.try_exists()? {
+        ensure!(live, "Backup allocation has not been initialized");
+        files::directory(&directory)?;
+    }
+    files::private_dir(&directory)?;
+    ensure!(
+        fs::symlink_metadata(&directory)?.dev() == backing_device,
+        "Backup directory is not on the consented backing volume"
+    );
+    Ok((profile.manifest, directory, allocation))
 }

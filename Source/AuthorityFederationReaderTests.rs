@@ -87,7 +87,7 @@ fn imported() -> (SourceFixture, [u8; 16], VersionRef, ForeignReview) {
     f.state.records.remove(&(143, host)).unwrap();
     f.apply(
         page::Command::HostRegister {
-            profile: configured.profile,
+            profile: Box::new(configured.profile),
         }
         .into(),
         vec![],

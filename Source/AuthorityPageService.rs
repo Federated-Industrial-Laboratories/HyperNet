@@ -84,7 +84,7 @@ impl Config {
             .find(|r| r.role == 1)
             .context("Page role absent")?;
         ensure!(
-            profile.manifest == manifest
+            manifest.permits_definition(&profile.manifest).is_ok()
                 && profile.role == 1
                 && role.bind_endpoint_ids.is_empty()
                 && role.outbound_endpoint_ids.is_empty(),
@@ -132,7 +132,10 @@ pub fn initialise(guard: &Guard) -> Result<()> {
     ensure!(guard.role == 1, "Page preparation has another role");
     let config = Config::load(Path::new("/Config/ServiceConfig.json"))?;
     ensure!(
-        config.profile.manifest == guard.manifest,
+        guard
+            .manifest
+            .permits_definition(&config.profile.manifest)
+            .is_ok(),
         "Page profile differs from local authorization"
     );
     runtime_service_activate::initialise(guard)?;
@@ -231,7 +234,11 @@ fn maintain(
 pub async fn run(config: Config, guard: &Guard, active: &mut Active) -> Result<()> {
     active.check(guard)?;
     ensure!(
-        guard.role == 1 && config.profile.manifest == guard.manifest,
+        guard.role == 1
+            && guard
+                .manifest
+                .permits_definition(&config.profile.manifest)
+                .is_ok(),
         "Page service differs from activated role"
     );
     if config.profile.content.is_some() {

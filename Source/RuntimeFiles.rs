@@ -256,6 +256,12 @@ pub fn safe_path(path: &Path) -> Result<()> {
     Ok(())
 }
 pub fn lock(path: &Path) -> Result<File> {
+    lifecycle_lock(path, false)
+}
+pub fn try_lock(path: &Path) -> Result<File> {
+    lifecycle_lock(path, true)
+}
+fn lifecycle_lock(path: &Path, nonblocking: bool) -> Result<File> {
     private_dir(path)?;
     let file = OpenOptions::new()
         .read(true)
@@ -274,7 +280,12 @@ pub fn lock(path: &Path) -> Result<File> {
         "Invalid lifecycle lock"
     );
     ensure!(
-        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0,
+        unsafe {
+            libc::flock(
+                file.as_raw_fd(),
+                libc::LOCK_EX | if nonblocking { libc::LOCK_NB } else { 0 },
+            )
+        } == 0,
         "Cannot lock runtime"
     );
     Ok(file)

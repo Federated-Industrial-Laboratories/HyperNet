@@ -3,8 +3,10 @@
 `HyperNet runtime` manages one already appointed authority voter per deployment.
 Four deployments use the same accepted bootstrap and distinct appointed voter
 keys. Their Basic HotStuff committee requires three replicas for authority
-results. The runtime does not create membership, appoint voters, issue transport
-certificates or expose a reader endpoint.
+results. Setup does not create membership or appoint voters. The separate
+[provisioning commands](RuntimeProvisioning.md) create and validate transport
+identities, certificates, clock inputs and strict peer configurations. An
+authority deployment exposes no reader endpoint.
 
 The supported installed profile is Linux, rootless Podman, delegated cgroup v2,
 Landlock ABI6 or later and seccomp. It uses explicit IPv4 addresses and one owned
@@ -163,21 +165,18 @@ Withdrawal is terminal for this profile and cannot be undone by restoring only
 Changed or unresolved resource identities remain recorded for explicit recovery.
 No unrelated resource is removed.
 
-A new operation cannot reuse an ID with changed input. Repeat the exact original
-withdrawal command after interrupted or failed cleanup. It resumes exact resource
-cleanup using the same receipt and permanent tombstone, even when receipt capacity
-is exhausted. A completed withdrawal returns its retained success. Other failed
-or interrupted operations preserve their failure disposition. There are120 ordinary mutation
-receipts and two reserved terminal stop/withdraw slots. They fit the bounded
-local journal without discarding operation-ID bindings. An already stopped or
-withdrawn deployment cannot consume fresh emergency receipts indefinitely.
+A retained operation ID cannot name changed input. Repeat the exact original
+withdrawal command after interrupted cleanup. The permanent tombstone remains
+restrictive even if resource cleanup fails. The bounded retry window retains the
+64 most recent receipts and any pending operation. Earlier commands fail their
+stale expected generation after compaction; compaction never resets lifecycle
+or signer generations. Already stopped or withdrawn deployments cannot allocate
+repeated emergency operations.
 
-The lifetime is finite. Consent renewal, live update, unattended boot and
-installed host-reboot reconsent are not supported. A changed signed-clock boot
-binding therefore requires explicit operator recovery; it never causes the
-runtime to recreate the signer. Preserve the existing journal and its independent
-floor when arranging new consent. Do not initialise the same voter key into a
-fresh journal to bypass expiry or a restart refusal.
+The lifetime remains finite. Use the reviewed stopped successor workflow below
+to renew consent, recover a host boot or change the installed software. It never
+recreates a signer to bypass expiry or a restart refusal. Live replacement is
+not supported.
 
 Each replica retains at most32 pending submissions and proposes eligible requests
 in their first local admission order. Duplicate submissions retain their original
@@ -188,8 +187,11 @@ Queue order does not extend any challenge or guarantee completion before expiry.
 
 ## Recovery and diagnostics
 
-`diagnose` reports only local lifecycle state and fixed failure categories. It
-opens no network connection. `status` checks exact owned resource identities and
+`diagnose` previews bounded local lifecycle state and fixed failure categories.
+An explicit `--output` export requires the exact `--preview-digest` and creates a
+new private file. It opens no network connection, runs no container command and
+collects no logs. [Diagnostics](Diagnostics.md) documents its fields and freshness
+limits. `status` checks exact owned resource identities and
 uses the private control socket of the recorded replica; it is not a reader API.
 Neither command exports keys or protected authority records. Failed inert
 initialisation or stopped-state inspection records bounded private logs under
@@ -198,7 +200,8 @@ Failed authority startup retains `Diagnostics/AuthorityFailure.json` before
 cleanup, when the recorded container identity and configuration still verify.
 The private record contains running, exit, OOM and PID observations plus up to
 32 KiB each of standard output and standard error from the last 64 log lines.
-Diagnostic capture failure does not prevent stopping the owned workload.
+Diagnostic capture failure does not prevent stopping the owned workload. These
+private logs are excluded from the redacted diagnostic preview and export.
 
 Replica diagnostics include an `ActivitySummary` at most once every five
 seconds of completed work. It reports the view range, elapsed interval, elapsed
@@ -248,7 +251,9 @@ HyperNet runtime withdrawal-receipt --directory /Private/AuthorityOne
 ```
 
 The result names `Authorization/WithdrawalReceipt.cbor`. Its exact signature binds
-network, incarnation, deployment, operator,117profile digest and withdrawal counter.
+network, incarnation, deployment, operator, permanent operational resource digest
+and withdrawal counter. The resource digest preserves identity and rights across
+stopped operational successors, including one not yet admitted by the network.
 Supply it to the Suite's deployment withdrawal command. This local command does
 not contact authority or clear the veto. `cleanupComplete: false` reports remaining
 owned resources; retry the original Withdraw operation for cleanup. Publish the
@@ -265,11 +270,125 @@ installation and both old and new quorums are required before it can start.
 Use `runtime epoch terminal`, `handoff`, `prepare` and `activate` as described in
 [Authority committee replacement](AuthorityEpochs.md). Every offline operation
 requires stopped workloads and preserves the independent signer-generation floor.
-Epoch-appointed consent is immutable; clock-boot changes require a fresh committed
-replacement rather than rewriting117/129 or bypassing the local approval.
+Epoch appointments retain their original committed nomination. A stopped operational
+successor may renew its finite consent or host boot while preserving every appointed
+identity, peer, resource and permission. The replica verifies the original nomination
+against its retained appointment and the exact signed successor against its current
+profile. This does not appoint a voter or change committee membership.
 
 The authority's private signer source is `Launch/State/Authority`, mounted at
 `/State`; its isolated sibling `Launch/State/Control` is mounted at
 `/State/Control`. SELinux keeps signer state private and labels only the control
 directory for sharing with approved local services. Older prepared layouts refuse
 startup and require an explicit offline migration; live state is not moved.
+
+## Stopped consent renewal, reboot and software replacement
+
+Stop the workload and exit its foreground manager, or disable its managed unit.
+Inspect the installed profile before preparing a successor. Proposal files are
+private owner files outside the repository. Preparation changes no consent:
+
+```sh
+HyperNet runtime transition prepare --directory /Private/AuthorityOne \
+  --valid-until NEW_ABSOLUTE_UNIX_SECONDS --refresh-host-boot \
+  --output /Private/Successor.json
+HyperNet runtime transition preview --directory /Private/AuthorityOne \
+  --proposal /Private/Successor.json
+HyperNet runtime transition apply --directory /Private/AuthorityOne \
+  --proposal /Private/Successor.json --preview-digest REVIEWED_SHA256 \
+  --operation-id NEW_32_HEX_DIGITS
+```
+
+Omit `--valid-until` to retain the existing finite interval. Omit
+`--refresh-host-boot` when its binding has not changed. Start the existing pinned
+clock monitor first after a host reboot. The successor requires a fresh signed
+observation for the actual host boot before it updates an initial or epoch-appointed
+replica. Exact predecessor profile and consent hashes, consecutive manifest
+generations and the reviewed proposal bind the operation. Identities, rights,
+resources, endpoint pins, volumes, placement, journals, content, tombstones and
+signer floors remain unchanged. Expired consent can be renewed while stopped;
+withdrawn consent cannot.
+
+A durable `Transition.json` blocks normal activation until all local configuration
+and retained state agree. After interruption, run the exact proposed executable:
+
+```sh
+HyperNet runtime transition recover --directory /Private/AuthorityOne \
+  --operation-id SAME_32_HEX_DIGITS
+```
+
+Recovery completes that same operation. It never rolls journals or generations
+back. If consent expires or the package trust floor advances before completion,
+use `transition recover --historical` with the same operation ID. This completes
+signed local metadata only and executes no candidate binary or container. It
+sets a durable non-serving recovery marker, preserving signer and service journals.
+A software transition also requires a fresh package cutover before serving.
+Prepare, review and apply a fresh successor next; its trusted code verifies the
+retained signed intermediate consent chain before atomically updating the replica.
+An expired intermediate never becomes permission to run. Stop and withdrawal remain available during recovery. Withdrawal wins over
+a partially applied successor. Receipt export remains available in that state and
+binds the permanent resource identity, so it can withdraw the currently admitted
+generation even when a local successor has not yet reached the network. Keep the proposal, previous installed prefix, original release public key, signed
+target policy and signature, and package trust directory until completion; do not manually replace state files.
+
+For software replacement, first install the signed candidate through the normal
+package workflow and retain its accepted update floor. Add these options when
+preparing the stopped successor with the currently consented installed executable:
+
+```sh
+  --installed-prefix /Private/Packages/Candidate \
+  --image sha256:EXACT_INSTALLED_IMAGE_DIGEST \
+  --trust-directory /Private/PackageTrust --public-key /Private/ReleasePublic.pem \
+  --policy /Private/Target.json --policy-signature /Private/Target.json.sig
+```
+
+Run `transition apply` and fresh `recover` using Candidate/Bin/HyperNet. Historical
+metadata recovery uses an already trusted executable and never launches candidate
+code. The original trusted verifier is pinned in the reviewed proposal; candidate
+Python code is not executed. The exact currently retained package target, signature, complete installed
+files, binary, image and validity are verified. The existing package trust lock
+remains held through local activation, with freshness rechecked before commit.
+An older signed prefix cannot bypass the retained update floor. No failed cutover
+automatically restores an older journal or package target.
+
+The result remains stopped. The runtime retains each signed operational successor
+under `OperationalOffers/GenerationNNNN.cbor`. After initial admission, synchronise
+that directory using Suite `authority-inspection deployments synchronise` with the
+ordinary location, registrar key, clock and socket flags plus `--grant GRANT` and
+`--offers-directory /Private/AuthorityOne/OperationalOffers`. The command obtains
+current registrar authority and commits missing generations in order. Expired
+unchanged-rights intermediates are historical records only; a fresh final admission
+and fresh service activation are still required. Operational successors preserve existing domain definitions
+and publication approvals; they do not extend independently shorter domain leases.
+
+## Managed Linux boot and logout
+
+Session mode remains the default. To permit managed boot explicitly, prepare and
+apply a stopped successor with `--session-policy managed`, or select that policy
+at initial setup. Its finite consent uses `CurrentHost`: every launch verifies a
+fresh signed observation from the pinned monitor against the actual kernel boot.
+It does not accept a foreign boot or shifted time namespace.
+
+```sh
+HyperNet runtime managed preview --directory /Private/AuthorityOne \
+  --clock-monitor /Private/Monitor --minimum-signer-generation RETAINED_FLOOR
+HyperNet runtime managed enable --directory /Private/AuthorityOne \
+  --clock-monitor /Private/Monitor --minimum-signer-generation RETAINED_FLOOR \
+  --preview-digest REVIEWED_SHA256 --enable-linger
+HyperNet runtime managed status --directory /Private/AuthorityOne
+HyperNet runtime managed disable --directory /Private/AuthorityOne
+```
+
+Enable installs only the reviewed user units and starts the monitor dependency
+before the ordinary runtime. If recording completion fails after startup, enable
+attempts to disable and stop its owned runtime unit and reports that cleanup's
+outcome with the original audit error. Explicit user lingering permits boot activation and
+continuation after logout; the host may require its administrator to enable it.
+Finite consent, confinement, exact image, signer floors and normal authority checks
+still apply. A failed dependency leaves the runtime stopped with an understandable
+systemd result. Inspect readiness separately from unit activation. Disable stops
+the unit and removes automatic startup, retaining consent and the user's lingering
+setting because other services may depend on it. After a successor, review and
+enable its new exact unit; stale unit profiles refuse to run. When other workloads
+still use the current monitor unit, `--clock-executable` can retain its already
+approved executable while changing the workload independently.

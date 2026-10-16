@@ -215,7 +215,7 @@ pub fn run(args: Setup) -> Result<Value> {
                         key.to_string(),
                         MediaMount {
                             directory,
-                            profile_digest: media.digest()?
+                            profile_digest: media.binding_digest()?
                         }
                     )
                     .is_none(),
@@ -248,7 +248,7 @@ pub fn run(args: Setup) -> Result<Value> {
         super::route_target(&manifest, &target.manifest)?;
         Some(MediaMount {
             directory,
-            profile_digest: target.digest()?,
+            profile_digest: target.binding_digest()?,
         })
     } else {
         None
@@ -327,7 +327,10 @@ pub fn run(args: Setup) -> Result<Value> {
         &profile.root.join("Authorization/Manifest.cbor"),
         &profile.manifest.encode()?,
     )?;
-    files::publish_public(&profile.root.join("Authorization/Generation.json"), b"1")?;
+    files::publish_public(
+        &profile.root.join("Authorization/Generation.json"),
+        profile.manifest.generation.to_string().as_bytes(),
+    )?;
     files::publish_public(&profile.root.join("Authorization/Withdrawal.json"), b"0")?;
     files::save(&profile.root.join("ServiceProfile.json"), &profile)?;
     files::reserve(&profile.root)?;
@@ -344,10 +347,11 @@ pub fn run(args: Setup) -> Result<Value> {
         authority_control: None,
         last_time: files::now()?,
     };
+    crate::runtime_audit::initialise(&profile.root, &profile.manifest)?;
     save(&profile, &mut state)?;
     preview(&profile, &state)
 }
-pub(super) fn operator(p: &Profile) -> Result<SigningKey> {
+pub(in crate::runtime_management) fn operator(p: &Profile) -> Result<SigningKey> {
     key(&Zeroizing::new(files::read(
         &p.root.join("Operator.key"),
         32,
@@ -371,13 +375,19 @@ pub fn consent(p: &Profile, s: &mut State, expected: &str) -> Result<Value> {
         key.verifying_key().to_bytes() == p.manifest.operator,
         "local operator identity changed"
     );
-    let payload =
-        runtime_service_authorization::local_consent(&p.manifest, p.role()?.role, 1, &p.artifacts)?;
+    let payload = runtime_service_authorization::local_consent(
+        &p.manifest,
+        p.role()?.role,
+        p.manifest.generation,
+        &p.artifacts,
+    )?;
+    crate::runtime_audit::record(&p.root, &p.manifest, "Consent", "Prepared")?;
     files::publish_public(
         &p.root.join("Authorization/LocalConsent.cbor"),
         &wire::sign_envelope(&payload, &key)?,
     )?;
     s.consented = true;
     save(p, s)?;
+    crate::runtime_audit::record(&p.root, &p.manifest, "Consent", "Committed")?;
     preview(p, s)
 }

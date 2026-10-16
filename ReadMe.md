@@ -35,14 +35,19 @@ verified installation. Installation does not start a service or grant authority.
 
 - [Authority](Documentation/Authority.md): independent trust, explicit capabilities and durable results.
 - [Tier administration](Documentation/Tiers.md): exact policy history and reviewed capability changes.
+- [Network policies](Documentation/NetworkPolicies.md): ordered policy and recovery custody changes.
 - [Search](Documentation/Search.md): approved catalogues, explicit indexing consent and local retained content.
 - [Authority replicas](Documentation/AuthorityReplica.md): pinned peers and consensus operation.
 - [Runtime](Documentation/Runtime.md): setup, preview, local consent and authority lifecycle.
+- [Native provisioning](Documentation/RuntimeProvisioning.md): local identities, pinned certificates and accepted replica inputs.
+- [Package updates](Documentation/UpgradeRecovery.md): signed installation, retained trust and stopped cutover.
+- [Operational audit](Documentation/OperationalAudit.md): bounded signed events and explicitly pinned witnesses.
 - [Service runtime](Documentation/ServiceRuntime.md): exact hosting consent and serving activation.
 - [Private routes](Documentation/PrivateRoutes.md): pinned relay transport, public endpoints and outbound attachments.
 - [Authority epochs](Documentation/AuthorityEpochs.md): certified healthy replacement.
 - [Network recovery](Documentation/NetworkRecovery.md): exceptional recovery and independently accepted identity.
 - [Pages](Documentation/Pages.md): inert publication, manual review and current approval.
+- [Content backups](Documentation/Backups.md): consented cold storage, retention and current-authority restore.
 - [HyperPage](Documentation/HyperPage.md): bounded layout, colour and client-side motion.
 - [Media](Documentation/PageMedia.md): exact raster/vector bytes and explicit disclosure.
 - [Federation](Documentation/Federation.md): bilateral consent, author opt-in and destination review.

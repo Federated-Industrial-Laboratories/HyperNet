@@ -5,16 +5,24 @@ mod bootstrap;
 mod containers;
 #[path = "RuntimeControl.rs"]
 mod control;
+#[path = "RuntimeDiagnostics.rs"]
+mod diagnostics;
 #[path = "RuntimeEpoch.rs"]
 mod epoch;
 #[path = "RuntimeFiles.rs"]
 pub(crate) mod files;
+#[path = "RuntimeManaged.rs"]
+mod managed;
 #[path = "RuntimeModel.rs"]
 mod model;
+#[path = "RuntimePackage.rs"]
+mod package;
 #[path = "RuntimeServices.rs"]
 pub(crate) mod services;
 #[path = "RuntimeSetup.rs"]
 mod setup;
+#[path = "RuntimeTransition.rs"]
+mod transition;
 
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Subcommand};
@@ -54,6 +62,22 @@ pub struct Mutation {
 }
 #[derive(Subcommand)]
 pub enum Command {
+    Audit {
+        #[command(subcommand)]
+        command: crate::runtime_audit::Command,
+    },
+    Provision {
+        #[command(subcommand)]
+        command: crate::runtime_provision::Command,
+    },
+    Transition {
+        #[command(subcommand)]
+        command: transition::Command,
+    },
+    Managed {
+        #[command(subcommand)]
+        command: managed::Command,
+    },
     Services {
         #[command(subcommand)]
         command: services::Command,
@@ -65,7 +89,7 @@ pub enum Command {
     Setup(setup::Setup),
     Preview(Location),
     Status(Location),
-    Diagnose(Location),
+    Diagnose(diagnostics::Options),
     Consent(Mutation),
     Start(Mutation),
     Stop(Mutation),
@@ -135,6 +159,12 @@ fn client(root: &Path, request: &Request) -> Result<serde_json::Value> {
     Ok(response["result"].clone())
 }
 fn serve(path: &Path) -> Result<()> {
+    serve_session(path, None)
+}
+fn serve_managed(path: &Path, floor: u64) -> Result<()> {
+    serve_session(path, Some(floor))
+}
+fn serve_session(path: &Path, managed_floor: Option<u64>) -> Result<()> {
     let root = files::root(path)?;
     if !root.join("Manager").exists() {
         files::directory(&root.join("Manager"))?;
@@ -166,9 +196,27 @@ fn serve(path: &Path) -> Result<()> {
     }
     println!(
         "{}",
-        serde_json::json!({"status":"ManagementReady","networkListener":false,"session":"Foreground","automaticBoot":false})
+        serde_json::json!({"status":"ManagementReady","networkListener":false,"session":if managed_floor.is_some(){"Managed"}else{"Foreground"},"managedBoot":managed_floor.is_some()})
     );
     let outcome = (|| -> Result<()> {
+        if let Some(floor) = managed_floor {
+            control::session_stop(&root)?;
+            let (profile, state) = model::load(&root)?;
+            ensure!(
+                profile.session_policy == "Managed",
+                "Automatic start requires reviewed Managed consent"
+            );
+            control::dispatch(
+                &root,
+                Request {
+                    operation: Operation::Start,
+                    operation_id: Some(hex::encode(rand::random::<[u8; 16]>())),
+                    expected_generation: Some(state.generation),
+                    profile_digest: Some(state.profile_digest),
+                    minimum_signer_generation: Some(floor.max(model::signer_generation(&root)?)),
+                },
+            )?;
+        }
         loop {
             if STOP.load(Ordering::Relaxed) {
                 break;
@@ -241,13 +289,17 @@ fn operate(
 }
 pub fn run(command: Command) -> Result<()> {
     let result = match command {
+        Command::Audit { command } => return crate::runtime_audit::run(command),
+        Command::Provision { command } => return crate::runtime_provision::run(command),
+        Command::Transition { command } => transition::run(command, false)?,
+        Command::Managed { command } => managed::run(command, false)?,
         Command::Services { command } => services::run(command)?,
         Command::Epoch { command } => epoch::run(command)?,
         Command::Setup(args) => setup::setup(args)?,
         Command::Serve(args) => return serve(&args.directory),
         Command::Preview(args) => operate(args.directory, Operation::Preview, None)?,
         Command::Status(args) => operate(args.directory, Operation::Status, None)?,
-        Command::Diagnose(args) => operate(args.directory, Operation::Diagnose, None)?,
+        Command::Diagnose(args) => diagnostics::run(args, diagnostics::collect_authority)?,
         Command::Consent(args) => operate(args.directory.clone(), Operation::Consent, Some(args))?,
         Command::Start(args) => operate(args.directory.clone(), Operation::Start, Some(args))?,
         Command::Stop(args) => operate(args.directory.clone(), Operation::Stop, Some(args))?,
@@ -284,3 +336,12 @@ mod tests {
 #[cfg(test)]
 #[path = "RuntimeTests.rs"]
 mod lifecycle_tests;
+
+pub(crate) fn approved_backup_volume(
+    root: &Path,
+    host: [u8; 32],
+    volume: [u8; 32],
+    live: bool,
+) -> Result<(crate::runtime_manifest::Manifest, std::path::PathBuf, u64)> {
+    services::approved_backup_volume(root, host, volume, live)
+}
