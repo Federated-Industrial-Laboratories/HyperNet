@@ -593,6 +593,9 @@ impl AdmissionSchedule {
         operation_budget: u64,
         job: Option<(Digest, bool)>,
     ) -> Work {
+        // Parked attachments carry no traffic. Replenishment must not occupy the requester
+        // while a live reader needs renewal; an attachment required by a waiting reader is eligible.
+        let job = job.filter(|(_, background)| !background || expires.is_none());
         let reader = job.is_some_and(|(_, attachment)| !attachment);
         let threatened = expires.is_some_and(|(expiry, accepted_at)| {
             let budget =

@@ -133,7 +133,50 @@ fn private_route_reader_arriving_during_renewal_receives_one_admission_turn() {
     schedule.refreshed();
     assert_eq!(
         schedule.choose(8600, Some((11100, 0)), 1800, 1800, attachment),
+        Work::Wait
+    );
+}
+
+#[test]
+fn private_route_background_attachments_cannot_delay_active_readers() {
+    let mut schedule = AdmissionSchedule::default();
+    let background = Some(([31; 32], true));
+    let required = Some(([31; 32], false));
+    let live = Some((10000, 3000));
+    // Even an expensive pending attachment neither runs nor brings the renewal forward.
+    assert_eq!(
+        schedule.choose(4000, live, 1000, 9000, background),
+        Work::Wait
+    );
+    assert_eq!(
+        schedule.choose(8800, live, 1000, 9000, background),
+        Work::Wait
+    );
+    assert_eq!(
+        schedule.choose(8900, live, 1000, 9000, background),
         Work::Refresh
+    );
+    schedule.refreshed();
+    let renewed = Some((12500, 10000));
+    assert_eq!(
+        schedule.choose(11400, renewed, 1000, 9000, background),
+        Work::Refresh
+    );
+    // The same attachment becomes necessary when an admitted reader waits for its target.
+    // Its fair turn remains available; neither its queue deadline nor a Gate expiry is reset.
+    assert_eq!(
+        schedule.choose(11400, renewed, 1000, 9000, required),
+        Work::Admit
+    );
+    schedule.admitted(required);
+    assert_eq!(
+        schedule.choose(11400, renewed, 1000, 9000, required),
+        Work::Refresh
+    );
+    // Once forwarding finishes, ordinary pool replenishment is eligible again.
+    assert_eq!(
+        schedule.choose(11400, None, 1000, 9000, background),
+        Work::Admit
     );
 }
 

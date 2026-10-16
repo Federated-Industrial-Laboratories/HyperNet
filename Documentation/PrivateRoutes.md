@@ -112,7 +112,9 @@ admission separates voucher context from the final Permit so renewal can run
 between them. A retained exact voucher can supply context, but it never replaces
 the current Permit required before forwarding. One waiting reader admission step
 can follow renewal, including a reader that arrived during the renewal. An
-unrelated background attachment cannot consume that turn. The forwarding guard
+unrelated background attachment cannot consume that turn. Speculative attachment
+replenishment waits while readers are active and reserves no renewal time. A
+replacement required by a waiting reader remains eligible. The forwarding guard
 still enforces its certified expiry while that step runs.
 
 If a measured cost would require renewing a newly accepted proof immediately,
