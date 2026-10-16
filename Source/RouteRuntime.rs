@@ -473,6 +473,7 @@ struct Request {
 struct Live {
     renewal: Renewal,
     gate: route_io::Gate,
+    accepted_at: u64,
     deadline: u64,
     timing: Timing,
     renewals: u8,
@@ -518,7 +519,9 @@ impl Waiting {
             // The original Permit remains spent. Only its exact current permission is renewed.
             let expires = refresh(&self.live.renewal, setup)?;
             crate::authority_local_transport::remaining(setup)?;
-            self.live.gate.renew(expires.min(deadline))?;
+            let expires = expires.min(deadline);
+            self.live.gate.renew(expires)?;
+            self.live.accepted_at = crate::authority_challenge::boot_time_ms()?;
         }
         Ok(())
     }
@@ -558,8 +561,18 @@ fn pending_admission(
         })
         .or_else(|| (!pending.is_empty()).then_some((0, true)))
 }
-fn refresh_at(expires: u64, operation_budget: u64) -> u64 {
-    expires.saturating_sub(operation_budget.saturating_add(DISPATCH_MS))
+fn useful_until(now: u64, expires: u64) -> u64 {
+    now.saturating_add(expires.saturating_sub(now) / 2)
+        .min(expires)
+}
+fn refresh_at(expires: u64, operation_budget: u64, accepted_at: Option<u64>) -> u64 {
+    let predicted = expires.saturating_sub(operation_budget.saturating_add(DISPATCH_MS));
+    match accepted_at {
+        // An overdrawn prediction must leave some of the new proof's actual tail for useful work.
+        // Insufficient capacity can still pause I/O at expiry; no hard deadline changes.
+        Some(accepted) if predicted <= accepted => useful_until(accepted, expires),
+        _ => predicted,
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Work {
@@ -569,25 +582,24 @@ enum Work {
 }
 #[derive(Default)]
 struct AdmissionSchedule {
-    reader_turn: Option<Digest>,
+    reader_turn: bool,
 }
 impl AdmissionSchedule {
     fn choose(
-        &mut self,
+        &self,
         now: u64,
-        expires: Option<u64>,
+        expires: Option<(u64, u64)>,
+        renewal_budget: u64,
         operation_budget: u64,
         job: Option<(Digest, bool)>,
     ) -> Work {
-        let reader = job.filter(|(_, attachment)| !attachment).map(|(id, _)| id);
-        if self.reader_turn != reader {
-            self.reader_turn = None;
-        }
-        let threatened = expires.is_some_and(|expiry| {
-            let next = now.saturating_add(if job.is_some() { operation_budget } else { 0 });
-            next >= refresh_at(expiry, operation_budget)
+        let reader = job.is_some_and(|(_, attachment)| !attachment);
+        let threatened = expires.is_some_and(|(expiry, accepted_at)| {
+            let budget =
+                renewal_budget.saturating_add(if job.is_some() { operation_budget } else { 0 });
+            now >= refresh_at(expiry, budget, Some(accepted_at))
         });
-        if threatened && (reader.is_none() || self.reader_turn != reader) {
+        if threatened && !(reader && self.reader_turn) {
             Work::Refresh
         } else if job.is_some() {
             Work::Admit
@@ -595,13 +607,15 @@ impl AdmissionSchedule {
             Work::Wait
         }
     }
-    fn refreshed(&mut self, job: Option<(Digest, bool)>) {
-        // One exact reader stage follows a fresh renewal even when serial capacity is insufficient.
+    fn refreshed(&mut self) {
+        // A reader arriving during renewal also receives the next bounded admission turn.
         // This affects scheduling only: the unchanged Gate still pauses bytes at proof expiry.
-        self.reader_turn = job.filter(|(_, attachment)| !attachment).map(|(id, _)| id);
+        self.reader_turn = true;
     }
-    fn admitted(&mut self) {
-        self.reader_turn = None;
+    fn admitted(&mut self, job: Option<(Digest, bool)>) {
+        if job.is_some_and(|(_, attachment)| !attachment) {
+            self.reader_turn = false;
+        }
     }
 }
 fn total_deadline(started: u64, limits: Limits, expires: u64, now: u64, boot: u64) -> Result<u64> {
@@ -842,13 +856,14 @@ async fn relay(
             });
         let renewal = live
             .iter()
-            .map(|(id, session)| Ok((*id, session.gate.expiry()?)))
+            .map(|(id, session)| Ok((*id, (session.gate.expiry()?, session.accepted_at))))
             .collect::<Result<Vec<_>>>()?
             .into_iter()
-            .min_by_key(|(_, expires)| *expires);
+            .min_by_key(|(_, (expires, _))| *expires);
         let work = schedule.choose(
             boot,
             renewal.map(|(_, expires)| expires),
+            client.voucher_renewal_budget_ms(),
             client.operation_budget_ms(),
             job,
         );
@@ -879,15 +894,20 @@ async fn relay(
                     timing.mark(if result.is_ok() { Phase::RenewalComplete } else { Phase::RenewalRefused });
                     if let Err(error) = &result { timing.failure(Phase::RenewalRefused, error); }
                     active.check(guard).context(Phase::RenewalCurrent)?;
-                    if result.and_then(|expires| session.gate.renew(expires.min(session.deadline))).is_ok() {
+                    if result.and_then(|expires| {
+                        let expires = expires.min(session.deadline);
+                        session.gate.renew(expires)?;
+                        session.accepted_at = crate::authority_challenge::boot_time_ms()?;
+                        Ok(())
+                    }).is_ok() {
                         let now = crate::authority_challenge::boot_time_ms()?;
                         if expiry <= now { timing.mark(Phase::RelayGuardResumed); }
-                        schedule.refreshed(job);
+                        schedule.refreshed();
                     } else { live.remove(&id); }
                 }
             },
             _ = std::future::ready(()), if work == Work::Admit => {
-                schedule.admitted();
+                schedule.admitted(job);
                 if let Some((reader, attachment)) = pairing {
                     let mut reader = waiting.remove(reader).context("waiting reader disappeared")?;
                     let attachment = attachments.remove(attachment).context("matching attachment disappeared")?;
@@ -966,6 +986,7 @@ async fn relay(
                             let id = opened.connection;
                             let session = Live {
                                 renewal: admission.renewal.context("reader admission omitted its renewal binding")?,
+                                accepted_at: boot,
                                 gate: permission.clone(), deadline, timing, renewals: 0,
                             };
                             if admission.target.mode == 3 {
@@ -1260,6 +1281,7 @@ async fn response_at(
 }
 struct EndpointPermission {
     gate: route_io::Gate,
+    accepted_at: Option<u64>,
     renewals: u64,
 }
 impl Drop for EndpointPermission {
@@ -1269,7 +1291,7 @@ impl Drop for EndpointPermission {
 }
 impl EndpointPermission {
     fn current(&mut self, client: &mut Client<'_>, deadline: u64) -> Result<()> {
-        self.prepare(deadline, client.operation_budget_ms(), |deadline| {
+        self.prepare(deadline, client.own_renewal_budget_ms(), |deadline| {
             client.before(deadline, |client| client.own())?;
             client.effect_deadline()
         })
@@ -1281,8 +1303,12 @@ impl EndpointPermission {
         refresh: impl FnOnce(u64) -> Result<u64>,
     ) -> Result<()> {
         crate::authority_local_transport::remaining(deadline)?;
-        if crate::authority_challenge::boot_time_ms()?.saturating_add(budget)
-            >= refresh_at(self.gate.expiry()?, budget)
+        if crate::authority_challenge::boot_time_ms()?
+            >= refresh_at(
+                self.gate.expiry()?,
+                budget.saturating_mul(2),
+                self.accepted_at,
+            )
         {
             // Readiness reserves one application action before the next renewal's latest start.
             self.renew(deadline, refresh)?;
@@ -1318,6 +1344,7 @@ impl EndpointPermission {
             let expiry = refresh(deadline)?;
             crate::authority_local_transport::remaining(deadline)?;
             self.gate.renew(expiry)?;
+            self.accepted_at = Some(crate::authority_challenge::boot_time_ms()?);
             Ok(expiry)
         })();
         if let Some(sample) = sample {
@@ -1366,6 +1393,7 @@ async fn endpoint(
     let expiry = client.effect_deadline()?;
     let mut permission = EndpointPermission {
         gate: route_io::Gate::new(expiry),
+        accepted_at: None,
         renewals: 0,
     };
     let ready = protocol::endpoint_ready(
@@ -1446,7 +1474,7 @@ async fn endpoint(
             .unzip();
         let refresh_due = !responses.is_empty()
             && crate::authority_challenge::boot_time_ms()?
-                >= refresh_at(permission.gate.expiry()?, client.operation_budget_ms());
+                >= refresh_at(permission.gate.expiry()?, client.own_renewal_budget_ms(), permission.accepted_at);
         tokio::select! {
             biased;
             _ = tokio::signal::ctrl_c() => break,

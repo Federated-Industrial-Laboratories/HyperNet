@@ -61,63 +61,109 @@ fn typed_voucher(
 
 #[test]
 fn private_route_refresh_schedule_predicts_full_action_cost() {
-    let mut schedule = AdmissionSchedule::default();
+    let schedule = AdmissionSchedule::default();
     let reader = Some(([31; 32], false));
-    assert_eq!(refresh_at(7600, 1800), 5700);
-    assert_eq!(schedule.choose(5600, Some(7600), 1800, None), Work::Wait);
-    assert_eq!(schedule.choose(5700, Some(7600), 1800, None), Work::Refresh);
-    // A fresh job must not occupy the single requester across the latest renewal start.
-    assert_eq!(schedule.choose(3800, Some(7600), 1800, reader), Work::Admit);
+    assert_eq!(refresh_at(7600, 1800, None), 5700);
     assert_eq!(
-        schedule.choose(3900, Some(7600), 1800, reader),
+        schedule.choose(5600, Some((7600, 0)), 1800, 1800, None),
+        Work::Wait
+    );
+    assert_eq!(
+        schedule.choose(5700, Some((7600, 0)), 1800, 1800, None),
         Work::Refresh
     );
-    // A larger observed action cost immediately advances the next decision, even without a job.
-    assert_eq!(schedule.choose(5100, Some(7600), 2500, None), Work::Refresh);
-    assert_eq!(refresh_at(7600, 2500), 5000);
-    assert_eq!(refresh_at(100, u64::MAX), 0);
+    // A fresh job must not occupy the single requester across the latest renewal start.
+    assert_eq!(
+        schedule.choose(3800, Some((7600, 0)), 1800, 1800, reader),
+        Work::Admit
+    );
+    assert_eq!(
+        schedule.choose(3900, Some((7600, 0)), 1800, 1800, reader),
+        Work::Refresh
+    );
+    // A slow admission reserves time only when admission work is actually queued.
+    assert_eq!(
+        schedule.choose(5100, Some((7600, 0)), 1800, 4500, None),
+        Work::Wait
+    );
+    assert_eq!(
+        schedule.choose(5100, Some((7600, 0)), 1800, 4500, reader),
+        Work::Refresh
+    );
+    assert_eq!(refresh_at(100, u64::MAX, None), 0);
 }
 
 #[test]
-fn private_route_reader_fairness_is_one_stage_and_exact_connection() {
+fn private_route_reader_arriving_during_renewal_receives_one_admission_turn() {
     let mut schedule = AdmissionSchedule::default();
-    let first = Some(([31; 32], false));
-    let second = Some(([32; 32], false));
+    let reader = Some(([31; 32], false));
+    let replacement = Some(([32; 32], false));
     let attachment = Some(([33; 32], true));
     assert_eq!(
-        schedule.choose(5000, Some(7500), 1800, first),
+        schedule.choose(6000, Some((7500, 0)), 1800, 1800, None),
         Work::Refresh
     );
-    schedule.refreshed(first);
-    // Insufficient serial capacity cannot starve every admission; the Gate still enforces expiry.
-    assert_eq!(schedule.choose(6800, Some(9300), 1800, first), Work::Admit);
-    schedule.admitted();
+    schedule.refreshed();
     assert_eq!(
-        schedule.choose(8600, Some(9300), 1800, first),
-        Work::Refresh
+        schedule.choose(6800, Some((9300, 0)), 1800, 1800, None),
+        Work::Wait
     );
-    schedule.refreshed(first);
+    // A background attachment cannot spend the next reader's scheduling turn.
+    schedule.admitted(attachment);
     assert_eq!(
-        schedule.choose(8600, Some(11100), 1800, second),
+        schedule.choose(6800, Some((9300, 0)), 1800, 1800, reader),
+        Work::Admit
+    );
+    schedule.admitted(reader);
+    assert_eq!(
+        schedule.choose(6800, Some((9300, 0)), 1800, 1800, reader),
+        Work::Refresh
+    );
+    schedule.refreshed();
+    // A replacement required by a waiting reader is classified as eligible work.
+    assert_eq!(
+        schedule.choose(6800, Some((9300, 0)), 1800, 1800, replacement),
+        Work::Admit
+    );
+    schedule.admitted(replacement);
+    assert_eq!(
+        schedule.choose(6800, Some((9300, 0)), 1800, 1800, replacement),
+        Work::Refresh
+    );
+    schedule.refreshed();
+    assert_eq!(
+        schedule.choose(8600, Some((11100, 0)), 1800, 1800, attachment),
+        Work::Refresh
+    );
+}
+
+#[test]
+fn private_route_fresh_permission_has_useful_time_without_extending_its_expiry() {
+    let schedule = AdmissionSchedule::default();
+    let reader = Some(([31; 32], false));
+    let expires = 10000;
+    let accepted_at = 8000;
+    // Even a successful but slow renewal cannot immediately order another renewal.
+    assert_eq!(
+        schedule.choose(8000, Some((expires, accepted_at)), 4000, 4000, None),
+        Work::Wait
+    );
+    assert_eq!(
+        schedule.choose(8000, Some((expires, accepted_at)), 4000, 4000, reader),
+        Work::Admit
+    );
+    assert_eq!(
+        schedule.choose(9000, Some((expires, accepted_at)), 4000, 4000, None),
         Work::Refresh
     );
     assert_eq!(
-        schedule.choose(8600, Some(11100), 1800, first),
+        schedule.choose(expires, Some((expires, accepted_at)), 4000, 4000, None),
         Work::Refresh
     );
-    schedule.refreshed(first);
-    // Expiry/cancellation removes the selected job; its turn cannot survive for later reuse.
-    assert_eq!(schedule.choose(8600, Some(11100), 1800, None), Work::Wait);
-    assert_eq!(
-        schedule.choose(8600, Some(11100), 1800, first),
-        Work::Refresh
-    );
-    schedule.refreshed(attachment);
-    assert_eq!(
-        schedule.choose(8600, Some(11100), 1800, attachment),
-        Work::Refresh
-    );
-    assert_eq!(schedule.choose(8600, None, 1800, attachment), Work::Admit);
+    // Keep a viable early renewal instead of delaying every proof until its midpoint.
+    assert_eq!(refresh_at(10500, 2000, Some(8000)), 8400);
+    assert!(useful_until(8000, expires) < expires);
+    assert_eq!(refresh_at(expires, u64::MAX, Some(u64::MAX)), expires);
 }
 
 #[tokio::test]
@@ -153,8 +199,11 @@ async fn private_route_cold_admission_yields_with_original_binding_and_slot() {
     let job = Some((connection, false));
     let mut state = State::empty([1; 32], [2; 32]);
     let mut schedule = AdmissionSchedule::default();
-    assert_eq!(schedule.choose(3000, Some(8000), 1700, job), Work::Admit);
-    schedule.admitted();
+    assert_eq!(
+        schedule.choose(3000, Some((8000, 0)), 1700, 1700, job),
+        Work::Admit
+    );
+    schedule.admitted(job);
     assert!(
         retained_voucher(&state, &reference, &queued.request, possession)
             .unwrap()
@@ -162,11 +211,17 @@ async fn private_route_cold_admission_yields_with_original_binding_and_slot() {
     );
     // Only the certified Context result is retained; no usage record or forwarding permission exists.
     state.records.insert((166, reference.id), record);
-    assert_eq!(schedule.choose(4700, Some(8000), 1700, job), Work::Refresh);
+    assert_eq!(
+        schedule.choose(4700, Some((8000, 0)), 1700, 1700, job),
+        Work::Refresh
+    );
     assert_eq!(slots.available_permits(), 0);
-    schedule.refreshed(job);
-    assert_eq!(schedule.choose(6400, Some(8900), 1700, job), Work::Admit);
-    schedule.admitted();
+    schedule.refreshed();
+    assert_eq!(
+        schedule.choose(6400, Some((8900, 0)), 1700, 1700, job),
+        Work::Admit
+    );
+    schedule.admitted(job);
     assert!(
         retained_voucher(&state, &reference, &queued.request, possession)
             .unwrap()
@@ -190,12 +245,6 @@ async fn private_route_cold_admission_yields_with_original_binding_and_slot() {
     waiting.retain(|job| job.deadline > 12000);
     assert!(waiting.is_empty());
     assert_eq!(slots.available_permits(), 1);
-    schedule.refreshed(job);
-    assert_eq!(schedule.choose(12000, Some(14500), 1700, None), Work::Wait);
-    assert_eq!(
-        schedule.choose(12000, Some(14500), 1700, job),
-        Work::Refresh
-    );
 }
 
 fn certificates() -> (Certificate, Certificate) {
@@ -392,9 +441,10 @@ async fn private_route_endpoint_prepares_near_expiry_permission_before_ready_and
     let budget = 1800;
     gate.renew(old_expiry).unwrap();
     // The proof is current, but an application action would cross the renewal's latest start.
-    assert!(now < refresh_at(old_expiry, budget));
+    assert!(now < refresh_at(old_expiry, budget, None));
     let mut permission = EndpointPermission {
         gate: gate.clone(),
+        accepted_at: None,
         renewals: 0,
     };
     let fresh_expiry = now + 5000;
@@ -410,7 +460,7 @@ async fn private_route_endpoint_prepares_near_expiry_permission_before_ready_and
     assert!(renewed);
     assert_eq!(gate.expiry().unwrap(), fresh_expiry);
     permission
-        .prepare(deadline, budget, |_| {
+        .prepare(deadline, 10000, |_| {
             anyhow::bail!("fresh permission must be reused")
         })
         .unwrap();
@@ -447,6 +497,8 @@ async fn private_route_endpoint_prepares_near_expiry_permission_before_ready_and
     assert_eq!(request.session.deadline, deadline);
     assert_eq!(permission.renewals, 1);
     drop(request);
+    // This models a later point in the same proof after its useful interval has elapsed.
+    permission.accepted_at = None;
     gate.renew(crate::authority_challenge::boot_time_ms().unwrap() + 1000)
         .unwrap();
     assert!(
@@ -457,6 +509,16 @@ async fn private_route_endpoint_prepares_near_expiry_permission_before_ready_and
             .is_err()
     );
     assert_eq!(permission.renewals, 2);
+    let retained_expiry = gate.expiry().unwrap();
+    assert!(
+        permission
+            .renew(deadline, |_| Ok(
+                crate::authority_challenge::boot_time_ms().unwrap()
+            ))
+            .is_err()
+    );
+    assert_eq!(gate.expiry().unwrap(), retained_expiry);
+    assert_eq!(permission.renewals, 3);
     assert!(
         permission
             .prepare(
@@ -466,7 +528,7 @@ async fn private_route_endpoint_prepares_near_expiry_permission_before_ready_and
             )
             .is_err()
     );
-    assert_eq!(permission.renewals, 2);
+    assert_eq!(permission.renewals, 3);
 }
 #[tokio::test]
 async fn private_route_endpoint_readiness_retains_original_deadline() {
@@ -1337,6 +1399,7 @@ async fn private_route_rendezvous_replaces_expired_attachment_without_second_res
         live: Live {
             renewal: Renewal::fixture(voucher.reference, target.clone(), 11000),
             gate: route_io::Gate::new(boot),
+            accepted_at: 0,
             deadline,
             timing: Timing::begin(boot, false),
             renewals: 0,
@@ -1521,6 +1584,7 @@ async fn private_route_rendezvous_refusal_and_setup_expiry_release_original_slot
             live: Live {
                 renewal: Renewal::fixture(voucher.reference, b"Exact target".to_vec(), 11000),
                 gate: gate.clone(),
+                accepted_at: 0,
                 deadline: now + 10000,
                 timing: Timing::begin(now, false),
                 renewals: 0,

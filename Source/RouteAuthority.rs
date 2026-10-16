@@ -75,8 +75,33 @@ pub struct Client<'a> {
     session: Session,
     disk: disk::Disk,
     last_expiry: u64,
-    operation_high_water_ms: u64,
+    costs: OperationCosts,
     deadline: Option<u64>,
+}
+#[derive(Default)]
+struct OperationCosts {
+    action_ms: u64,
+    own_ms: Option<u64>,
+    voucher_ms: Option<u64>,
+}
+impl OperationCosts {
+    fn observe(&mut self, command: &DomainCommand, own: Digest, elapsed: u64) {
+        // These predict scheduling only; the certified expiry remains the I/O limit.
+        self.action_ms = elapsed;
+        match command {
+            DomainCommand::Route(routes::Command::Lookup { service }) if *service == own => {
+                self.own_ms = Some(elapsed);
+            }
+            DomainCommand::Route(routes::Command::VoucherContext { .. }) => {
+                self.voucher_ms = Some(elapsed);
+            }
+            _ => {}
+        }
+    }
+    fn voucher_ms(&self) -> u64 {
+        // A retained voucher can admit before its first renewal in this process.
+        self.voucher_ms.unwrap_or(self.action_ms)
+    }
 }
 impl<'a> Client<'a> {
     pub fn open(config: &'a Config, guard: &'a Guard, active: &'a Active) -> Result<Self> {
@@ -100,7 +125,7 @@ impl<'a> Client<'a> {
             session: Session::new()?,
             disk,
             last_expiry: 0,
-            operation_high_water_ms: 0,
+            costs: OperationCosts::default(),
             deadline: None,
         };
         out.check_cache()?;
@@ -513,14 +538,22 @@ impl<'a> Client<'a> {
         if outcome.is_err() {
             self.session.discard(&challenge)?;
         } else {
-            self.operation_high_water_ms = self
-                .operation_high_water_ms
-                .max(authority_challenge::boot_time_ms()?.saturating_sub(started));
+            self.costs.observe(
+                &operation.command,
+                self.config.profile.identity.service,
+                authority_challenge::boot_time_ms()?.saturating_sub(started),
+            );
         }
         outcome
     }
     pub fn operation_budget_ms(&self) -> u64 {
-        self.operation_high_water_ms
+        self.costs.action_ms
+    }
+    pub fn voucher_renewal_budget_ms(&self) -> u64 {
+        self.costs.voucher_ms()
+    }
+    pub fn own_renewal_budget_ms(&self) -> u64 {
+        self.costs.own_ms.unwrap_or(0)
     }
     fn recover(&mut self) -> Result<()> {
         if let Some(pending) = self.pending()? {
@@ -857,5 +890,37 @@ fn intersect(
         bytes: left.bytes.min(right.bytes),
         duration_ms: left.duration_ms.min(right.duration_ms),
         idle_ms: left.idle_ms.min(right.idle_ms),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_route_recurring_cost_replaces_outliers_and_excludes_other_actions() {
+        let own = [3; 32];
+        let lookup = DomainCommand::Route(routes::Command::Lookup { service: own });
+        let voucher = DomainCommand::Route(routes::Command::VoucherContext {
+            voucher: VersionRef {
+                kind: 166,
+                id: [4; 32],
+                generation: 1,
+                digest: [5; 32],
+            },
+        });
+        let unrelated = DomainCommand::Route(routes::Command::Lookup { service: [6; 32] });
+        let mut costs = OperationCosts::default();
+        costs.observe(&lookup, own, 1800);
+        costs.observe(&voucher, own, 1700);
+        costs.observe(&unrelated, own, 4500);
+        assert_eq!(costs.own_ms, Some(1800));
+        assert_eq!(costs.voucher_ms(), 1700);
+        assert_eq!(costs.action_ms, 4500);
+        costs.observe(&lookup, own, 650);
+        costs.observe(&voucher, own, 700);
+        assert_eq!(costs.own_ms, Some(650));
+        assert_eq!(costs.voucher_ms(), 700);
+        assert_eq!(costs.action_ms, 700);
     }
 }

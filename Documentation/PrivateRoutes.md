@@ -104,14 +104,28 @@ defer acceptance by one dispatch interval. Existing streams and shutdown remain
 active; the listener does not spin, enlarge a pool or reset a connection deadline.
 Acceptance resumes when resources become available. Fatal listener errors still
 stop the service.
-Renewal is scheduled before the current proof expires,
-using the longest measured successful authority operation and the dispatch
-interval. Due renewals take priority between authority jobs. Cold reader
+Renewal scheduling uses the latest successful measurement of the corresponding
+renewal operation and the dispatch interval. Unrelated authority operations do
+not permanently increase that estimate. Queued admission separately reserves
+the latest measured action cost. Due renewals take priority between authority jobs. Cold reader
 admission separates voucher context from the final Permit so renewal can run
 between them. A retained exact voucher can supply context, but it never replaces
 the current Permit required before forwarding. One waiting reader admission step
-can follow renewal to prevent indefinite starvation. The forwarding guard still
-enforces its certified expiry while that step runs.
+can follow renewal, including a reader that arrived during the renewal. An
+unrelated background attachment cannot consume that turn. The forwarding guard
+still enforces its certified expiry while that step runs.
+
+If a measured cost would require renewing a newly accepted proof immediately,
+the scheduler leaves the first half of that proof's actual remaining lifetime
+for useful work. A viable earlier renewal start remains unchanged. This changes
+dispatch timing only: insufficient authority capacity still pauses or refuses
+I/O at expiry. It never extends a proof or a connection deadline.
+
+Route metadata that is byte-identical to successfully persisted state does not
+require another disk replacement. Changed metadata and every new spent connection
+still require durable publication. A failed replacement cannot count as a saved
+copy or suppress the next write.
+
 Queue time counts against the original admission deadline; excess connections
 close. Fixed-category, bounded diagnostics distinguish capacity refusal, TLS or
 request rejection, authority admission, admitted permission expiry, unavailable
