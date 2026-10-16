@@ -17,6 +17,7 @@ use super::{
     peer::{self, Message},
     records::{
         Certificate, Configuration, Digest, Key, NewView, Node, OrderedRequest, Phase, SignedVote,
+        Vote,
     },
     repair::{Item, Reference},
 };
@@ -88,6 +89,26 @@ pub(super) enum Event {
         answer: oneshot::Sender<Vec<u8>>,
         queued: Instant,
     },
+}
+#[derive(PartialEq, Eq)]
+enum EvidenceStatement {
+    Vote(Vote),
+    Wish(u64),
+    NewView(u64),
+}
+impl EvidenceStatement {
+    fn number(&self) -> u64 {
+        match self {
+            Self::Wish(_) => 0,
+            Self::NewView(_) => 1,
+            Self::Vote(_) => 3,
+        }
+    }
+}
+enum EvidenceOutput {
+    Vote(Option<Vec<u8>>),
+    Synchronizer(Outputs),
+    Report,
 }
 struct ShareSet {
     command: Digest,
@@ -265,29 +286,60 @@ pub async fn serve(
     result
 }
 impl Driver {
-    fn queued_vote(&self, event: &Event) -> Option<SignedVote> {
+    fn queued_evidence(&self, event: &Event) -> Option<(EvidenceStatement, Vec<u8>)> {
         let Event::Peer { sender, body, .. } = event else {
             return None;
         };
         self.engine.voting().ok()?;
-        let Message::Vote(input) = peer::decode(self.config(), *sender, body).ok()? else {
-            return None;
-        };
-        let signed = self.engine.received_vote(&input).ok()?;
-        if signed.vote.view < self.engine.view().saturating_sub(1) {
-            return None;
+        match peer::decode(self.config(), *sender, body).ok()? {
+            Message::Vote(input) => {
+                let signed = self.engine.received_vote(&input).ok()?;
+                if signed.vote.view < self.engine.view().saturating_sub(1) {
+                    return None;
+                }
+                let entry = super::vote_id(signed.vote.view, signed.vote.phase, &signed.signer);
+                if self
+                    .engine
+                    .snapshot
+                    .votes
+                    .get(&entry)
+                    .is_some_and(|old| old != &input)
+                {
+                    return None;
+                }
+                Some((EvidenceStatement::Vote(signed.vote), input))
+            }
+            Message::Wish(input) => {
+                let (_, target) = super::synchronizer::verify(self.config(), &input).ok()?;
+                Some((EvidenceStatement::Wish(target), input))
+            }
+            Message::NewView(input, _) => {
+                // Decode authenticates the attached QC. Batching requires its
+                // exact dependency closure already available; repair and input
+                // waiting retain their ordinary event path.
+                let report = self
+                    .engine
+                    .checked_new_view(&self.engine.snapshot, &input)
+                    .ok()?;
+                let entry = super::report_id(report.view, &report.signer);
+                if self
+                    .engine
+                    .snapshot
+                    .reports
+                    .get(&entry)
+                    .is_some_and(|old| old != &input)
+                {
+                    return None;
+                }
+                let references = self
+                    .engine
+                    .certificate_input_references(report.prepare)
+                    .ok()?;
+                self.engine.input_reader().ok()?.verify(&references).ok()?;
+                Some((EvidenceStatement::NewView(report.view), input))
+            }
+            _ => None,
         }
-        let entry = super::vote_id(signed.vote.view, signed.vote.phase, &signed.signer);
-        if self
-            .engine
-            .snapshot
-            .votes
-            .get(&entry)
-            .is_some_and(|old| old != &input)
-        {
-            return None;
-        }
-        Some(signed)
     }
     fn acknowledge_peer(&self, body: &[u8], answer: oneshot::Sender<Vec<u8>>, disposition: u64) {
         // Outbound HTTP responses have no reply receiver. Incoming requests
@@ -309,12 +361,11 @@ impl Driver {
             self.event(first)?;
             return Ok(None);
         }
-        let Some(vote) = self.queued_vote(&first) else {
+        let Some((statement, input)) = self.queued_evidence(&first) else {
             self.event(first)?;
             return Ok(None);
         };
-        let statement = vote.vote.clone();
-        let mut batch = vec![(first, vote)];
+        let mut batch = vec![(first, input)];
         let mut deferred = None;
         // Take only the queue prefix already present, bounded by the existing
         // ingress capacity. Never wait for a quorum or cross another event.
@@ -322,8 +373,8 @@ impl Driver {
             let Ok(event) = receiver.try_recv() else {
                 break;
             };
-            match self.queued_vote(&event) {
-                Some(vote) if vote.vote == statement => batch.push((event, vote)),
+            match self.queued_evidence(&event) {
+                Some((next, input)) if next == statement => batch.push((event, input)),
                 _ => {
                     deferred = Some(event);
                     break;
@@ -340,22 +391,38 @@ impl Driver {
         let mut turn =
             self.diagnostics
                 .begin(diagnostics::Stage::Peer, self.engine.view(), Some(*queued));
-        turn.message_kind(3);
-        let inputs: Vec<_> = batch
-            .iter()
-            .map(|(_, vote)| vote.envelope.clone())
-            .collect();
-        let outputs = self.engine.receive_votes(&inputs)?;
+        let kind = statement.number();
+        turn.message_kind(kind);
+        let inputs: Vec<_> = batch.iter().map(|(_, input)| input.clone()).collect();
+        let outputs: Vec<_> = match statement {
+            EvidenceStatement::Vote(_) => self
+                .engine
+                .receive_votes(&inputs)?
+                .into_iter()
+                .map(EvidenceOutput::Vote)
+                .collect(),
+            EvidenceStatement::Wish(_) => self
+                .engine
+                .receive_wishes(&inputs)?
+                .into_iter()
+                .map(EvidenceOutput::Synchronizer)
+                .collect(),
+            EvidenceStatement::NewView(_) => (0..self.engine.receive_new_views(&inputs)?)
+                .map(|_| EvidenceOutput::Report)
+                .collect(),
+        };
         let remaining = batch.split_off(outputs.len());
         let accepted = !batch.is_empty();
-        for ((event, _), qc) in batch.into_iter().zip(outputs) {
-            let disposition = match qc
-                .map(|qc| self.broadcast(Message::Certificate(qc)))
-                .transpose()
-            {
+        for ((event, _), output) in batch.into_iter().zip(outputs) {
+            let emitted = match output {
+                EvidenceOutput::Vote(Some(qc)) => self.broadcast(Message::Certificate(qc)),
+                EvidenceOutput::Synchronizer(output) => self.outputs(output),
+                EvidenceOutput::Vote(None) | EvidenceOutput::Report => Ok(()),
+            };
+            let disposition = match emitted {
                 Ok(_) => 0,
                 Err(error) => {
-                    diagnostic("protocol", self.engine.view(), 3, &error);
+                    diagnostic("protocol", self.engine.view(), kind, &error);
                     2
                 }
             };

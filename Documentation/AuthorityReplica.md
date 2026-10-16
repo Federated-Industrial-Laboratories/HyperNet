@@ -267,6 +267,8 @@ resource pressure. Each category emits at most once per five seconds, with the
 next record counting suppressed observations. Completed slow turns include
 storage sync count, total and maximum sync time, file and directory counts, and
 successful journal commits. Decoded peer turns include the numeric message kind.
+Activity summaries include the suspend-aware boot time when available, allowing
+local request timings to be compared with the reported storage interval.
 A proposal rejected by the existing one-second clock-age bound reports
 `ProposalClockAge` and its measured age. Records contain fixed categories,
 durations and view numbers, without request contents, keys or private errors.

@@ -188,6 +188,7 @@ impl Activity {
         }
         let record = serde_json::json!({
             "status": "ReplicaDiagnostic", "code": "ActivitySummary",
+            "bootMs": crate::authority_challenge::boot_time_ms().ok(),
             "firstView": self.first_view, "view": view,
             "intervalNs": nanos(interval), "turns": self.turns,
             "busyElapsedNs": self.busy_ns,

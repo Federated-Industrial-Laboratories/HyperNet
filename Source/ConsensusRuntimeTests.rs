@@ -442,6 +442,403 @@ fn queued_vote_publication_failure_releases_no_acknowledgement_or_broadcast() {
 }
 
 #[test]
+fn queued_synchronization_evidence_publishes_once_and_retains_all_signers() {
+    for reports in [false, true] {
+        let (configuration, keys) = fixture();
+        let directory = Directory::new();
+        let mut target = Engine::create(
+            &directory.0,
+            configuration.clone(),
+            keys[3].clone(),
+            initial(),
+        )
+        .unwrap();
+        target.advance_view().unwrap();
+        if reports {
+            for key in &keys[..2] {
+                target
+                    .receive_wish(
+                        &super::super::synchronizer::sign(&configuration, 1, key).unwrap(),
+                    )
+                    .unwrap();
+            }
+        }
+        let genesis = configuration.genesis_qc().unwrap();
+        let mut driver = repair_driver(
+            target,
+            &directory.0,
+            &keys,
+            configuration.voters[0],
+            ingress::Mailbox::new(),
+        );
+        let (sender, mut receiver) = mpsc::channel(MAX_EVENTS);
+        let mut events = Vec::new();
+        let mut responses = Vec::new();
+        for key in &keys[..3] {
+            let message = if reports {
+                Message::NewView(
+                    NewView::sign(&configuration, 1, genesis.digest(), key)
+                        .unwrap()
+                        .envelope,
+                    genesis.bytes.clone(),
+                )
+            } else {
+                Message::Wish(super::super::synchronizer::sign(&configuration, 1, key).unwrap())
+            };
+            let (event, response, digest) = queued_peer_event(&configuration, key, &message);
+            events.push(event);
+            responses.push((response, digest));
+        }
+        let first = events.remove(0);
+        for event in events {
+            sender
+                .try_send(event)
+                .unwrap_or_else(|_| panic!("Queue unexpectedly full"));
+        }
+        let generation = driver.engine.generation();
+        assert!(driver.queued_event(first, &mut receiver).unwrap().is_none());
+        assert_eq!(driver.engine.generation(), generation + 1);
+        assert!(receiver.is_empty());
+        for (mut response, digest) in responses {
+            assert!(
+                matches!(peer::decode(&configuration, configuration.voters[3], &response.try_recv().unwrap()).unwrap(), Message::Ack(actual, 0) if actual == digest)
+            );
+        }
+        assert_eq!(driver.engine.view(), 1);
+        let report = driver.engine.snapshot.reports
+            [&super::super::report_id(1, &configuration.voters[3])]
+            .clone();
+        if !reports {
+            assert!(driver.outbox.values().any(
+                |(_, message, _)| matches!(message, Message::NewView(bytes, _) if bytes == &report)
+            ));
+        }
+        drop(driver);
+        let resumed = Engine::open(
+            &directory.0,
+            configuration.clone(),
+            keys[3].clone(),
+            generation + 1,
+        )
+        .unwrap();
+        for (member, key) in keys.iter().enumerate() {
+            if reports {
+                assert_eq!(
+                    resumed.snapshot.reports
+                        [&super::super::report_id(1, &configuration.voters[member])],
+                    NewView::sign(&configuration, 1, genesis.digest(), key)
+                        .unwrap()
+                        .envelope
+                );
+            } else {
+                assert_eq!(
+                    resumed.snapshot.wishes[member].as_ref(),
+                    Some(&super::super::synchronizer::sign(&configuration, 1, key).unwrap())
+                );
+                assert_eq!(resumed.snapshot.sync.maxima[member], 1);
+            }
+        }
+        assert_eq!(
+            resumed.snapshot.reports[&super::super::report_id(1, &configuration.voters[3])],
+            report
+        );
+    }
+}
+
+#[test]
+fn queued_synchronization_stops_at_target_kind_invalid_view_and_missing_dependency() {
+    for boundary in ["Target", "Kind", "Invalid", "View", "Missing"] {
+        let reports = matches!(boundary, "View" | "Missing");
+        let (configuration, keys) = fixture();
+        let directory = Directory::new();
+        let mut target = Engine::create(
+            &directory.0,
+            configuration.clone(),
+            keys[3].clone(),
+            initial(),
+        )
+        .unwrap();
+        if reports {
+            fixtures::enter(&configuration, &keys, std::slice::from_mut(&mut target), 2);
+        } else {
+            target.advance_view().unwrap();
+        }
+        let genesis = configuration.genesis_qc().unwrap();
+        let message = |member: usize| {
+            if reports {
+                Message::NewView(
+                    NewView::sign(&configuration, 2, genesis.digest(), &keys[member])
+                        .unwrap()
+                        .envelope,
+                    genesis.bytes.clone(),
+                )
+            } else {
+                Message::Wish(
+                    super::super::synchronizer::sign(&configuration, 1, &keys[member]).unwrap(),
+                )
+            }
+        };
+        let barrier = match boundary {
+            "Target" => Message::Wish(
+                super::super::synchronizer::sign(&configuration, 2, &keys[2]).unwrap(),
+            ),
+            "Kind" => Message::NewView(
+                NewView::sign(&configuration, 1, genesis.digest(), &keys[2])
+                    .unwrap()
+                    .envelope,
+                genesis.bytes.clone(),
+            ),
+            "Invalid" => {
+                let mut bytes =
+                    super::super::synchronizer::sign(&configuration, 1, &keys[2]).unwrap();
+                *bytes.last_mut().unwrap() ^= 1;
+                Message::Wish(bytes)
+            }
+            "View" => Message::NewView(
+                NewView::sign(&configuration, 3, genesis.digest(), &keys[2])
+                    .unwrap()
+                    .envelope,
+                genesis.bytes.clone(),
+            ),
+            "Missing" => {
+                let statement = super::super::Vote {
+                    scope: configuration.scope.clone(),
+                    view: 1,
+                    phase: Phase::Prepare,
+                    node: [90; 32],
+                };
+                let votes: Vec<_> = keys[..3]
+                    .iter()
+                    .map(|key| SignedVote::sign(&configuration, statement.clone(), key).unwrap())
+                    .collect();
+                let qc = Certificate::collect(&configuration, &votes).unwrap();
+                Message::NewView(
+                    NewView::sign(&configuration, 2, qc.digest(), &keys[2])
+                        .unwrap()
+                        .envelope,
+                    qc.bytes,
+                )
+            }
+            _ => unreachable!(),
+        };
+        let mut driver = repair_driver(
+            target,
+            &directory.0,
+            &keys,
+            configuration.voters[0],
+            ingress::Mailbox::new(),
+        );
+        let (first, mut first_response, _) =
+            queued_peer_event(&configuration, &keys[0], &message(0));
+        let (second, mut second_response, _) =
+            queued_peer_event(&configuration, &keys[1], &message(1));
+        let (barrier, mut barrier_response, _) =
+            queued_peer_event(&configuration, &keys[2], &barrier);
+        let (last, mut last_response, _) = queued_peer_event(&configuration, &keys[2], &message(2));
+        let (sender, mut receiver) = mpsc::channel(MAX_EVENTS);
+        for event in [second, barrier, last] {
+            sender
+                .try_send(event)
+                .unwrap_or_else(|_| panic!("Queue unexpectedly full"));
+        }
+        let generation = driver.engine.generation();
+        let deferred = driver.queued_event(first, &mut receiver).unwrap().unwrap();
+        assert_eq!(driver.engine.generation(), generation + 1, "{boundary}");
+        assert!(first_response.try_recv().is_ok());
+        assert!(second_response.try_recv().is_ok());
+        assert!(matches!(
+            barrier_response.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            last_response.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(receiver.len(), 1);
+        if reports {
+            assert!(
+                !driver
+                    .engine
+                    .snapshot
+                    .reports
+                    .contains_key(&super::super::report_id(2, &configuration.voters[2]))
+            );
+        } else {
+            assert_eq!(driver.engine.snapshot.sync.maxima[2], 0);
+        }
+        // The first boundary is still an ordinary event, never dropped or
+        // acknowledged as part of the preceding durable evidence transaction.
+        assert!(matches!(deferred, Event::Peer { .. }));
+    }
+}
+
+#[test]
+fn queued_new_view_conflict_keeps_accepted_prefix_and_exact_incident() {
+    let (configuration, keys, directories, mut engines, votes) =
+        super::super::transaction_tests::prepared();
+    let mut target = engines.pop().unwrap();
+    let qc = Certificate::collect(&configuration, &votes[..3]).unwrap();
+    target.receive_certificate(&qc.bytes).unwrap();
+    fixtures::enter(&configuration, &keys, std::slice::from_mut(&mut target), 2);
+    let genesis = configuration.genesis_qc().unwrap();
+    let first_report = NewView::sign(&configuration, 2, genesis.digest(), &keys[0])
+        .unwrap()
+        .envelope;
+    let conflicting = NewView::sign(&configuration, 2, qc.digest(), &keys[0])
+        .unwrap()
+        .envelope;
+    let messages = [
+        Message::NewView(first_report.clone(), genesis.bytes.clone()),
+        Message::NewView(
+            NewView::sign(&configuration, 2, genesis.digest(), &keys[1])
+                .unwrap()
+                .envelope,
+            genesis.bytes.clone(),
+        ),
+        Message::NewView(conflicting.clone(), qc.bytes),
+        Message::NewView(
+            NewView::sign(&configuration, 2, genesis.digest(), &keys[2])
+                .unwrap()
+                .envelope,
+            genesis.bytes,
+        ),
+    ];
+    let mut driver = repair_driver(
+        target,
+        &directories[3].0,
+        &keys,
+        configuration.voters[0],
+        ingress::Mailbox::new(),
+    );
+    let (sender, mut receiver) = mpsc::channel(MAX_EVENTS);
+    let mut events = Vec::new();
+    let mut responses = Vec::new();
+    for (member, message) in [0, 1, 0, 2].into_iter().zip(messages) {
+        let (event, response, digest) = queued_peer_event(&configuration, &keys[member], &message);
+        events.push(event);
+        responses.push((response, digest));
+    }
+    let first = events.remove(0);
+    for event in events {
+        sender
+            .try_send(event)
+            .unwrap_or_else(|_| panic!("Queue unexpectedly full"));
+    }
+    let generation = driver.engine.generation();
+    assert!(driver.queued_event(first, &mut receiver).unwrap().is_none());
+    assert_eq!(driver.engine.generation(), generation + 3);
+    for ((mut response, digest), expected) in responses.into_iter().zip([0, 0, 2, 0]) {
+        assert!(
+            matches!(peer::decode(&configuration, configuration.voters[3], &response.try_recv().unwrap()).unwrap(), Message::Ack(actual, disposition) if actual == digest && disposition == expected)
+        );
+    }
+    drop(driver);
+    let resumed = Engine::open(
+        &directories[3].0,
+        configuration.clone(),
+        keys[3].clone(),
+        generation + 3,
+    )
+    .unwrap();
+    assert_eq!(
+        resumed.snapshot.reports[&super::super::report_id(2, &configuration.voters[0])],
+        first_report
+    );
+    assert_eq!(
+        resumed.snapshot.incidents,
+        vec![[first_report, conflicting]]
+    );
+    assert!(
+        resumed
+            .snapshot
+            .reports
+            .contains_key(&super::super::report_id(2, &configuration.voters[2]))
+    );
+}
+
+#[test]
+fn queued_synchronization_publication_failure_releases_no_acknowledgement_or_output() {
+    for reports in [false, true] {
+        let (configuration, keys) = fixture();
+        let directory = Directory::new();
+        let mut target = Engine::create(
+            &directory.0,
+            configuration.clone(),
+            keys[3].clone(),
+            initial(),
+        )
+        .unwrap();
+        if reports {
+            fixtures::enter(&configuration, &keys, std::slice::from_mut(&mut target), 1);
+        } else {
+            target.advance_view().unwrap();
+        }
+        let genesis = configuration.genesis_qc().unwrap();
+        let message = |member: usize| {
+            if reports {
+                Message::NewView(
+                    NewView::sign(&configuration, 1, genesis.digest(), &keys[member])
+                        .unwrap()
+                        .envelope,
+                    genesis.bytes.clone(),
+                )
+            } else {
+                Message::Wish(
+                    super::super::synchronizer::sign(&configuration, 1, &keys[member]).unwrap(),
+                )
+            }
+        };
+        let mut driver = repair_driver(
+            target,
+            &directory.0,
+            &keys,
+            configuration.voters[0],
+            ingress::Mailbox::new(),
+        );
+        let (first, mut first_response, _) =
+            queued_peer_event(&configuration, &keys[0], &message(0));
+        let (second, mut second_response, _) =
+            queued_peer_event(&configuration, &keys[1], &message(1));
+        let (sender, mut receiver) = mpsc::channel(MAX_EVENTS);
+        sender
+            .try_send(second)
+            .unwrap_or_else(|_| panic!("Queue unexpectedly full"));
+        let generation = driver.engine.generation();
+        let pending = directory.0.join("SignerPending.bin");
+        std::os::unix::fs::symlink("Signer.bin", &pending).unwrap();
+        assert!(driver.queued_event(first, &mut receiver).is_err());
+        assert_eq!(driver.engine.generation(), generation);
+        assert!(first_response.try_recv().is_err());
+        assert!(second_response.try_recv().is_err());
+        assert!(driver.outbox.is_empty());
+        assert!(driver.local.is_empty());
+        std::fs::remove_file(pending).unwrap();
+        assert!(driver.engine.advance_view().is_err());
+        drop(driver);
+        let resumed = Engine::open(
+            &directory.0,
+            configuration.clone(),
+            keys[3].clone(),
+            generation,
+        )
+        .unwrap();
+        for (member, key) in configuration.voters.iter().enumerate().take(2) {
+            if reports {
+                assert!(
+                    !resumed
+                        .snapshot
+                        .reports
+                        .contains_key(&super::super::report_id(1, key))
+                );
+            } else {
+                assert_eq!(resumed.snapshot.sync.maxima[member], 0);
+                assert!(resumed.snapshot.wishes[member].is_none());
+            }
+        }
+    }
+}
+
+#[test]
 fn peer_quorums_publish_local_phase_without_an_intermediate_repair_commit() {
     let (configuration, keys) = fixture();
     let (directories, mut engines) = fixtures::engines(&configuration, &keys);

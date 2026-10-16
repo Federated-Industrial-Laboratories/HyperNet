@@ -167,11 +167,16 @@ released before that transaction succeeds. Missing inputs or phase prerequisites
 defer voting while the learned QC and its stronger Prepare floor remain durable.
 Application discovery and executed-result publication retain their separate
 bounded durable transitions.
+Advance publishes its own signed WISH and synchroniser transition together;
+loopback delivery cannot require a second publication of that evidence.
 Already queued authenticated votes for one exact view, phase and node may share
-that publication. Collection never waits for another vote and stops at the first
-unrelated, invalid or dependency-missing event within the existing ingress bound.
-Every distinct signer's evidence is retained, including a fourth vote. Successful
-transport acknowledgements and broadcasts follow durable publication; a rejected
+a publication. The same applies to WISH evidence for one target or NewView reports
+for the current entered view with already durable Prepare dependencies and
+available immutable inputs. Collection never waits for another message and stops
+at the first unrelated, invalid, conflicting or dependency-missing event within
+the existing ingress bound. Every distinct signer's evidence is retained,
+including a fourth signer. Successful transport acknowledgements and broadcasts
+follow durable publication; a rejected
 later event does not discard the accepted prefix. Uncertain publication stops the
 signer without acknowledgements, broadcasts or an in-process persistence retry.
 

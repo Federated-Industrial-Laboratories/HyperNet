@@ -37,6 +37,79 @@ fn reopen(engine: Engine, directory: &Path, key: &SigningKey) -> Engine {
 }
 
 #[test]
+fn advance_retains_own_wish_and_entry_before_lost_broadcast() {
+    for peers in [0, 2] {
+        let (config, keys) = fixture();
+        let directory = Directory::new();
+        let mut target = Engine::create(
+            &directory.0,
+            config.clone(),
+            keys[3].clone(),
+            records::tests::initial(),
+        )
+        .unwrap();
+        for key in &keys[..peers] {
+            target
+                .receive_wish(&synchronizer::sign(&config, 1, key).unwrap())
+                .unwrap();
+        }
+        let generation = target.generation();
+        let output = target.advance_view().unwrap();
+        assert_eq!(target.generation(), generation + 1);
+        let wish = output.wish.unwrap();
+        assert_eq!(
+            synchronizer::verify(&config, &wish).unwrap(),
+            (config.voters[3], 1)
+        );
+        // Lose all outputs. Restart must retain the own WISH and any entry
+        // caused by it before a duplicate loopback can arrive.
+        target = reopen(target, &directory.0, &keys[3]);
+        assert_eq!(target.snapshot.wishes[3].as_ref(), Some(&wish));
+        assert_eq!(target.snapshot.sync.maxima[3], 1);
+        assert_eq!(target.view(), if peers == 2 { 1 } else { 0 });
+        assert_eq!(target.snapshot.sync.advanced, peers == 0);
+        if peers == 2 {
+            assert_eq!(
+                target.snapshot.reports[&report_id(1, &config.voters[3])],
+                output.new_view.unwrap(),
+            );
+        } else {
+            assert!(output.new_view.is_none());
+        }
+        let duplicate = target.receive_wish(&wish).unwrap();
+        assert!(duplicate.wish.is_none() && duplicate.new_view.is_none());
+        assert_eq!(target.generation(), generation + 1);
+    }
+}
+
+#[test]
+fn failed_advance_publication_exposes_no_wish_and_requires_reopen() {
+    let (config, keys) = fixture();
+    let directory = Directory::new();
+    let mut target = Engine::create(
+        &directory.0,
+        config.clone(),
+        keys[3].clone(),
+        records::tests::initial(),
+    )
+    .unwrap();
+    let generation = target.generation();
+    let pending = directory.0.join("SignerPending.bin");
+    std::os::unix::fs::symlink("Signer.bin", &pending).unwrap();
+    assert!(target.advance_view().is_err());
+    assert_eq!(target.generation(), generation);
+    assert!(target.snapshot.wishes[3].is_none());
+    assert!(!target.snapshot.sync.advanced);
+    std::fs::remove_file(pending).unwrap();
+    assert!(target.advance_view().is_err());
+    assert!(target.retransmit_wish().is_err());
+    target = reopen(target, &directory.0, &keys[3]);
+    assert_eq!(target.snapshot.sync.maxima, [0; 4]);
+    assert!(target.advance_view().unwrap().wish.is_some());
+    assert_eq!(target.generation(), generation + 1);
+}
+
+#[test]
 fn collected_quorums_publish_next_vote_lock_and_decision_before_lost_reply() {
     let (config, keys, directories, mut replicas, mut votes) = prepared();
     let mut target = replicas.pop().unwrap();

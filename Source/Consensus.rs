@@ -686,17 +686,17 @@ impl Engine {
         }
         Ok(())
     }
-    fn sync_effects(
-        &mut self,
-        mut next: Snapshot,
+    fn stage_sync_effects(
+        &self,
+        next: &mut Snapshot,
         effects: synchronizer::Effects,
     ) -> Result<Outputs> {
         if effects.entered.is_some() {
             // The new view, retired signature floor and retained dependencies
             // reach durable storage together before any NewView is emitted.
-            self.compact_snapshot(&mut next, None, self.archive.leaves(), true)?;
+            self.compact_snapshot(next, None, self.archive.leaves(), true)?;
         }
-        let prepared = certificate(&self.configuration, &next, &next.highest_prepare)?;
+        let prepared = certificate(&self.configuration, next, &next.highest_prepare)?;
         let new_view = if let Some(view) = effects.entered.filter(|view| *view > prepared.view) {
             let report = NewView::sign(&self.configuration, view, next.highest_prepare, &self.key)?;
             ensure!(
@@ -713,14 +713,23 @@ impl Engine {
             .wish
             .map(|target| synchronizer::sign(&self.configuration, target, &self.key))
             .transpose()?;
-        self.persist(next)?;
         Ok(Outputs { wish, new_view })
     }
     pub fn advance_view(&mut self) -> Result<Outputs> {
         self.voting()?;
         let mut next = self.snapshot.clone();
-        let effects = next.sync.advance()?;
-        self.sync_effects(next, effects)
+        let mut effects = next.sync.advance()?;
+        let target = effects.wish.context("Advance omitted its WISH target")?;
+        let member = self.configuration.member(&next.signer)?;
+        if target > next.sync.maxima[member] {
+            // Own evidence and its synchronizer transition are durable before
+            // broadcast; ordinary loopback delivery is then an exact duplicate.
+            next.wishes[member] = Some(synchronizer::sign(&self.configuration, target, &self.key)?);
+            effects.entered = next.sync.receive(member, target)?.entered;
+        }
+        let output = self.stage_sync_effects(&mut next, effects)?;
+        self.persist(next)?;
+        Ok(output)
     }
     pub fn retransmit_wish(&mut self) -> Result<Outputs> {
         self.voting()?;
@@ -741,36 +750,127 @@ impl Engine {
             return Ok(Outputs::default());
         }
         let mut next = self.snapshot.clone();
+        let output = self.stage_wish(&mut next, member, target, envelope)?;
+        self.persist(next)?;
+        Ok(output)
+    }
+    fn stage_wish(
+        &self,
+        next: &mut Snapshot,
+        member: usize,
+        target: u64,
+        envelope: &[u8],
+    ) -> Result<Outputs> {
         next.wishes[member] = Some(envelope.to_vec());
         let effects = next.sync.receive(member, target)?;
-        self.sync_effects(next, effects)
+        self.stage_sync_effects(next, effects)
     }
-    pub fn receive_new_view(&mut self, envelope: &[u8]) -> Result<()> {
+    // Staged effects cannot escape until the entire accepted prefix is durable.
+    // A rejected candidate leaves both the prefix and its outputs unchanged.
+    fn receive_wishes(&mut self, inputs: &[Vec<u8>]) -> Result<Vec<Outputs>> {
         self.voting()?;
+        ensure!(
+            !inputs.is_empty() && inputs.len() <= runtime::MAX_EVENTS,
+            "Queued WISH evidence exceeds ingress bound"
+        );
+        let (_, target) = synchronizer::verify(&self.configuration, &inputs[0])?;
+        let mut next = self.snapshot.clone();
+        let mut outputs = Vec::new();
+        let mut changed = false;
+        for input in inputs {
+            let Ok((signer, received)) = synchronizer::verify(&self.configuration, input) else {
+                break;
+            };
+            if received != target {
+                break;
+            }
+            let member = self.configuration.member(&signer)?;
+            if target <= next.sync.maxima[member] {
+                outputs.push(Outputs::default());
+                continue;
+            }
+            let mut candidate = next.clone();
+            let Ok(output) = self.stage_wish(&mut candidate, member, target, input) else {
+                break;
+            };
+            next = candidate;
+            changed = true;
+            outputs.push(output);
+        }
+        if changed {
+            self.persist(next)?;
+        }
+        Ok(outputs)
+    }
+    fn checked_new_view(&self, state: &Snapshot, envelope: &[u8]) -> Result<NewView> {
         let report = NewView::parse(&self.configuration, envelope)?;
         ensure!(
-            report.view == self.view(),
+            report.view == state.sync.entered,
             "New-view report is outside the entered view"
         );
-        let qc = certificate(&self.configuration, &self.snapshot, &report.prepare)?;
+        let qc = certificate(&self.configuration, state, &report.prepare)?;
         ensure!(
             qc.phase == Phase::Prepare && qc.view < report.view,
             "New-view report has invalid Prepare evidence"
         );
+        Ok(report)
+    }
+    fn stage_new_view(next: &mut Snapshot, report: &NewView) -> Result<bool> {
         let entry = report_id(report.view, &report.signer);
-        if let Some(old) = self.snapshot.reports.get(&entry) {
+        if let Some(old) = next.reports.get(&entry) {
+            ensure!(
+                old == &report.envelope,
+                "Conflicting authenticated consensus evidence"
+            );
+            return Ok(false);
+        }
+        ensure!(
+            next.reports.len() < MAX_REPORTS,
+            "New-view history capacity exhausted"
+        );
+        next.reports.insert(entry, report.envelope.clone());
+        Ok(true)
+    }
+    pub fn receive_new_view(&mut self, envelope: &[u8]) -> Result<()> {
+        self.voting()?;
+        let report = self.checked_new_view(&self.snapshot, envelope)?;
+        if let Some(old) = self
+            .snapshot
+            .reports
+            .get(&report_id(report.view, &report.signer))
+        {
             if old == envelope {
                 return Ok(());
             }
             return self.incident(old.clone(), envelope.to_vec(), false);
         }
         let mut next = self.snapshot.clone();
-        ensure!(
-            next.reports.len() < MAX_REPORTS,
-            "New-view history capacity exhausted"
-        );
-        next.reports.insert(entry, envelope.to_vec());
+        Self::stage_new_view(&mut next, &report)?;
         self.persist(next)
+    }
+    fn receive_new_views(&mut self, inputs: &[Vec<u8>]) -> Result<usize> {
+        self.voting()?;
+        ensure!(
+            !inputs.is_empty() && inputs.len() <= runtime::MAX_EVENTS,
+            "Queued NewView evidence exceeds ingress bound"
+        );
+        let mut next = self.snapshot.clone();
+        let mut accepted = 0;
+        let mut changed = false;
+        for input in inputs {
+            let Ok(report) = self.checked_new_view(&next, input) else {
+                break;
+            };
+            let Ok(added) = Self::stage_new_view(&mut next, &report) else {
+                break;
+            };
+            changed |= added;
+            accepted += 1;
+        }
+        if changed {
+            self.persist(next)?;
+        }
+        Ok(accepted)
     }
     fn incident<T>(&mut self, first: Vec<u8>, second: Vec<u8>, quarantine: bool) -> Result<T> {
         let mut next = self.snapshot.clone();
