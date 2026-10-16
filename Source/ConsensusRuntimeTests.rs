@@ -191,6 +191,10 @@ fn queued_peer_votes_publish_once_and_retain_fourth_signer_on_reopen() {
             configuration.voters[0],
             ingress::Mailbox::new(),
         );
+        let node = driver.engine.known_node(&votes[0].vote.node).unwrap();
+        driver
+            .diagnostics
+            .proposed(&node, diagnostics::Stamp::now());
         let (sender, mut receiver) = mpsc::channel(MAX_EVENTS);
         let mut events = Vec::new();
         let mut responses = Vec::new();
@@ -209,6 +213,21 @@ fn queued_peer_votes_publish_once_and_retain_fourth_signer_on_reopen() {
         let generation = driver.engine.generation();
         assert!(driver.queued_event(first, &mut receiver).unwrap().is_none());
         assert_eq!(driver.engine.generation(), generation + 1);
+        assert!(
+            driver
+                .diagnostics
+                .has_phase(&node, diagnostics::Phase::PrepareQc)
+        );
+        assert!(
+            driver
+                .diagnostics
+                .has_phase(&node, diagnostics::Phase::PreCommitVote)
+        );
+        assert!(
+            !driver
+                .diagnostics
+                .has_phase(&node, diagnostics::Phase::Committed)
+        );
         assert!(receiver.is_empty());
         for (mut response, digest) in responses {
             assert!(
@@ -399,6 +418,10 @@ fn queued_vote_publication_failure_releases_no_acknowledgement_or_broadcast() {
         configuration.voters[0],
         ingress::Mailbox::new(),
     );
+    let node = driver.engine.known_node(&votes[0].vote.node).unwrap();
+    driver
+        .diagnostics
+        .proposed(&node, diagnostics::Stamp::now());
     let (first, mut first_response, _) = queued_peer_event(
         &configuration,
         &keys[0],
@@ -417,6 +440,16 @@ fn queued_vote_publication_failure_releases_no_acknowledgement_or_broadcast() {
     let pending = directories[3].0.join("SignerPending.bin");
     std::os::unix::fs::symlink("Signer.bin", &pending).unwrap();
     assert!(driver.queued_event(first, &mut receiver).is_err());
+    assert!(
+        !driver
+            .diagnostics
+            .has_phase(&node, diagnostics::Phase::PrepareQc)
+    );
+    assert!(
+        !driver
+            .diagnostics
+            .has_phase(&node, diagnostics::Phase::PreCommitVote)
+    );
     assert_eq!(driver.engine.generation(), generation);
     assert!(first_response.try_recv().is_err());
     assert!(second_response.try_recv().is_err());
@@ -1498,6 +1531,10 @@ fn early_execution_shares_recover_by_query_after_committed_request_suppression()
             inputs: Resolved::default(),
         })
         .unwrap();
+    let node = driver.engine.committed().unwrap();
+    driver
+        .diagnostics
+        .proposed(&node, diagnostics::Stamp::now());
     let queried_at = Instant::now();
     let unrelated = [251; 32];
     for requested in [digest, unrelated] {
@@ -1530,11 +1567,26 @@ fn early_execution_shares_recover_by_query_after_committed_request_suppression()
     assert!(driver.shares.is_empty());
     driver.apply().unwrap();
     assert_eq!(driver.engine.applied().unwrap().height, 0);
+    assert!(
+        !driver
+            .diagnostics
+            .has_phase(&node, diagnostics::Phase::Executed)
+    );
     assert_eq!(driver.query_times.get(&digest), Some(&queried_at));
     assert!(!driver.requests.contains_key(&digest));
     assert!(driver.request_order.is_empty());
     driver.apply().unwrap();
     assert_eq!(driver.engine.applied().unwrap().height, 1);
+    assert!(
+        driver
+            .diagnostics
+            .has_phase(&node, diagnostics::Phase::Executed)
+    );
+    assert!(
+        !driver
+            .diagnostics
+            .has_phase(&node, diagnostics::Phase::Quorum)
+    );
     assert!(!driver.query_times.contains_key(&digest));
     assert_eq!(driver.query_times.get(&unrelated), Some(&queried_at));
     let pending = wire::decode(
@@ -1581,6 +1633,16 @@ fn early_execution_shares_recover_by_query_after_committed_request_suppression()
         );
     }
     let completed = wire::decode(&driver.result(digest).unwrap()).unwrap();
+    assert!(
+        driver
+            .diagnostics
+            .has_phase(&node, diagnostics::Phase::Quorum)
+    );
+    assert!(
+        driver
+            .diagnostics
+            .has_phase(&node, diagnostics::Phase::ReplyReady)
+    );
     let fields = completed.array(10).unwrap();
     assert_eq!(fields[3].uint().unwrap(), 1);
     assert_eq!(fields[5].fixed::<32>().unwrap(), digest);

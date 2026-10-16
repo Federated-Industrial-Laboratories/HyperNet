@@ -263,11 +263,50 @@ pub async fn serve(
             Err(error) => break Err(error),
         }
     };
+    if result.is_ok() {
+        diagnostics.finish(driver.engine.view());
+    }
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
     result
 }
 impl Driver {
+    fn certificate_timing(&self, bytes: &[u8]) {
+        let Ok(qc) = Certificate::parse(self.config(), bytes) else {
+            return;
+        };
+        let Ok(node) = self.engine.known_node(&qc.node) else {
+            return;
+        };
+        let (phase, next_vote) = match qc.phase {
+            Phase::Prepare => (
+                diagnostics::Phase::PrepareQc,
+                Some((Phase::PreCommit, diagnostics::Phase::PreCommitVote)),
+            ),
+            Phase::PreCommit => (
+                diagnostics::Phase::PreCommitQc,
+                Some((Phase::Commit, diagnostics::Phase::CommitVote)),
+            ),
+            Phase::Commit => (diagnostics::Phase::CommitQc, None),
+        };
+        self.diagnostics.phase(&node, phase);
+        if let Some((vote, phase)) = next_vote {
+            let index = super::vote_id(qc.view, vote, &self.engine.signer());
+            if self
+                .engine
+                .snapshot
+                .own_votes
+                .get(&index)
+                .and_then(|bytes| SignedVote::parse(self.config(), bytes).ok())
+                .is_some_and(|signed| signed.vote.node == qc.node)
+            {
+                self.diagnostics.phase(&node, phase);
+            }
+        }
+        if qc.phase == Phase::Commit && self.engine.snapshot.committed == qc.node {
+            self.diagnostics.phase(&node, diagnostics::Phase::Committed);
+        }
+    }
     async fn turn(
         &mut self,
         receiver: &mut mpsc::Receiver<Event>,
@@ -441,7 +480,10 @@ impl Driver {
         let accepted = !batch.is_empty();
         for ((event, _), output) in batch.into_iter().zip(outputs) {
             let emitted = match output {
-                EvidenceOutput::Vote(Some(qc)) => self.broadcast(Message::Certificate(qc)),
+                EvidenceOutput::Vote(Some(qc)) => {
+                    self.certificate_timing(&qc);
+                    self.broadcast(Message::Certificate(qc))
+                }
                 EvidenceOutput::Synchronizer(output) => self.outputs(output),
                 EvidenceOutput::Vote(None) | EvidenceOutput::Report => Ok(()),
             };
@@ -771,6 +813,7 @@ impl Driver {
         );
         self.requests.insert(digest, submission);
         self.request_order.push_back(digest);
+        self.diagnostics.accepted(digest);
         Ok(digest)
     }
     fn remove_request(&mut self, digest: &Digest) {
@@ -890,6 +933,7 @@ impl Driver {
     fn broadcast_proposal(&mut self, proposal: Vec<u8>) -> Result<()> {
         let (body, _) = wire::envelope(&proposal, 1)?;
         let node = Node::parse(self.config(), &body)?;
+        self.diagnostics.proposed(&node, diagnostics::Stamp::now());
         let command = self
             .engine
             .repair_export(&[reference(
@@ -950,6 +994,7 @@ impl Driver {
                 }
             }
             Message::Proposal(proposal, command, qc, sidecar) => {
+                let observed = diagnostics::Stamp::now();
                 let (payload, _) = wire::envelope(&proposal, 1)?;
                 let node = Node::parse(self.config(), &payload)?;
                 ensure!(
@@ -1011,6 +1056,9 @@ impl Driver {
                         return Err(error);
                     }
                 };
+                self.diagnostics.proposed(&node, observed);
+                self.diagnostics
+                    .phase(&node, diagnostics::Phase::PrepareVote);
                 self.broadcast(Message::Vote(vote))?;
             }
             Message::Vote(vote) => {
@@ -1047,6 +1095,7 @@ impl Driver {
                     return Ok(());
                 }
                 if let Some(qc) = self.engine.receive_vote(&vote)? {
+                    self.certificate_timing(&qc);
                     self.broadcast(Message::Certificate(qc))?;
                 }
             }
@@ -1065,12 +1114,17 @@ impl Driver {
                 )? {
                     return Ok(());
                 }
+                self.certificate_timing(&bytes);
                 if qc.phase == Phase::Commit {
                     self.engine.decide(&bytes)?;
+                    self.certificate_timing(&bytes);
                     self.apply()?;
                 } else if qc.view == self.engine.view() {
                     match self.engine.advance_phase(&bytes) {
-                        Ok(vote) => self.broadcast(Message::Vote(vote))?,
+                        Ok(vote) => {
+                            self.certificate_timing(&bytes);
+                            self.broadcast(Message::Vote(vote))?;
+                        }
                         Err(error) => {
                             if let Some(missing) =
                                 error.downcast_ref::<input_objects::Unavailable>()
@@ -1193,6 +1247,7 @@ impl Driver {
             self.blocked_application = None;
         }
         if let super::application::Turn::Result(node, record) = progress {
+            self.diagnostics.phase(&node, diagnostics::Phase::Executed);
             let command = node.command.context("Applied result command missing")?;
             self.remove_request(&command);
             // Earlier replies may have arrived before this exact execution was
@@ -1269,6 +1324,9 @@ impl Driver {
             .signatures
             .insert(own_signatures[0].0, own_signatures[0].1);
         shares.signatures.insert(signatures[0].0, signatures[0].1);
+        if shares.signatures.len() >= 3 {
+            self.diagnostics.phase(&node, diagnostics::Phase::Quorum);
+        }
         Ok(())
     }
     fn local_request(&mut self, bytes: &[u8]) -> Vec<u8> {
@@ -1387,13 +1445,20 @@ impl Driver {
         if let Some((node, record)) = self.engine.executed_request(digest)? {
             self.collect_share(node.encode()?, record.attestation, record.result)?;
         }
-        if let Some((_, shares)) = self
+        if let Some((node, shares)) = self
             .shares
             .iter()
             .filter(|(_, s)| s.command == digest && s.signatures.len() >= 3)
             .max_by_key(|(node, s)| (s.height, **node))
         {
             return match self.reply(1, 0, Some(digest), Some(shares)) {
+                Ok(reply) => {
+                    if let Ok(node) = self.engine.known_node(node) {
+                        self.diagnostics
+                            .phase(&node, diagnostics::Phase::ReplyReady);
+                    }
+                    Ok(reply)
+                }
                 Err(error)
                     if error
                         .downcast_ref::<crate::authority_objects::Unavailable>()

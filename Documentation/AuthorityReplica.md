@@ -284,6 +284,20 @@ storage sync count, total and maximum sync time, file and directory counts, and
 successful journal commits. Decoded peer turns include the numeric message kind.
 Activity summaries include the suspend-aware boot time when available, allowing
 local request timings to be compared with the reported storage interval.
+Each summary also includes up to 32 view-timing records. These record first
+accepted-command/proposal observation, durable votes and QCs, committed position,
+durable execution, matching execution quorum and first local result selection.
+Acceptance is successful driver admission, not arrival at the control socket.
+`replyReady` means the result has been constructed for the local caller; it does
+not attest delivery through the control socket. Each phase is cumulative elapsed
+nanoseconds from the first accepted command, or the proposal when acceptance was
+not observed. The original starting boot time permits external correlation;
+unobserved phases and unavailable boot time are null. Repeated messages do not
+restart observations. Completed local selections are reported at the next
+summary; other views are reported as incomplete after five seconds without new
+phases. Controlled shutdown flushes remaining records. At most 32 acceptance
+timestamps and 32 view records remain in memory; saturation counts lost timing
+observations without delaying authority work. No command digest is logged.
 A proposal rejected by the existing one-second clock-age bound reports
 `ProposalClockAge` and its measured age. Records contain fixed categories,
 durations and view numbers, without request contents, keys or private errors.
