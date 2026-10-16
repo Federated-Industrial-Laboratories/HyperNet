@@ -41,6 +41,7 @@ use tokio::{
 
 pub const MAX_PENDING: usize = 32;
 const MAX_OUTBOX: usize = 128;
+pub(super) const MAX_EVENTS: usize = 64;
 const RETRANSMIT: Duration = Duration::from_millis(250);
 
 pub trait Application: Send + Sync + 'static {
@@ -155,7 +156,7 @@ pub async fn serve(
     )?;
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let (socket, _socket_guard) = ingress::local_socket(&config.control_socket)?;
-    let (events, mut receiver) = mpsc::channel(64);
+    let (events, mut receiver) = mpsc::channel(MAX_EVENTS);
     let (diagnostics, monitor) = diagnostics::Diagnostics::new();
     let mut tasks = tokio::task::JoinSet::new();
     tasks.spawn(monitor.run());
@@ -224,6 +225,7 @@ pub async fn serve(
     }
     let mut interval = tokio::time::interval(RETRANSMIT);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut pending = None;
     let result = loop {
         tokio::select! {
             change = shutdown.changed() => {
@@ -233,10 +235,13 @@ pub async fn serve(
                 }
             }
             ended = tasks.join_next() => { break Err(anyhow::anyhow!("Replica transport task stopped: {}", ended.is_some())); }
-            event = receiver.recv() => {
+            event = async {
+                if let Some(event) = pending.take() { Some(event) } else { receiver.recv().await }
+            } => {
                 let Some(event) = event else { break Err(anyhow::anyhow!("Replica event channel closed")); };
-                if let Err(error) = driver.event(event) {
-                    break Err(error);
+                match driver.queued_event(event, &mut receiver) {
+                    Ok(deferred) => pending = deferred,
+                    Err(error) => break Err(error),
                 }
             }
             _ = tokio::task::yield_now(), if driver.application_ready => {
@@ -260,6 +265,120 @@ pub async fn serve(
     result
 }
 impl Driver {
+    fn queued_vote(&self, event: &Event) -> Option<SignedVote> {
+        let Event::Peer { sender, body, .. } = event else {
+            return None;
+        };
+        self.engine.voting().ok()?;
+        let Message::Vote(input) = peer::decode(self.config(), *sender, body).ok()? else {
+            return None;
+        };
+        let signed = self.engine.received_vote(&input).ok()?;
+        if signed.vote.view < self.engine.view().saturating_sub(1) {
+            return None;
+        }
+        let entry = super::vote_id(signed.vote.view, signed.vote.phase, &signed.signer);
+        if self
+            .engine
+            .snapshot
+            .votes
+            .get(&entry)
+            .is_some_and(|old| old != &input)
+        {
+            return None;
+        }
+        Some(signed)
+    }
+    fn acknowledge_peer(&self, body: &[u8], answer: oneshot::Sender<Vec<u8>>, disposition: u64) {
+        // Outbound HTTP responses have no reply receiver. Incoming requests
+        // receive a signed transport-only acknowledgement after publication.
+        if !answer.is_closed()
+            && let Ok(reply) = self
+                .engine
+                .sign_peer(&Message::Ack(wire::digest(body), disposition))
+        {
+            let _ = answer.send(reply);
+        }
+    }
+    fn queued_event(
+        &mut self,
+        first: Event,
+        receiver: &mut mpsc::Receiver<Event>,
+    ) -> Result<Option<Event>> {
+        if receiver.is_empty() {
+            self.event(first)?;
+            return Ok(None);
+        }
+        let Some(vote) = self.queued_vote(&first) else {
+            self.event(first)?;
+            return Ok(None);
+        };
+        let statement = vote.vote.clone();
+        let mut batch = vec![(first, vote)];
+        let mut deferred = None;
+        // Take only the queue prefix already present, bounded by the existing
+        // ingress capacity. Never wait for a quorum or cross another event.
+        for _ in 0..receiver.len().min(MAX_EVENTS - 1) {
+            let Ok(event) = receiver.try_recv() else {
+                break;
+            };
+            match self.queued_vote(&event) {
+                Some(vote) if vote.vote == statement => batch.push((event, vote)),
+                _ => {
+                    deferred = Some(event);
+                    break;
+                }
+            }
+        }
+        if batch.len() == 1 {
+            self.event(batch.pop().unwrap().0)?;
+            return Ok(deferred);
+        }
+        let Event::Peer { queued, .. } = &batch[0].0 else {
+            unreachable!()
+        };
+        let mut turn =
+            self.diagnostics
+                .begin(diagnostics::Stage::Peer, self.engine.view(), Some(*queued));
+        turn.message_kind(3);
+        let inputs: Vec<_> = batch
+            .iter()
+            .map(|(_, vote)| vote.envelope.clone())
+            .collect();
+        let outputs = self.engine.receive_votes(&inputs)?;
+        let remaining = batch.split_off(outputs.len());
+        let accepted = !batch.is_empty();
+        for ((event, _), qc) in batch.into_iter().zip(outputs) {
+            let disposition = match qc
+                .map(|qc| self.broadcast(Message::Certificate(qc)))
+                .transpose()
+            {
+                Ok(_) => 0,
+                Err(error) => {
+                    diagnostic("protocol", self.engine.view(), 3, &error);
+                    2
+                }
+            };
+            let Event::Peer { body, answer, .. } = event else {
+                unreachable!()
+            };
+            self.acknowledge_peer(&body, answer, disposition);
+        }
+        if accepted {
+            self.prune_queues()?;
+            self.try_propose()?;
+        }
+        drop(turn);
+        if accepted {
+            self.drain_turn()?;
+        }
+        // A validation/capacity rejection leaves the accepted prefix durable.
+        // Its event and every following event retain ordinary FIFO handling.
+        for (event, _) in remaining {
+            self.event(event)?;
+        }
+        Ok(deferred)
+    }
     fn event(&mut self, event: Event) -> Result<()> {
         let acknowledgement = match event {
             Event::Peer {
@@ -273,7 +392,6 @@ impl Driver {
                     self.engine.view(),
                     Some(queued),
                 );
-                let digest = wire::digest(&body);
                 let mut acknowledgement = false;
                 let disposition = match peer::decode(self.engine.configuration(), sender, &body) {
                     Ok(Message::Ack(..)) => {
@@ -297,13 +415,7 @@ impl Driver {
                         2
                     }
                 };
-                // Outbound HTTP responses have no reply receiver. Incoming
-                // requests still receive a signed transport-only acknowledgement.
-                if !answer.is_closed()
-                    && let Ok(reply) = self.engine.sign_peer(&Message::Ack(digest, disposition))
-                {
-                    let _ = answer.send(reply);
-                }
+                self.acknowledge_peer(&body, answer, disposition);
                 acknowledgement
             }
             Event::Local {

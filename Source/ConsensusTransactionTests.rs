@@ -3,7 +3,7 @@ use super::*;
 use journal::tests::Directory;
 use records::tests::fixture;
 
-fn prepared() -> (
+pub(super) fn prepared() -> (
     Configuration,
     [SigningKey; 4],
     Vec<Directory>,
@@ -127,4 +127,31 @@ fn failed_collected_quorum_publication_emits_nothing_and_requires_reopen() {
         target.snapshot.own_votes[&vote_id(1, Phase::PreCommit, &config.voters[3])].clone();
     assert_eq!(target.advance_phase(&qc).unwrap(), retained);
     assert_eq!(target.generation(), generation + 1);
+}
+
+#[test]
+fn vote_batch_retains_accepted_prefix_before_invalid_evidence() {
+    let (config, keys, directories, mut replicas, votes) = prepared();
+    let mut target = replicas.pop().unwrap();
+    let mut invalid = votes[1].envelope.clone();
+    *invalid.last_mut().unwrap() ^= 1;
+    let generation = target.generation();
+    let outputs = target
+        .receive_votes(&[votes[0].envelope.clone(), invalid.clone()])
+        .unwrap();
+    assert_eq!(outputs, vec![None]);
+    assert_eq!(target.generation(), generation + 1);
+    assert!(target.receive_vote(&invalid).is_err());
+    assert_eq!(target.generation(), generation + 1);
+    target = reopen(target, &directories[3].0, &keys[3]);
+    assert_eq!(
+        target.snapshot.votes[&vote_id(1, Phase::Prepare, &config.voters[0])],
+        votes[0].envelope
+    );
+    assert!(
+        !target
+            .snapshot
+            .votes
+            .contains_key(&vote_id(1, Phase::Prepare, &config.voters[1]))
+    );
 }

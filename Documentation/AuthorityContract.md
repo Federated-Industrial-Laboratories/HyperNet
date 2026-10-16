@@ -167,6 +167,13 @@ released before that transaction succeeds. Missing inputs or phase prerequisites
 defer voting while the learned QC and its stronger Prepare floor remain durable.
 Application discovery and executed-result publication retain their separate
 bounded durable transitions.
+Already queued authenticated votes for one exact view, phase and node may share
+that publication. Collection never waits for another vote and stops at the first
+unrelated, invalid or dependency-missing event within the existing ingress bound.
+Every distinct signer's evidence is retained, including a fourth vote. Successful
+transport acknowledgements and broadcasts follow durable publication; a rejected
+later event does not discard the accepted prefix. Uncertain publication stops the
+signer without acknowledgements, broadcasts or an in-process persistence retry.
 
 Correct replicas retain and exchange votes and certificates through bounded
 repair requests independently of a leader or edge broker. A collector withholding

@@ -1117,9 +1117,7 @@ impl Engine {
         }
         Ok(())
     }
-    /// Gossip votes to all replicas; any honest collector can reconstruct withheld decisions.
-    pub fn receive_vote(&mut self, input: &[u8]) -> Result<Option<Vec<u8>>> {
-        self.voting()?;
+    fn received_vote(&self, input: &[u8]) -> Result<SignedVote> {
         let signed = SignedVote::parse(&self.configuration, input)?;
         ensure!(
             signed.vote.view > self.snapshot.retired_view,
@@ -1130,24 +1128,19 @@ impl Engine {
             signed.vote.view == target.view && signed.vote.view <= self.view(),
             "Vote view is not an entered known proposal"
         );
+        Ok(signed)
+    }
+    fn stage_received_vote(
+        &self,
+        next: &mut Snapshot,
+        signed: &SignedVote,
+        input: &[u8],
+    ) -> Result<(Option<Vec<u8>>, bool)> {
         let entry = vote_id(signed.vote.view, signed.vote.phase, &signed.signer);
-        if let Some(old) = self.snapshot.votes.get(&entry) {
-            if old != input {
-                return self.incident(old.clone(), input.to_vec(), false);
-            }
-            let digest = Certificate::vote_digest(&signed.vote)?;
-            let Some(object) = self.snapshot.certificates.get(&id(&digest)) else {
-                return Ok(None);
-            };
-            let bytes = body(&self.snapshot, object)?;
-            let known = Certificate::parse(&self.configuration, &bytes)?;
-            ensure!(
-                known.vote.as_ref() == Some(&signed.vote),
-                "Indexed certificate differs from the exact duplicate vote"
-            );
-            return Ok(Some(bytes.as_ref().clone()));
+        if let Some(old) = next.votes.get(&entry) {
+            ensure!(old == input, "Conflicting authenticated consensus evidence");
+            return Ok((self.received_quorum(next, signed)?, false));
         }
-        let mut next = self.snapshot.clone();
         ensure!(
             next.votes.contains_key(&entry) || next.votes.len() < MAX_VOTES,
             "Vote history capacity exhausted"
@@ -1172,14 +1165,91 @@ impl Engine {
         }
         let qc = if matching.len() >= 3 {
             let qc = Certificate::collect(&self.configuration, &matching)?;
-            insert_certificate(&self.configuration, &mut next, &qc.bytes)?;
-            self.stage_certificate_progress(&mut next, &qc)?;
+            insert_certificate(&self.configuration, next, &qc.bytes)?;
+            self.stage_certificate_progress(next, &qc)?;
             Some(qc.bytes)
         } else {
             None
         };
-        self.persist(next)?;
+        Ok((qc, true))
+    }
+    fn received_quorum(&self, state: &Snapshot, signed: &SignedVote) -> Result<Option<Vec<u8>>> {
+        let digest = Certificate::vote_digest(&signed.vote)?;
+        let Some(object) = state.certificates.get(&id(&digest)) else {
+            return Ok(None);
+        };
+        let bytes = body(state, object)?;
+        let known = Certificate::parse(&self.configuration, &bytes)?;
+        ensure!(
+            known.vote.as_ref() == Some(&signed.vote),
+            "Indexed certificate differs from the exact duplicate vote"
+        );
+        Ok(Some(bytes.as_ref().clone()))
+    }
+    /// Gossip votes to all replicas; any honest collector can reconstruct withheld decisions.
+    pub fn receive_vote(&mut self, input: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.voting()?;
+        let signed = self.received_vote(input)?;
+        let entry = vote_id(signed.vote.view, signed.vote.phase, &signed.signer);
+        if let Some(old) = self.snapshot.votes.get(&entry) {
+            if old != input {
+                return self.incident(old.clone(), input.to_vec(), false);
+            }
+            return self.received_quorum(&self.snapshot, &signed);
+        }
+        let mut next = self.snapshot.clone();
+        let (qc, changed) = self.stage_received_vote(&mut next, &signed, input)?;
+        if changed {
+            self.persist(next)?;
+        }
         Ok(qc)
+    }
+    // A short accepted prefix is returned only after publication. Its first
+    // rejected event remains for ordinary refusal/incident handling. Persistence
+    // errors instead escape without any output and poison this signer.
+    fn receive_votes(&mut self, inputs: &[Vec<u8>]) -> Result<Vec<Option<Vec<u8>>>> {
+        self.voting()?;
+        ensure!(
+            !inputs.is_empty() && inputs.len() <= runtime::MAX_EVENTS,
+            "Vote batch exceeds the ingress bound"
+        );
+        let mut next = self.snapshot.clone();
+        let mut outputs = Vec::new();
+        let mut statement = None;
+        let mut changed = false;
+        for input in inputs {
+            let Ok(signed) = self.received_vote(input) else {
+                break;
+            };
+            if statement.as_ref().is_some_and(|vote| vote != &signed.vote) {
+                break;
+            }
+            statement = Some(signed.vote.clone());
+            let entry = vote_id(signed.vote.view, signed.vote.phase, &signed.signer);
+            if let Some(old) = next.votes.get(&entry) {
+                if old != input {
+                    break;
+                }
+                let Ok(qc) = self.received_quorum(&next, &signed) else {
+                    break;
+                };
+                outputs.push(qc);
+                continue;
+            }
+            // A failed candidate cannot leave partially staged evidence in the
+            // accepted prefix, including when a capacity or index check fails.
+            let mut candidate = next.clone();
+            let Ok((qc, added)) = self.stage_received_vote(&mut candidate, &signed, input) else {
+                break;
+            };
+            next = candidate;
+            changed |= added;
+            outputs.push(qc);
+        }
+        if changed {
+            self.persist(next)?;
+        }
+        Ok(outputs)
     }
     fn stage_decision(&self, next: &mut Snapshot, qc: &Certificate) -> Result<Decision> {
         self.voting()?;

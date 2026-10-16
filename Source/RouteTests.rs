@@ -720,6 +720,137 @@ async fn private_route_plain_session_progresses_while_authority_maintenance_is_d
     assert_eq!(slots.available_permits(), 1);
     fs::remove_dir_all(root).unwrap();
 }
+#[tokio::test]
+async fn private_route_application_demand_renews_pending_work_and_ends_before_idle() {
+    use crate::trust_wire::Value as V;
+    use std::os::{fd::AsRawFd, unix::fs::PermissionsExt};
+    let root = std::env::temp_dir().join(format!(
+        "HyperNetRouteDemand{}",
+        hex::encode(protocol::random().unwrap())
+    ));
+    files::create_directory(&root).unwrap();
+    let path = root.join("Control.sock");
+    let directory = files::private_directory(&root).unwrap();
+    let application = tokio::net::UnixListener::bind(
+        Path::new("/proc/self/fd")
+            .join(directory.as_raw_fd().to_string())
+            .join("Control.sock"),
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let packet = wire::encode(&V::Array(vec![
+        V::Uint(41),
+        V::Uint(1),
+        crate::authority_proof::Scope {
+            network: [1; 32],
+            incarnation: [2; 32],
+            configuration: [3; 32],
+            epoch: 1,
+        }
+        .value(),
+        V::Uint(2),
+        V::Bytes(wire::encode(&V::Array(vec![])).unwrap()),
+    ]))
+    .unwrap();
+    let expected = packet.clone();
+    let (arrived, mut arrivals) = mpsc::channel(2);
+    let (release, mut releases) = mpsc::channel(2);
+    let application = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (mut stream, _) = application.accept().await.unwrap();
+            assert_eq!(
+                route_io::receive(&mut stream, wire::MAXIMUM).await.unwrap(),
+                expected
+            );
+            arrived.send(()).await.unwrap();
+            releases.recv().await.unwrap();
+            route_io::send(&mut stream, b"Current local response")
+                .await
+                .unwrap();
+        }
+    });
+    let (mut peer, session, gate, ready) = readiness_fixture(10000);
+    let now = crate::authority_challenge::boot_time_ms().unwrap();
+    let expires = now + 1000;
+    gate.renew(expires).unwrap();
+    let permission = EndpointPermission {
+        gate: gate.clone(),
+        accepted_at: Some(now),
+        renewals: 0,
+    };
+    let possession = ed25519_dalek::SigningKey::from_bytes(&[33; 32])
+        .verifying_key()
+        .to_bytes();
+    let voucher = typed_voucher([31; 32], [32; 32], possession);
+    let live = BTreeMap::from([(
+        [34; 32],
+        Live {
+            renewal: Renewal::fixture(voucher.reference, vec![], u64::MAX),
+            gate: gate.clone(),
+            accepted_at: now,
+            deadline: session.deadline,
+            timing: Timing::begin(now, false),
+            renewals: 0,
+        },
+    )]);
+    let driver_gate = gate.clone();
+    let driver = tokio::spawn(async move {
+        let request = ready_session(session, ready, driver_gate.clone()).await?;
+        ordinary_requests(request, (1, [1; 32], [2; 32]), driver_gate, &path).await
+    });
+    route_io::receive(&mut peer, 256).await.unwrap();
+    tokio::task::yield_now().await;
+    assert!(!permission.refresh_due(expires, 0).unwrap());
+    assert!(live_renewal(&live).unwrap().is_none());
+    route_io::send(&mut peer, &packet).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), arrivals.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        gate.demanded(),
+        "waiting for the local application remains active"
+    );
+    tokio::time::sleep(Duration::from_millis(
+        expires.saturating_sub(crate::authority_challenge::boot_time_ms().unwrap()) + 1,
+    ))
+    .await;
+    assert!(
+        permission
+            .refresh_due(crate::authority_challenge::boot_time_ms().unwrap(), 0)
+            .unwrap()
+    );
+    assert!(live_renewal(&live).unwrap().is_some());
+    gate.renew(crate::authority_challenge::boot_time_ms().unwrap() + 3000)
+        .unwrap();
+    release.send(()).await.unwrap();
+    assert_eq!(
+        route_io::receive(&mut peer, 256).await.unwrap(),
+        b"Current local response"
+    );
+    tokio::task::yield_now().await;
+    assert!(
+        !gate.demanded(),
+        "waiting for the next frame must release application activity"
+    );
+    assert!(!permission.refresh_due(gate.expiry().unwrap(), 0).unwrap());
+    assert!(live_renewal(&live).unwrap().is_none());
+    route_io::send(&mut peer, &packet).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), arrivals.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(gate.demanded());
+    driver.abort();
+    assert!(matches!(driver.await, Err(error) if error.is_cancelled()));
+    assert!(
+        !gate.demanded(),
+        "cancellation must release pending application activity"
+    );
+    application.abort();
+    assert!(application.await.unwrap_err().is_cancelled());
+    fs::remove_dir_all(root).unwrap();
+}
 #[derive(Default)]
 struct BlockWrites {
     blocked: std::sync::atomic::AtomicBool,
@@ -798,7 +929,7 @@ async fn private_route_tls_read_error_cannot_flush_ciphertext_after_permission_e
     let mut client = client.unwrap();
     let expires = crate::authority_challenge::boot_time_ms().unwrap() + 100;
     let permission = route_io::Gate::new(expires);
-    boundary.arm(permission, deadline).unwrap();
+    boundary.arm(permission.clone(), deadline).unwrap();
     state.blocked.store(true, Ordering::Release);
     server
         .write_all(b"Queued private application ciphertext")
@@ -825,6 +956,15 @@ async fn private_route_tls_read_error_cannot_flush_ciphertext_after_permission_e
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert_eq!(state.written.load(Ordering::Acquire), before);
     assert!(server.get_ref().1.wants_write());
+    assert!(
+        permission.demanded(),
+        "TLS reads that try to emit ciphertext must request renewal"
+    );
+    permission.renew(deadline).unwrap();
+    assert!(
+        !permission.demanded(),
+        "the failed TLS read must not retain an activity lease"
+    );
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn private_route_nested_tls_checks_final_identity_before_application_credentials() {

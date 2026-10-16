@@ -79,31 +79,8 @@ fn runtime_clock(directory: &Path) -> (PathBuf, u64) {
     (directory.join("ClockHealth.json"), now.wall_ms)
 }
 fn runtime_peer_event(driver: &mut Driver, key: &SigningKey, message: &Message) -> u64 {
-    let sender = key.verifying_key().to_bytes();
-    // Encode directly so malformed nested evidence reaches the real decoder.
-    let body = wire::sign_envelope(
-        &wire::encode(&V::Array(vec![
-            V::Uint(40),
-            V::Uint(1),
-            driver.config().scope.value(),
-            V::Bytes(sender.to_vec()),
-            V::Uint(message.number()),
-            V::Bytes(message.payload().unwrap()),
-        ]))
-        .unwrap(),
-        key,
-    )
-    .unwrap();
-    let digest = wire::digest(&body);
-    let (answer, mut response) = oneshot::channel();
-    driver
-        .event(Event::Peer {
-            sender,
-            body,
-            answer,
-            queued: Instant::now(),
-        })
-        .unwrap();
+    let (event, mut response, digest) = queued_peer_event(driver.config(), key, message);
+    driver.event(event).unwrap();
     let Message::Ack(returned, disposition) = peer::decode(
         driver.config(),
         driver.engine.signer(),
@@ -114,6 +91,39 @@ fn runtime_peer_event(driver: &mut Driver, key: &SigningKey, message: &Message) 
     };
     assert_eq!(returned, digest);
     disposition
+}
+fn queued_peer_event(
+    configuration: &Configuration,
+    key: &SigningKey,
+    message: &Message,
+) -> (Event, oneshot::Receiver<Vec<u8>>, Digest) {
+    let sender = key.verifying_key().to_bytes();
+    // Encode directly so malformed nested evidence reaches the real decoder.
+    let body = wire::sign_envelope(
+        &wire::encode(&V::Array(vec![
+            V::Uint(40),
+            V::Uint(1),
+            configuration.scope.value(),
+            V::Bytes(sender.to_vec()),
+            V::Uint(message.number()),
+            V::Bytes(message.payload().unwrap()),
+        ]))
+        .unwrap(),
+        key,
+    )
+    .unwrap();
+    let digest = wire::digest(&body);
+    let (answer, response) = oneshot::channel();
+    (
+        Event::Peer {
+            sender,
+            body,
+            answer,
+            queued: Instant::now(),
+        },
+        response,
+        digest,
+    )
 }
 pub(crate) fn config(clock: PathBuf, root: &Path, keys: &[SigningKey; 4]) -> Config {
     Config {
@@ -169,6 +179,268 @@ fn repair_driver(
         retransmit_cursor: 0,
     }
 }
+#[test]
+fn queued_peer_votes_publish_once_and_retain_fourth_signer_on_reopen() {
+    for count in [2, 3] {
+        let (configuration, keys, directories, mut engines, votes) =
+            super::super::transaction_tests::prepared();
+        let mut driver = repair_driver(
+            engines.pop().unwrap(),
+            &directories[3].0,
+            &keys,
+            configuration.voters[0],
+            ingress::Mailbox::new(),
+        );
+        let (sender, mut receiver) = mpsc::channel(MAX_EVENTS);
+        let mut events = Vec::new();
+        let mut responses = Vec::new();
+        for (key, vote) in keys.iter().zip(&votes).take(count) {
+            let (event, response, digest) =
+                queued_peer_event(&configuration, key, &Message::Vote(vote.envelope.clone()));
+            events.push(event);
+            responses.push((response, digest));
+        }
+        let first = events.remove(0);
+        for event in events {
+            sender
+                .try_send(event)
+                .unwrap_or_else(|_| panic!("Queue unexpectedly full"));
+        }
+        let generation = driver.engine.generation();
+        assert!(driver.queued_event(first, &mut receiver).unwrap().is_none());
+        assert_eq!(driver.engine.generation(), generation + 1);
+        assert!(receiver.is_empty());
+        for (mut response, digest) in responses {
+            assert!(
+                matches!(peer::decode(&configuration, configuration.voters[3], &response.try_recv().unwrap()).unwrap(), Message::Ack(actual, 0) if actual == digest)
+            );
+        }
+        let index = super::super::vote_id(1, Phase::PreCommit, &configuration.voters[3]);
+        let own = driver.engine.snapshot.own_votes[&index].clone();
+        assert!(
+            driver
+                .outbox
+                .values()
+                .any(|(_, message, _)| matches!(message, Message::Vote(bytes) if bytes == &own))
+        );
+        drop(driver);
+        let resumed = Engine::open(
+            &directories[3].0,
+            configuration.clone(),
+            keys[3].clone(),
+            generation + 1,
+        )
+        .unwrap();
+        assert_eq!(resumed.snapshot.own_votes[&index], own);
+        for (key, vote) in configuration.voters.iter().zip(&votes).take(count) {
+            assert_eq!(
+                resumed.snapshot.votes[&super::super::vote_id(1, Phase::Prepare, key)],
+                vote.envelope
+            );
+        }
+    }
+}
+
+#[test]
+fn queued_vote_batch_stops_before_local_invalid_missing_and_conflicting_events() {
+    for boundary in ["Local", "Invalid", "Missing", "Conflict"] {
+        let (configuration, keys, directories, mut engines, votes) =
+            super::super::transaction_tests::prepared();
+        let mut target = engines.pop().unwrap();
+        let barrier = if boundary == "Local" {
+            let (answer, response) = oneshot::channel();
+            (
+                Event::Local {
+                    body: wire::encode(&V::Array(vec![
+                        V::Uint(41),
+                        V::Uint(1),
+                        configuration.scope.value(),
+                        V::Uint(2),
+                        V::Bytes(wire::encode(&V::Array(vec![])).unwrap()),
+                    ]))
+                    .unwrap(),
+                    answer,
+                    queued: Instant::now(),
+                },
+                response,
+            )
+        } else {
+            let mut input = votes[0].envelope.clone();
+            if boundary == "Invalid" {
+                *input.last_mut().unwrap() ^= 1;
+            } else {
+                let mut vote = votes[0].vote.clone();
+                vote.node = [90; 32];
+                if boundary == "Conflict" {
+                    // A certified fork makes both statements known; receiving a
+                    // conflicting signer vote must retain the ordinary incident.
+                    let command = fixtures::request(&configuration, 76);
+                    let fork = Node {
+                        scope: configuration.scope.clone(),
+                        view: 1,
+                        height: 1,
+                        parent: Some(configuration.genesis().digest().unwrap()),
+                        command: Some(wire::digest(&command)),
+                        evaluated_at: 10000,
+                        justify: Some(configuration.genesis_qc().unwrap().digest()),
+                    };
+                    vote.node = fork.digest().unwrap();
+                    let signed: Vec<_> = keys[..3]
+                        .iter()
+                        .map(|key| SignedVote::sign(&configuration, vote.clone(), key).unwrap())
+                        .collect();
+                    let qc = Certificate::collect(&configuration, &signed).unwrap();
+                    let items = vec![
+                        item(&configuration, 12, qc.bytes).unwrap(),
+                        item(&configuration, 14, fork.encode().unwrap()).unwrap(),
+                        item(&configuration, 22, command).unwrap(),
+                    ];
+                    let refs: Vec<_> = items.iter().map(|item| item.reference.clone()).collect();
+                    target.repair_import(&refs, &items).unwrap();
+                }
+                input = SignedVote::sign(&configuration, vote, &keys[0])
+                    .unwrap()
+                    .envelope;
+            }
+            let (event, response, _) =
+                queued_peer_event(&configuration, &keys[0], &Message::Vote(input));
+            (event, response)
+        };
+        let mut driver = repair_driver(
+            target,
+            &directories[3].0,
+            &keys,
+            configuration.voters[0],
+            ingress::Mailbox::new(),
+        );
+        let (first, mut first_response, _) = queued_peer_event(
+            &configuration,
+            &keys[0],
+            &Message::Vote(votes[0].envelope.clone()),
+        );
+        let (second, mut second_response, _) = queued_peer_event(
+            &configuration,
+            &keys[1],
+            &Message::Vote(votes[1].envelope.clone()),
+        );
+        let (last, mut last_response, _) = queued_peer_event(
+            &configuration,
+            &keys[2],
+            &Message::Vote(votes[2].envelope.clone()),
+        );
+        let (sender, mut receiver) = mpsc::channel(MAX_EVENTS);
+        let (barrier, mut barrier_response) = barrier;
+        for event in [second, barrier, last] {
+            sender
+                .try_send(event)
+                .unwrap_or_else(|_| panic!("Queue unexpectedly full"));
+        }
+        let generation = driver.engine.generation();
+        let deferred = driver.queued_event(first, &mut receiver).unwrap().unwrap();
+        assert_eq!(driver.engine.generation(), generation + 1, "{boundary}");
+        assert!(first_response.try_recv().is_ok());
+        assert!(second_response.try_recv().is_ok());
+        assert!(matches!(
+            barrier_response.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            last_response.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(receiver.len(), 1);
+        assert!(
+            !driver
+                .engine
+                .snapshot
+                .votes
+                .contains_key(&super::super::vote_id(
+                    1,
+                    Phase::Prepare,
+                    &configuration.voters[2]
+                ))
+        );
+        assert!(
+            driver
+                .queued_event(deferred, &mut receiver)
+                .unwrap()
+                .is_none()
+        );
+        assert!(barrier_response.try_recv().is_ok());
+        assert_eq!(receiver.len(), 1);
+        assert!(matches!(
+            last_response.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            driver.engine.snapshot.votes
+                [&super::super::vote_id(1, Phase::Prepare, &configuration.voters[0])],
+            votes[0].envelope
+        );
+        if boundary == "Conflict" {
+            assert_eq!(driver.engine.snapshot.incidents.len(), 1);
+            assert_eq!(driver.engine.snapshot.incidents[0][0], votes[0].envelope);
+        }
+        driver
+            .queued_event(receiver.try_recv().unwrap(), &mut receiver)
+            .unwrap();
+        assert!(last_response.try_recv().is_ok());
+    }
+}
+
+#[test]
+fn queued_vote_publication_failure_releases_no_acknowledgement_or_broadcast() {
+    let (configuration, keys, directories, mut engines, votes) =
+        super::super::transaction_tests::prepared();
+    let mut driver = repair_driver(
+        engines.pop().unwrap(),
+        &directories[3].0,
+        &keys,
+        configuration.voters[0],
+        ingress::Mailbox::new(),
+    );
+    let (first, mut first_response, _) = queued_peer_event(
+        &configuration,
+        &keys[0],
+        &Message::Vote(votes[0].envelope.clone()),
+    );
+    let (second, mut second_response, _) = queued_peer_event(
+        &configuration,
+        &keys[1],
+        &Message::Vote(votes[1].envelope.clone()),
+    );
+    let (sender, mut receiver) = mpsc::channel(MAX_EVENTS);
+    sender
+        .try_send(second)
+        .unwrap_or_else(|_| panic!("Queue unexpectedly full"));
+    let generation = driver.engine.generation();
+    let pending = directories[3].0.join("SignerPending.bin");
+    std::os::unix::fs::symlink("Signer.bin", &pending).unwrap();
+    assert!(driver.queued_event(first, &mut receiver).is_err());
+    assert_eq!(driver.engine.generation(), generation);
+    assert!(first_response.try_recv().is_err());
+    assert!(second_response.try_recv().is_err());
+    assert!(driver.outbox.is_empty());
+    assert!(driver.local.is_empty());
+    std::fs::remove_file(pending).unwrap();
+    assert!(driver.engine.receive_vote(&votes[0].envelope).is_err());
+    drop(driver);
+    let resumed = Engine::open(
+        &directories[3].0,
+        configuration.clone(),
+        keys[3].clone(),
+        generation,
+    )
+    .unwrap();
+    for key in &configuration.voters[..2] {
+        assert!(!resumed.snapshot.votes.contains_key(&super::super::vote_id(
+            1,
+            Phase::Prepare,
+            key
+        )));
+    }
+}
+
 #[test]
 fn peer_quorums_publish_local_phase_without_an_intermediate_repair_commit() {
     let (configuration, keys) = fixture();

@@ -70,6 +70,17 @@ replace current permission; it cannot extend an old proof or the connection's
 original duration, idle or byte limits. The endpoint revalidates its deployment
 permission separately. Application access still requires its own current proof.
 
+An idle admitted channel does not renew either transit or endpoint permission.
+Buffered forwarding writes request renewal; bare reads do not. The endpoint also
+keeps permission current while an application exchange is executing, including
+the wait for its local reply. That activity ends before waiting for the next
+application frame and is released when the exchange fails or is cancelled.
+An expired raw write, flush or shutdown requests a fresh proof below TLS and
+remains blocked. The same rule covers ciphertext emitted by a TLS read. This
+request is consumed by one renewal, so a cancelled TLS future cannot cause an
+idle renewal loop. New demand wakes the authority dispatcher; existing permission,
+consent and original connection bounds still decide whether any bytes can pass.
+
 `RouteReady` reports remaining total transport time after relay admission. The
 client applies that duration from receipt while retaining its original connection
 limit. Inside final-service TLS, `EndpointReady` confirms the exact network,
@@ -85,7 +96,8 @@ Every frame is checked against the endpoint's selected protocol. An I/O failure
 closes the channel; an unresolved operation cannot silently reconnect or replay.
 
 For protocols 1 through 5, one bounded task handles the session's validated
-frames while the authority requester refreshes its shared endpoint permission.
+frames while the authority requester refreshes its shared endpoint permission
+only for active exchanges or pending writes.
 Ordinary requests do not wait for maintenance dispatch while that permission
 remains current. Protocol 6 also requires a fresh reader authority check for each
 request. Neither path extends the application's own permission or deadline.
@@ -113,7 +125,8 @@ between them. A retained exact voucher can supply context, but it never replaces
 the current Permit required before forwarding. One waiting reader admission step
 can follow renewal, including a reader that arrived during the renewal. An
 unrelated background attachment cannot consume that turn. Speculative attachment
-replenishment waits while readers are active and reserves no renewal time. A
+replenishment waits while admitted reader channels remain open, including idle
+channels, and reserves no renewal time. A
 replacement required by a waiting reader remains eligible. The forwarding guard
 still enforces its certified expiry while that step runs.
 
