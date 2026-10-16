@@ -384,6 +384,91 @@ async fn private_route_endpoint_readiness_refuses_closed_permission() {
     }
 }
 #[tokio::test]
+async fn private_route_endpoint_prepares_near_expiry_permission_before_ready_and_reply() {
+    let (mut peer, session, gate, ready) = readiness_fixture(10000);
+    let deadline = session.deadline;
+    let now = crate::authority_challenge::boot_time_ms().unwrap();
+    let old_expiry = now + 3000;
+    let budget = 1800;
+    gate.renew(old_expiry).unwrap();
+    // The proof is current, but an application action would cross the renewal's latest start.
+    assert!(now < refresh_at(old_expiry, budget));
+    let mut permission = EndpointPermission {
+        gate: gate.clone(),
+        renewals: 0,
+    };
+    let fresh_expiry = now + 5000;
+    let mut renewed = false;
+    permission
+        .prepare(deadline, budget, |bound| {
+            assert_eq!(bound, deadline);
+            assert!(gate.expiry().unwrap() > crate::authority_challenge::boot_time_ms().unwrap());
+            renewed = true;
+            Ok(fresh_expiry)
+        })
+        .unwrap();
+    assert!(renewed);
+    assert_eq!(gate.expiry().unwrap(), fresh_expiry);
+    permission
+        .prepare(deadline, budget, |_| {
+            anyhow::bail!("fresh permission must be reused")
+        })
+        .unwrap();
+    let expected_ready = ready.clone();
+    let (request, ()) = tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::join!(
+            async {
+                let mut request = ready_session(session, ready, gate.clone()).await.unwrap();
+                assert_eq!(request.packet, b"Request");
+                assert_eq!(request.session.deadline, deadline);
+                route_io::guarded_send(
+                    &mut request.session.stream,
+                    b"Reply",
+                    &gate,
+                    request.session.deadline,
+                    request.session.idle_ms,
+                )
+                .await
+                .unwrap();
+                request
+            },
+            async {
+                assert_eq!(
+                    route_io::receive(&mut peer, 256).await.unwrap(),
+                    expected_ready
+                );
+                route_io::send(&mut peer, b"Request").await.unwrap();
+                assert_eq!(route_io::receive(&mut peer, 256).await.unwrap(), b"Reply");
+            }
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(request.session.deadline, deadline);
+    assert_eq!(permission.renewals, 1);
+    drop(request);
+    gate.renew(crate::authority_challenge::boot_time_ms().unwrap() + 1000)
+        .unwrap();
+    assert!(
+        permission
+            .prepare(deadline, budget, |_| anyhow::bail!(
+                "current authority refused"
+            ))
+            .is_err()
+    );
+    assert_eq!(permission.renewals, 2);
+    assert!(
+        permission
+            .prepare(
+                crate::authority_challenge::boot_time_ms().unwrap(),
+                budget,
+                |_| anyhow::bail!("expired setup must not request renewal")
+            )
+            .is_err()
+    );
+    assert_eq!(permission.renewals, 2);
+}
+#[tokio::test]
 async fn private_route_endpoint_readiness_retains_original_deadline() {
     let (mut peer, session, permission, ready) = readiness_fixture(200);
     let deadline = session.deadline;

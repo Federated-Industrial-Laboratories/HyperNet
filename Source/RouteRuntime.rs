@@ -72,6 +72,67 @@ pub(crate) enum Phase {
     RenewalRefused,
     RelayGuardExpired,
     RelayGuardResumed,
+    RelayCurrent,
+    RelayClock,
+    RenewalAuthority,
+    RenewalCurrent,
+    PairPermission,
+    PairCurrent,
+    PairClock,
+    PairBinding,
+    AttachmentAdmission,
+    AttachmentRefused,
+    AttachmentReady,
+    ReaderReady,
+    AdmissionAuthority,
+    AdmissionCurrent,
+    AdmissionClock,
+    EndpointRenewalStart,
+    EndpointRenewalComplete,
+    EndpointRenewalRefused,
+}
+impl std::fmt::Display for Phase {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(out, "private route stage {self:?}")
+    }
+}
+impl std::error::Error for Phase {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FailureCode {
+    ObservationExpired,
+    Timeout,
+    UnexpectedEof,
+    ConnectionReset,
+    ConnectionAborted,
+    BrokenPipe,
+    PermissionDenied,
+    Io,
+    Tls,
+    Other,
+}
+fn failure_code(error: &anyhow::Error) -> FailureCode {
+    if error.is::<crate::consensus_clock::ObservationExpired>() {
+        return FailureCode::ObservationExpired;
+    }
+    if error.is::<tokio::time::error::Elapsed>() {
+        return FailureCode::Timeout;
+    }
+    if let Some(error) = error.downcast_ref::<std::io::Error>() {
+        return match error.kind() {
+            std::io::ErrorKind::TimedOut => FailureCode::Timeout,
+            std::io::ErrorKind::UnexpectedEof => FailureCode::UnexpectedEof,
+            std::io::ErrorKind::ConnectionReset => FailureCode::ConnectionReset,
+            std::io::ErrorKind::ConnectionAborted => FailureCode::ConnectionAborted,
+            std::io::ErrorKind::BrokenPipe => FailureCode::BrokenPipe,
+            std::io::ErrorKind::PermissionDenied => FailureCode::PermissionDenied,
+            _ => FailureCode::Io,
+        };
+    }
+    if error.is::<rustls::Error>() {
+        return FailureCode::Tls;
+    }
+    FailureCode::Other
 }
 #[derive(Clone, Copy)]
 pub(crate) struct Timing {
@@ -83,7 +144,7 @@ impl Timing {
         let sample = if enabled {
             TIMING_SAMPLES
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                    (n < 4).then_some(n + 1)
+                    (n < 64).then_some(n + 1)
                 })
                 .ok()
                 .map(|n| n + 1)
@@ -96,10 +157,20 @@ impl Timing {
         if let Some(sample) = self.sample
             && let Ok(now) = crate::authority_challenge::boot_time_ms()
         {
-            // Four samples per process, fixed stages and elapsed time only; no peer or request data.
+            // Bounded samples cover sequential setup; only fixed stages and elapsed time are logged.
             eprintln!(
-                "HyperNet private route timing: sample={sample} stage={stage:?} elapsedMs={}",
+                "HyperNet private route timing: sample={sample} stage={stage:?} elapsedMs={} bootMs={now}",
                 now.saturating_sub(self.started)
+            );
+        }
+    }
+    fn failure(self, stage: Phase, error: &anyhow::Error) {
+        if let Some(sample) = self.sample {
+            eprintln!(
+                "HyperNet private route failure: sample={sample} stage={stage:?} cause={:?} reason={:?} bootMs={:?}",
+                error.downcast_ref::<Phase>(),
+                failure_code(error),
+                crate::authority_challenge::boot_time_ms().ok(),
             );
         }
     }
@@ -178,12 +249,23 @@ impl std::error::Error for Refusal {}
 struct IngressDiagnostics {
     refused: [AtomicU64; 13],
     parsed: AtomicU64,
+    reported: AtomicU64,
 }
 impl IngressDiagnostics {
     fn refuse(&self, reason: Refusal) {
-        if self.refused[reason as usize].fetch_add(1, Ordering::Relaxed) == 0 {
-            // One line per fixed category: no peer address, identity, frame or untrusted error text.
-            eprintln!("HyperNet private route refused: {reason}");
+        let first = self.refused[reason as usize].fetch_add(1, Ordering::Relaxed) == 0;
+        let sampled = self
+            .reported
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                (n < 64).then_some(n + 1)
+            })
+            .is_ok();
+        if first || sampled {
+            // Bounded fixed categories omit peer identity, frames and untrusted error text.
+            eprintln!(
+                "HyperNet private route refused: {reason} code={reason:?} bootMs={:?}",
+                crate::authority_challenge::boot_time_ms().ok()
+            );
         }
     }
 }
@@ -191,12 +273,13 @@ impl<T> Drop for ListenerQueue<T> {
     fn drop(&mut self) {
         self.stop.send_replace(true);
         eprintln!(
-            "HyperNet private route ingress totals: parsed={} refused={:?}",
+            "HyperNet private route ingress totals: parsed={} refused={:?} bootMs={:?}",
             self.diagnostics.parsed.load(Ordering::Relaxed),
             self.diagnostics
                 .refused
                 .each_ref()
-                .map(|count| count.load(Ordering::Relaxed))
+                .map(|count| count.load(Ordering::Relaxed)),
+            crate::authority_challenge::boot_time_ms().ok(),
         );
     }
 }
@@ -366,7 +449,7 @@ struct Session {
 }
 impl Session {
     fn mark(&self, phase: Phase) {
-        if self.frames <= 4 {
+        if self.frames <= 32 {
             self.timing.mark(phase);
         }
     }
@@ -637,9 +720,19 @@ async fn pair(
     deadline: u64,
     permission: route_io::Gate,
 ) -> Result<()> {
+    let timing = opened.timing.unwrap_or(Timing {
+        started: 0,
+        sample: None,
+    });
     let limits = forwarding_limits(limits, deadline)?;
-    opened.boundary.arm(permission.clone(), deadline)?;
-    attachment.boundary.arm(permission.clone(), deadline)?;
+    opened
+        .boundary
+        .arm(permission.clone(), deadline)
+        .context(Phase::PairBinding)?;
+    attachment
+        .boundary
+        .arm(permission.clone(), deadline)
+        .context(Phase::PairBinding)?;
     // Pairing consumes the inert pool reservation; the reader's slot covers forwarding.
     drop(attachment.slot);
     tokio::time::timeout(Duration::from_millis(limits.duration_ms), async {
@@ -651,7 +744,8 @@ async fn pair(
             deadline.min(setup_deadline),
             limits.idle_ms,
         )
-        .await?;
+        .await
+        .context(Phase::AttachmentReady)?;
         let limits = forwarding_limits(limits, deadline)?;
         route_io::guarded_send(
             &mut stream,
@@ -660,7 +754,9 @@ async fn pair(
             deadline.min(setup_deadline),
             limits.idle_ms,
         )
-        .await?;
+        .await
+        .context(Phase::ReaderReady)?;
+        timing.mark(Phase::ReadyComplete);
         route_io::forward_guarded(stream, attachment.stream, limits, permission, deadline).await
     })
     .await?
@@ -710,8 +806,8 @@ async fn relay(
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let outcome = async {
     loop {
-        active.check(guard)?;
-        let now = client.now()?;
+        active.check(guard).context(Phase::RelayCurrent)?;
+        let now = client.now().context(Phase::RelayClock)?;
         let boot = crate::authority_challenge::boot_time_ms()?;
         attachments.retain(|a| a.expires > now && a.deadline > boot && a.total_deadline > boot);
         while let Ok(job) = incoming.requests.try_recv() {
@@ -778,9 +874,11 @@ async fn relay(
                     session.renewals = session.renewals.saturating_add(1);
                     timing.mark(Phase::RenewalStart);
                     if expiry <= crate::authority_challenge::boot_time_ms()? { timing.mark(Phase::RelayGuardExpired); }
-                    let result = clock_checked(client.refresh(&session.renewal, session.deadline))?;
+                    let result = clock_checked(client.refresh(&session.renewal, session.deadline))
+                        .context(Phase::RenewalAuthority)?;
                     timing.mark(if result.is_ok() { Phase::RenewalComplete } else { Phase::RenewalRefused });
-                    active.check(guard)?;
+                    if let Err(error) = &result { timing.failure(Phase::RenewalRefused, error); }
+                    active.check(guard).context(Phase::RenewalCurrent)?;
                     if result.and_then(|expires| session.gate.renew(expires.min(session.deadline))).is_ok() {
                         let now = crate::authority_challenge::boot_time_ms()?;
                         if expiry <= now { timing.mark(Phase::RelayGuardResumed); }
@@ -793,13 +891,15 @@ async fn relay(
                 if let Some((reader, attachment)) = pairing {
                     let mut reader = waiting.remove(reader).context("waiting reader disappeared")?;
                     let attachment = attachments.remove(attachment).context("matching attachment disappeared")?;
-                    let permission = clock_checked(reader.permission(attachment.total_deadline, |renewal, deadline| client.refresh(renewal, deadline)))?;
-                    active.check(guard)?;
-                    if permission.is_err() {
+                    let permission = clock_checked(reader.permission(attachment.total_deadline, |renewal, deadline| client.refresh(renewal, deadline)))
+                        .context(Phase::PairPermission)?;
+                    active.check(guard).context(Phase::PairCurrent)?;
+                    if let Err(error) = permission {
+                        reader.live.timing.failure(Phase::PairPermission, &error);
                         incoming.diagnostics.refuse(Refusal::AdmissionExpired);
                         continue;
                     }
-                    let wall = client.now()?;
+                    let wall = client.now().context(Phase::PairClock)?;
                     let boot = crate::authority_challenge::boot_time_ms()?;
                     if !reader.current(boot) {
                         incoming.diagnostics.refuse(Refusal::AttachmentUnavailable);
@@ -821,6 +921,7 @@ async fn relay(
                         let _slot = slot;
                         let result = pair(opened, attachment, setup_deadline, limits, deadline, permission).await;
                         timing.mark(if result.is_ok() { Phase::ForwardingComplete } else { Phase::ForwardingRefused });
+                        if let Err(error) = &result { timing.failure(Phase::ForwardingRefused, error); }
                         (id, result)
                     });
                     continue;
@@ -832,18 +933,19 @@ async fn relay(
                         timing
                     });
                     if crate::authority_local_transport::remaining(deadline).is_err() { incoming.diagnostics.refuse(Refusal::Deadline); timing.mark(Phase::AdmissionRefused); continue; }
-                    let admitted = clock_checked(client.admit(&opened.open, opened.signer, opened.connection, opened.binding, (started, deadline), timing))?;
-                    active.check(guard)?;
+                    let admitted = clock_checked(client.admit(&opened.open, opened.signer, opened.connection, opened.binding, (started, deadline), timing))
+                        .context(Phase::AdmissionAuthority)?;
+                    active.check(guard).context(Phase::AdmissionCurrent)?;
                     let admission = match admitted {
                         Ok(Some(admission)) => { timing.mark(Phase::AdmissionComplete); admission },
                         Ok(None) => {
                             pending.push_back(Queued { request: opened, slot, started, enqueued, deadline });
                             continue;
                         },
-                        Err(_) => { incoming.diagnostics.refuse(Refusal::Admission); timing.mark(Phase::AdmissionRefused); continue; },
+                        Err(error) => { incoming.diagnostics.refuse(Refusal::Admission); timing.mark(Phase::AdmissionRefused); timing.failure(Phase::AdmissionRefused, &error); continue; },
                     };
                     {
-                        let now = client.now()?;
+                        let now = client.now().context(Phase::AdmissionClock)?;
                         let boot = crate::authority_challenge::boot_time_ms()?;
                         if boot >= deadline || now >= admission.expires { incoming.diagnostics.refuse(Refusal::AdmissionExpired); timing.mark(Phase::AdmissionExpired); continue; }
                         if opened.open.attachment {
@@ -881,6 +983,7 @@ async fn relay(
                                 let _slot = slot;
                                 let result = public(opened, destination, limits, deadline, permission, timing).await;
                                 timing.mark(if result.is_ok() { Phase::ForwardingComplete } else { Phase::ForwardingRefused });
+                                if let Err(error) = &result { timing.failure(Phase::ForwardingRefused, error); }
                                 (id, result)
                             });
                         }
@@ -895,6 +998,14 @@ async fn relay(
     }
     Ok(())
     }.await;
+    if let Err(error) = &outcome {
+        eprintln!(
+            "HyperNet private relay termination: phase={:?} reason={:?} bootMs={:?}",
+            error.downcast_ref::<Phase>(),
+            failure_code(error),
+            crate::authority_challenge::boot_time_ms().ok()
+        );
+    }
     live.clear();
     waiting.clear();
     attachments.clear();
@@ -951,7 +1062,7 @@ async fn attach(
 ) -> Result<Session> {
     let start = crate::authority_challenge::boot_time_ms()?;
     let timing = Timing::begin(start, true);
-    tokio::time::timeout(Duration::from_millis(limits.duration_ms), async {
+    let outcome = tokio::time::timeout(Duration::from_millis(limits.duration_ms), async {
         let socket = tokio::time::timeout(
             Duration::from_millis(limits.idle_ms),
             route_io::dial(endpoint),
@@ -981,7 +1092,9 @@ async fn attach(
         route_io::send(&mut outer, &open.sign(challenge, exporter, &key)?).await?;
         let binding = wire::digest(&open.binding(challenge, exporter)?);
         let admitted = protocol::parse_ready(
-            &route_io::receive(&mut outer, protocol::FRAME).await?,
+            &route_io::receive(&mut outer, protocol::FRAME)
+                .await
+                .context(Phase::AttachmentAdmission)?,
             binding,
             limits,
         )?;
@@ -1008,7 +1121,13 @@ async fn attach(
             frames: 0,
         })
     })
-    .await?
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|result| result);
+    if let Err(error) = &outcome {
+        timing.failure(Phase::AttachmentRefused, error);
+    }
+    outcome
 }
 async fn next_packet(mut session: Session, permission: route_io::Gate) -> Result<Request> {
     let maximum = usize::try_from(session.bytes.saturating_sub(4))?.min(wire::MAXIMUM);
@@ -1141,6 +1260,7 @@ async fn response_at(
 }
 struct EndpointPermission {
     gate: route_io::Gate,
+    renewals: u64,
 }
 impl Drop for EndpointPermission {
     fn drop(&mut self) {
@@ -1149,26 +1269,71 @@ impl Drop for EndpointPermission {
 }
 impl EndpointPermission {
     fn current(&mut self, client: &mut Client<'_>, deadline: u64) -> Result<()> {
-        if self.gate.expiry()? <= crate::authority_challenge::boot_time_ms()? {
-            self.refresh(client, deadline)?;
+        self.prepare(deadline, client.operation_budget_ms(), |deadline| {
+            client.before(deadline, |client| client.own())?;
+            client.effect_deadline()
+        })
+    }
+    fn prepare(
+        &mut self,
+        deadline: u64,
+        budget: u64,
+        refresh: impl FnOnce(u64) -> Result<u64>,
+    ) -> Result<()> {
+        crate::authority_local_transport::remaining(deadline)?;
+        if crate::authority_challenge::boot_time_ms()?.saturating_add(budget)
+            >= refresh_at(self.gate.expiry()?, budget)
+        {
+            // Readiness reserves one application action before the next renewal's latest start.
+            self.renew(deadline, refresh)?;
         }
         Ok(())
     }
     fn before_action(&mut self, client: &mut Client<'_>, deadline: u64) -> Result<()> {
-        let budget = client.operation_budget_ms();
-        if crate::authority_challenge::boot_time_ms()?.saturating_add(budget)
-            >= refresh_at(self.gate.expiry()?, budget)
-        {
-            // A bridge frame gets one Reader action after this renewal; its own proof remains mandatory.
-            self.refresh(client, deadline)?;
-        }
-        Ok(())
+        // A bridge frame uses the same scheduling margin; its own Reader proof remains mandatory.
+        self.current(client, deadline)
     }
     fn refresh(&mut self, client: &mut Client<'_>, deadline: u64) -> Result<()> {
-        client.before(deadline, |client| client.own())?;
-        let expiry = client.effect_deadline()?;
-        self.gate.renew(expiry)?;
-        Ok(())
+        self.renew(deadline, |deadline| {
+            client.before(deadline, |client| client.own())?;
+            client.effect_deadline()
+        })
+    }
+    fn renew(&mut self, deadline: u64, refresh: impl FnOnce(u64) -> Result<u64>) -> Result<()> {
+        let old_expiry = self.gate.expiry()?;
+        let sample = if self.renewals < 64 {
+            Some(self.renewals + 1)
+        } else {
+            None
+        };
+        self.renewals = self.renewals.saturating_add(1);
+        if let Some(sample) = sample {
+            eprintln!(
+                "HyperNet private route endpoint renewal: sample={sample} stage={:?} oldExpiryBootMs={old_expiry} bootMs={:?}",
+                Phase::EndpointRenewalStart,
+                crate::authority_challenge::boot_time_ms().ok()
+            );
+        }
+        let outcome = (|| {
+            let expiry = refresh(deadline)?;
+            crate::authority_local_transport::remaining(deadline)?;
+            self.gate.renew(expiry)?;
+            Ok(expiry)
+        })();
+        if let Some(sample) = sample {
+            eprintln!(
+                "HyperNet private route endpoint renewal: sample={sample} stage={:?} oldExpiryBootMs={old_expiry} newExpiryBootMs={:?} reason={:?} bootMs={:?}",
+                if outcome.is_ok() {
+                    Phase::EndpointRenewalComplete
+                } else {
+                    Phase::EndpointRenewalRefused
+                },
+                outcome.as_ref().ok(),
+                outcome.as_ref().err().map(failure_code),
+                crate::authority_challenge::boot_time_ms().ok()
+            );
+        }
+        outcome.map(|_| ())
     }
 }
 fn endpoint_packet(
@@ -1201,6 +1366,7 @@ async fn endpoint(
     let expiry = client.effect_deadline()?;
     let mut permission = EndpointPermission {
         gate: route_io::Gate::new(expiry),
+        renewals: 0,
     };
     let ready = protocol::endpoint_ready(
         config.manifest.network,
@@ -1395,7 +1561,11 @@ pub async fn run(config: Config, guard: &Guard, active: &Active) -> Result<()> {
         match outcome {
             Err(error) if error.is::<crate::consensus_clock::ObservationExpired>() => {
                 // All previous sockets and tasks are gone. Only the original consent may resume.
-                eprintln!("HyperNet private route clock: Suspended");
+                eprintln!(
+                    "HyperNet private route clock: Suspended phase={:?} bootMs={:?}",
+                    error.downcast_ref::<Phase>(),
+                    crate::authority_challenge::boot_time_ms().ok()
+                );
                 let resumed = wait_for_clock(
                     || {
                         active.check_local(guard)?;
@@ -1413,9 +1583,22 @@ pub async fn run(config: Config, guard: &Guard, active: &Active) -> Result<()> {
                 if !resumed {
                     return Ok(());
                 }
-                eprintln!("HyperNet private route clock: FreshObservation");
+                eprintln!(
+                    "HyperNet private route clock: FreshObservation bootMs={:?}",
+                    crate::authority_challenge::boot_time_ms().ok()
+                );
             }
-            outcome => return outcome,
+            outcome => {
+                if let Err(error) = &outcome {
+                    eprintln!(
+                        "HyperNet private route stopped: phase={:?} reason={:?} bootMs={:?}",
+                        error.downcast_ref::<Phase>(),
+                        failure_code(error),
+                        crate::authority_challenge::boot_time_ms().ok()
+                    );
+                }
+                return outcome;
+            }
         }
     }
 }
@@ -1431,3 +1614,38 @@ mod accept_tests;
 #[cfg(test)]
 #[path = "RouteClockTests.rs"]
 mod clock_tests;
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    #[test]
+    fn private_route_failure_codes_preserve_typed_causes_without_error_text() {
+        for (kind, code) in [
+            (
+                std::io::ErrorKind::UnexpectedEof,
+                FailureCode::UnexpectedEof,
+            ),
+            (std::io::ErrorKind::TimedOut, FailureCode::Timeout),
+            (
+                std::io::ErrorKind::ConnectionReset,
+                FailureCode::ConnectionReset,
+            ),
+        ] {
+            let error = anyhow::Error::new(std::io::Error::new(kind, "untrusted peer detail"))
+                .context(Phase::AttachmentReady);
+            assert_eq!(failure_code(&error), code);
+            assert_eq!(
+                format!("{:?}", error.downcast_ref::<Phase>().unwrap()),
+                "AttachmentReady"
+            );
+            assert!(!format!("{:?}", failure_code(&error)).contains("untrusted"));
+        }
+        let error = anyhow::Error::new(crate::consensus_clock::ObservationExpired)
+            .context(Phase::AdmissionClock);
+        assert_eq!(failure_code(&error), FailureCode::ObservationExpired);
+        assert_eq!(
+            failure_code(&anyhow::anyhow!("private detail")),
+            FailureCode::Other
+        );
+    }
+}

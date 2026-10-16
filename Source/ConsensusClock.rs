@@ -25,6 +25,60 @@ impl std::fmt::Display for ObservationExpired {
 }
 impl std::error::Error for ObservationExpired {}
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProbeFailure {
+    ClockRead,
+    ChronyQuery,
+    KernelBootChanged,
+    ClockReversed,
+    ProbeDuration,
+    TrackingEvidence,
+    ReferenceChanged,
+    SourceSelection,
+    Authentication,
+    ErrorBound,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QueryPhase {
+    FirstTracking,
+    FirstSources,
+    Authentication,
+    NtpData,
+    LastSources,
+    LastTracking,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QueryFailureCode {
+    TimedOut,
+    Io,
+    UnknownQueryFailure,
+}
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ProbeDiagnostic {
+    pub code: ProbeFailure,
+    pub elapsed_ms: Option<u64>,
+    pub maximum_error_ms: Option<u64>,
+    pub query_phase: Option<QueryPhase>,
+    pub query_failure: Option<QueryFailureCode>,
+}
+impl ProbeDiagnostic {
+    fn new(code: ProbeFailure, elapsed_ms: Option<u64>, maximum_error_ms: Option<u64>) -> Self {
+        Self {
+            code,
+            elapsed_ms,
+            maximum_error_ms,
+            query_phase: None,
+            query_failure: None,
+        }
+    }
+}
+impl std::fmt::Display for ProbeDiagnostic {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(out, "clock observation refused: {:?}", self.code)
+    }
+}
+impl std::error::Error for ProbeDiagnostic {}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Moment {
     pub wall_ms: u64,
@@ -346,18 +400,43 @@ fn authenticate(
 
 /// Only the fixed read-only commands reach the locally configured chrony socket.
 pub fn probe(mut query: impl FnMut(&str) -> Result<String>) -> Result<Witness> {
-    let boot = kernel_boot()?;
-    let before = moment()?;
-    let first_tracking = query("tracking")?;
-    let first_sources = query("sources")?;
-    let auth = query("authdata")?;
-    let ntp = query("ntpdata")?;
-    let last_sources = query("sources")?;
-    let last_tracking = query("tracking")?;
-    let after = moment()?;
+    let clock_read = || ProbeDiagnostic::new(ProbeFailure::ClockRead, None, None);
+    let boot = kernel_boot().with_context(clock_read)?;
+    let before = moment().with_context(clock_read)?;
+    let mut query = |command, phase| {
+        query(command).map_err(|error| {
+            let mut diagnostic = ProbeDiagnostic::new(
+                ProbeFailure::ChronyQuery,
+                moment()
+                    .ok()
+                    .map(|now| now.boot_ms.saturating_sub(before.boot_ms)),
+                None,
+            );
+            diagnostic.query_phase = Some(phase);
+            diagnostic.query_failure = Some(match error.downcast_ref::<std::io::Error>() {
+                Some(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                    QueryFailureCode::TimedOut
+                }
+                Some(_) => QueryFailureCode::Io,
+                None => QueryFailureCode::UnknownQueryFailure,
+            });
+            error.context(diagnostic)
+        })
+    };
+    let first_tracking = query("tracking", QueryPhase::FirstTracking)?;
+    let first_sources = query("sources", QueryPhase::FirstSources)?;
+    let auth = query("authdata", QueryPhase::Authentication)?;
+    let ntp = query("ntpdata", QueryPhase::NtpData)?;
+    let last_sources = query("sources", QueryPhase::LastSources)?;
+    let last_tracking = query("tracking", QueryPhase::LastTracking)?;
+    let after = moment().with_context(clock_read)?;
     ensure!(
-        boot == kernel_boot()?,
-        "kernel boot changed during clock observation"
+        boot == kernel_boot().with_context(clock_read)?,
+        ProbeDiagnostic::new(
+            ProbeFailure::KernelBootChanged,
+            Some(after.boot_ms.saturating_sub(before.boot_ms)),
+            None
+        )
     );
     qualify(
         &boot,
@@ -386,29 +465,41 @@ fn qualify(
     auth: &str,
     ntp: &str,
 ) -> Result<Witness> {
+    let diagnostic = |code| {
+        ProbeDiagnostic::new(
+            code,
+            Some(after.boot_ms.saturating_sub(before.boot_ms)),
+            None,
+        )
+    };
     ensure!(
         valid_boot(boot) && after.boot_ms >= before.boot_ms && after.wall_ms >= before.wall_ms,
-        "clock reversed during observation"
+        diagnostic(ProbeFailure::ClockReversed)
     );
     let duration = after.boot_ms - before.boot_ms;
     ensure!(
         duration <= MAXIMUM_PROBE_MS,
-        "clock-health observation took too long"
+        diagnostic(ProbeFailure::ProbeDuration)
     );
-    let first = tracking(first_tracking, before)?;
-    let last = tracking(last_tracking, after)?;
+    let first = tracking(first_tracking, before)
+        .with_context(|| diagnostic(ProbeFailure::TrackingEvidence))?;
+    let last = tracking(last_tracking, after)
+        .with_context(|| diagnostic(ProbeFailure::TrackingEvidence))?;
     ensure!(
         first.source == last.source
             && first.reference == last.reference
             && first.reference_ns == last.reference_ns,
-        "chrony reference changed during observation; retry required"
+        diagnostic(ProbeFailure::ReferenceChanged)
     );
-    let selected = sources(first_sources)?;
+    let selected =
+        sources(first_sources).with_context(|| diagnostic(ProbeFailure::SourceSelection))?;
     ensure!(
-        selected == sources(last_sources)?,
-        "time-source selection changed during observation"
+        selected
+            == sources(last_sources).with_context(|| diagnostic(ProbeFailure::SourceSelection))?,
+        diagnostic(ProbeFailure::SourceSelection)
     );
-    authenticate(&selected, auth, ntp, &last)?;
+    authenticate(&selected, auth, ntp, &last)
+        .with_context(|| diagnostic(ProbeFailure::Authentication))?;
     let progression = (after.wall_ms - before.wall_ms).abs_diff(duration);
     // Account for observation latency, timestamp rounding, holdover, and any
     // intervening system-clock adjustment before exposing the bound.
@@ -426,7 +517,11 @@ fn qualify(
         .context("clock bound overflow")?;
     ensure!(
         maximum_error_ms <= MAXIMUM_ERROR_MS,
-        "clock error exceeds the authority bound"
+        ProbeDiagnostic::new(
+            ProbeFailure::ErrorBound,
+            Some(duration),
+            Some(maximum_error_ms)
+        )
     );
     let value = Witness {
         version: 1,
@@ -469,6 +564,73 @@ mod tests {
         ntp[27] = "Yes";
         ntp[33] = "8";
         (tracking, sources, auth, ntp.join(","))
+    }
+    #[test]
+    fn clock_probe_diagnostics_distinguish_duration_and_error_bound() {
+        let (t, s, a, n) = reports();
+        let before = Moment {
+            wall_ms: 1000010,
+            boot_ms: 100,
+        };
+        for (elapsed, code) in [
+            (501, ProbeFailure::ProbeDuration),
+            (250, ProbeFailure::ErrorBound),
+        ] {
+            let after = Moment {
+                wall_ms: before.wall_ms + elapsed,
+                boot_ms: before.boot_ms + elapsed,
+            };
+            let error = qualify(BOOT, before, after, &t, &t, &s, &s, &a, &n).unwrap_err();
+            let diagnostic = error.downcast_ref::<ProbeDiagnostic>().unwrap();
+            assert_eq!(diagnostic.code, code);
+            assert_eq!(diagnostic.elapsed_ms, Some(elapsed));
+            assert_eq!(
+                diagnostic.maximum_error_ms.is_some(),
+                code == ProbeFailure::ErrorBound
+            );
+        }
+    }
+    #[test]
+    fn clock_probe_diagnostics_identify_query_phase_without_parsing_errors() {
+        for (failed, phase) in [
+            QueryPhase::FirstTracking,
+            QueryPhase::FirstSources,
+            QueryPhase::Authentication,
+            QueryPhase::NtpData,
+            QueryPhase::LastSources,
+            QueryPhase::LastTracking,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut count = 0;
+            let error = probe(|_| {
+                if count == failed {
+                    anyhow::bail!("untrusted dependency output");
+                }
+                count += 1;
+                Ok(String::new())
+            })
+            .unwrap_err();
+            let diagnostic = error.downcast_ref::<ProbeDiagnostic>().unwrap();
+            assert_eq!(diagnostic.code, ProbeFailure::ChronyQuery);
+            assert_eq!(diagnostic.query_phase, Some(phase));
+            assert_eq!(
+                diagnostic.query_failure,
+                Some(QueryFailureCode::UnknownQueryFailure)
+            );
+        }
+        let error = probe(|_| {
+            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "private detail").into())
+        })
+        .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<ProbeDiagnostic>()
+                .unwrap()
+                .query_failure,
+            Some(QueryFailureCode::TimedOut)
+        );
     }
     #[test]
     fn health_requires_matching_authenticated_fresh_observations() {

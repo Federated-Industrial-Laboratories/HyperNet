@@ -15,6 +15,47 @@ use std::{
     time::Duration,
 };
 
+#[derive(Clone, Copy, Debug)]
+enum MonitorFailure {
+    Configuration,
+    PrivatePublish,
+    SignedPublish,
+    Unclassified,
+}
+impl std::fmt::Display for MonitorFailure {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(out, "clock monitor refused: {self:?}")
+    }
+}
+impl std::error::Error for MonitorFailure {}
+
+fn observation_status(outcome: &Result<()>, boot_ms: Option<u64>) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "state": if outcome.is_ok() { "ClockHealthy" } else { "ClockUnavailable" },
+        "bootMs": boot_ms,
+    });
+    if let Err(error) = outcome {
+        if let Some(diagnostic) = error.downcast_ref::<clock::ProbeDiagnostic>() {
+            value["reason"] = serde_json::json!(format!("{:?}", diagnostic.code));
+            value["probeElapsedMs"] = serde_json::json!(diagnostic.elapsed_ms);
+            value["maximumErrorMs"] = serde_json::json!(diagnostic.maximum_error_ms);
+            if let Some(phase) = diagnostic.query_phase {
+                value["queryPhase"] = serde_json::json!(format!("{phase:?}"));
+                value["queryFailure"] =
+                    serde_json::json!(diagnostic.query_failure.map(|reason| format!("{reason:?}")));
+            }
+        } else {
+            value["reason"] = serde_json::json!(format!(
+                "{:?}",
+                error
+                    .downcast_ref::<MonitorFailure>()
+                    .unwrap_or(&MonitorFailure::Unclassified)
+            ));
+        }
+    }
+    value
+}
+
 #[derive(Subcommand)]
 pub enum Command {
     /// Create a private monitor signing identity and a separate public observation directory.
@@ -152,7 +193,7 @@ fn validate(config: &Config) -> Result<()> {
     Ok(())
 }
 fn observe(root: &Path, config: &Config, key: Option<&SigningKey>) -> Result<()> {
-    validate(config)?;
+    validate(config).context(MonitorFailure::Configuration)?;
     let witness = clock::probe(|command| {
         ensure!(
             matches!(command, "tracking" | "sources" | "authdata" | "ntpdata"),
@@ -176,13 +217,15 @@ fn observe(root: &Path, config: &Config, key: Option<&SigningKey>) -> Result<()>
         ensure!(output.len() <= 16384, "chrony report exceeded its bound");
         Ok(String::from_utf8(output)?)
     })?;
-    crate::authority_clock_handoff::publish_private(root, &witness)?;
+    crate::authority_clock_handoff::publish_private(root, &witness)
+        .context(MonitorFailure::PrivatePublish)?;
     if let Some(directory) = &config.export_directory {
         crate::authority_clock_handoff::publish(
             directory,
             key.context("clock export signer is absent")?,
             &witness,
-        )?;
+        )
+        .context(MonitorFailure::SignedPublish)?;
     }
     Ok(())
 }
@@ -260,19 +303,33 @@ pub fn run(command: Command) -> Result<()> {
     }
     let mut previous = None;
     loop {
-        let current = observe(&root, &config, key.as_ref()).is_ok();
+        let outcome = observe(&root, &config, key.as_ref());
+        let current = outcome.is_ok();
         if previous != Some(current) {
-            // Errors may contain local dependency details; the monitor exposes only state.
+            // Only fixed reasons and local monotonic measurements leave the monitor.
             println!(
                 "{}",
-                if current {
-                    "ClockHealthy"
-                } else {
-                    "ClockUnavailable"
-                }
+                observation_status(&outcome, clock::moment().ok().map(|now| now.boot_ms))
             );
             previous = Some(current);
         }
         std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    #[test]
+    fn clock_monitor_diagnostics_omit_dependency_error_details() {
+        let error = anyhow::anyhow!("private dependency path and untrusted report")
+            .context(MonitorFailure::PrivatePublish);
+        let value = observation_status(&Err(error), Some(42));
+        assert_eq!(value["reason"], "PrivatePublish");
+        assert_eq!(value["bootMs"], 42);
+        assert!(!value.to_string().contains("dependency"));
+        let unknown = observation_status(&Err(anyhow::anyhow!("sensitive")), None);
+        assert_eq!(unknown["reason"], "Unclassified");
+        assert!(!unknown.to_string().contains("sensitive"));
     }
 }
