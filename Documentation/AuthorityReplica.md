@@ -340,9 +340,10 @@ explicit update. Start the existing monitor on the new host boot with its same
 key and export path. With the replica stopped, use the previously retained
 configuration digest and signer generation. Obtain fresh consent from the same
 operator for the exact manifest with only its clock boot changed. The existing
-consent interval and all other fields must remain unchanged. The installed
-manager does not yet provide this renewal workflow; it reports a blocked clock
-binding and preserves the signer rather than recreating it:
+consent interval and all identity, resource and permission fields remain unchanged;
+only boot and consecutive predecessor metadata change. The installed manager provides this workflow through
+[`runtime transition`](Runtime.md#stopped-consent-renewal-reboot-and-software-replacement).
+The lower-level command accepts only the exact next signed manifest generation:
 
 ```sh
 HyperNet authority-replica refresh-clock-boot \
@@ -362,6 +363,11 @@ journal lock, and atomically replaces the authoritative configuration record.
 The journal is preserved. Its result supplies the new `configDigest` and
 `configGeneration`; retain them independently. It cannot change a peer, signing
 key, listening address, monitor key, clock source kind or any other setting.
+Epoch-appointed replicas retain and verify their original nomination separately
+from the current operational consent. This same stopped recovery preserves their
+appointment and signer state. `apply-consent` handles an exact approved operational
+successor; it never changes committee membership.
+
 A private source needs no configuration change after reboot; its monitor must
 still publish a current observation.
 

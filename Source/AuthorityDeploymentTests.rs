@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Shared deployment admission vectors exercise consent, possession and permanent ownership.
 use crate::{
-    authority_deployment_records::{Index, Registration},
+    authority_deployment_records::{self as records, Index, Registration},
     authority_deployments::{Offer, Operation},
     authority_governance::Governance,
     authority_membership::{self as members, Reservations, reference},
@@ -122,6 +122,9 @@ pub(crate) fn manifest() -> Manifest {
     let peers = vec![[80; 32], [89; 32], [90; 32], [91; 32]];
     roles[0].outbound_endpoint_ids = peers.clone();
     Manifest {
+        generation: 1,
+        previous_profile: None,
+        previous_consent: None,
         network: N,
         incarnation: I,
         deployment: DEPLOYMENT,
@@ -321,6 +324,7 @@ impl Fixture {
             b(&offer.consent),
             offer.possessions_value(),
             snapshot(refs),
+            V::Bool(false),
         ])
     }
     pub fn register(&self, offer: &Offer) -> (Vec<u8>, Intent, Operation) {
@@ -565,6 +569,7 @@ fn registration_requires_exact_grant_snapshot_scope_and_operator_possession() {
         b(&outside.consent),
         outside.possessions_value(),
         snapshot(&[]),
+        V::Bool(false),
     ]);
     let bytes = signed(&key(5), &intent.action, [59; 32], 1, parameters, vec![]);
     let changed = Intent::from_signed(&bytes).unwrap();
@@ -689,7 +694,7 @@ fn deployment_ownership_is_permanent_and_reserved_classes_are_symmetric() {
     }
     let mut other = registration.clone();
     let value = wire::decode(&other.bytes).unwrap();
-    let mut row = value.array(17).unwrap().to_vec();
+    let mut row = value.array(18).unwrap().to_vec();
     row[6] = b(&[141; 32]);
     other.bytes = wire::encode(&a(row)).unwrap();
     let mut changed = entries.clone();
@@ -702,7 +707,7 @@ fn deployment_ownership_is_permanent_and_reserved_classes_are_symmetric() {
     let mut conflicting = entries.clone();
     let mut row = wire::decode(&registration.bytes)
         .unwrap()
-        .array(17)
+        .array(18)
         .unwrap()
         .to_vec();
     row[8] = b(&public(40));
@@ -942,4 +947,171 @@ pub(crate) fn without_live_consent(value: &V) -> V {
         .collect());
     fields[4] = a(body);
     a(fields)
+}
+
+#[test]
+fn expired_operational_successor_preserves_history_without_serving_authority() {
+    let f = Fixture::new();
+    let initial = offer(manifest());
+    let (mut entries, _, initial_intent, initial_operation) = admitted(&f, &initial);
+    let initial_decision = initial_operation
+        .authorise(
+            &f.records,
+            &f.reservations,
+            &initial_intent,
+            5000,
+            false,
+            None,
+        )
+        .unwrap();
+    let mut next = initial.manifest.clone();
+    next.generation = 2;
+    next.previous_profile = Some(wire::digest(&initial.manifest.desired().unwrap()));
+    next.previous_consent = Some(wire::digest(&initial.manifest.unsigned_consent(0).unwrap()));
+    next.validity = (1000, 4000);
+    let consent = wire::sign_envelope(&next.unsigned_consent(0).unwrap(), &key(90)).unwrap();
+    let next = Offer::parse(&next.encode().unwrap(), &consent, &a(vec![])).unwrap();
+    let prepare = |offer: &Offer, refs: &[VersionRef], historical: bool| {
+        let mut parameters = f.parameters(offer, refs).array(9).unwrap().to_vec();
+        parameters[8] = V::Bool(historical);
+        let bytes = signed(
+            &key(5),
+            "AuthorityDeploymentRegister",
+            DEPLOYMENT,
+            1,
+            a(parameters),
+            refs.to_vec(),
+        );
+        let intent = Intent::from_signed(&bytes).unwrap();
+        let operation = Operation::parse(&intent).unwrap();
+        (intent, operation)
+    };
+    let (intent, operation) = prepare(&next, &initial_decision.dependencies, true);
+    let historical = operation
+        .authorise(
+            &entries,
+            &f.reservations,
+            &intent,
+            5000,
+            false,
+            Some((&initial.manifest_bytes, &initial.consent)),
+        )
+        .unwrap();
+    assert_eq!(historical.code, 0);
+    assert!(historical.expires_ms > 5000);
+    assert!(!next.current(5000).unwrap());
+    let (intent, operation) = prepare(&next, &initial_decision.dependencies, false);
+    assert_eq!(
+        operation
+            .authorise(
+                &entries,
+                &f.reservations,
+                &intent,
+                5000,
+                false,
+                Some((&initial.manifest_bytes, &initial.consent))
+            )
+            .unwrap()
+            .code,
+        7
+    );
+    entries.retain(|bytes| {
+        records::reference(bytes).map_or(true, |r| !matches!(r.kind, 105 | 117 | 129))
+    });
+    entries.extend(historical.records.clone());
+    members::sort_records(&mut entries).unwrap();
+    let mut fresh = next.manifest.clone();
+    fresh.generation = 3;
+    fresh.previous_profile = Some(wire::digest(&next.manifest.desired().unwrap()));
+    fresh.previous_consent = Some(wire::digest(&next.manifest.unsigned_consent(0).unwrap()));
+    fresh.validity = (3500, 800000);
+    let consent = wire::sign_envelope(&fresh.unsigned_consent(0).unwrap(), &key(90)).unwrap();
+    let fresh = Offer::parse(&fresh.encode().unwrap(), &consent, &a(vec![])).unwrap();
+    let (intent, operation) = prepare(&fresh, &historical.dependencies, false);
+    assert_eq!(
+        operation
+            .authorise(
+                &entries,
+                &f.reservations,
+                &intent,
+                5000,
+                false,
+                Some((&next.manifest_bytes, &next.consent))
+            )
+            .unwrap()
+            .code,
+        0
+    );
+    let (intent, operation) = prepare(&fresh, &historical.dependencies, true);
+    assert_eq!(
+        operation
+            .authorise(
+                &entries,
+                &f.reservations,
+                &intent,
+                5000,
+                false,
+                Some((&next.manifest_bytes, &next.consent))
+            )
+            .unwrap()
+            .code,
+        7
+    );
+}
+
+#[test]
+fn registrar_read_refuses_policy_replacement_after_context_but_operator_read_remains_available() {
+    let f = Fixture::new();
+    let offer = offer(manifest());
+    let (mut entries, _, _, _) = admitted(&f, &offer);
+    let old = entries
+        .iter()
+        .position(|bytes| wire::decode(bytes).unwrap().list(32).unwrap()[0] == V::Uint(100))
+        .unwrap();
+    let previous = Governance::record_versions(N, I, std::slice::from_ref(&entries[old]))
+        .unwrap()
+        .remove(0);
+    let mut policy = wire::decode(&entries[old])
+        .unwrap()
+        .array(17)
+        .unwrap()
+        .to_vec();
+    policy[4] = V::Uint(2);
+    policy[5] = b(&previous.digest);
+    policy[16] = snapshot(&[]);
+    entries[old] = wire::encode(&a(policy)).unwrap();
+    members::sort_records(&mut entries).unwrap();
+    for (seed, grant, expected) in [(5, Some(f.grant.id), 12), (90, None, 0)] {
+        let bytes = signed(
+            &key(seed),
+            "AuthorityDeploymentGet",
+            DEPLOYMENT,
+            0,
+            a(vec![
+                V::Uint(200),
+                V::Uint(1),
+                V::Text("AuthorityDeploymentGet".into()),
+                b(&DEPLOYMENT),
+                grant.map_or(V::Null, |id| b(&id)),
+                a(vec![reference(&previous)]),
+            ]),
+            vec![],
+        );
+        let intent = Intent::from_signed(&bytes).unwrap();
+        assert_eq!(
+            Operation::parse(&intent)
+                .unwrap()
+                .authorise(
+                    &entries,
+                    &f.reservations,
+                    &intent,
+                    5000,
+                    false,
+                    Some((&offer.manifest_bytes, &offer.consent)),
+                )
+                .unwrap()
+                .code,
+            expected,
+        );
+    }
 }

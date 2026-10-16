@@ -27,7 +27,7 @@ fn permitted(p: &Profile, s: &State) -> Result<()> {
                 == crate::runtime_service_authorization::local_consent(
                     &p.manifest,
                     p.role()?.role,
-                    1,
+                    p.manifest.generation,
                     &p.artifacts
                 )?,
         "local service consent differs from the exact profile"
@@ -159,13 +159,17 @@ pub(super) fn status(p: &Profile, s: &mut State) -> Result<Value> {
     );
     Ok(result)
 }
-pub(super) fn stop(p: &Profile, s: &mut State) -> Result<()> {
+pub(in crate::runtime_management) fn stop(p: &Profile, s: &mut State) -> Result<()> {
+    crate::runtime_audit::restrictive(&p.root, &p.manifest, "Stop", "Prepared");
     workload::remove(p, s, false)?;
     workload::remove(p, s, true)?;
     egress::remove(p, s)?;
-    workload::remove_network(p, s)
+    workload::remove_network(p, s)?;
+    crate::runtime_audit::restrictive(&p.root, &p.manifest, "Stop", "Committed");
+    Ok(())
 }
 pub(super) fn withdraw(p: &Profile, s: &mut State) -> Result<Value> {
+    crate::runtime_audit::restrictive(&p.root, &p.manifest, "Withdraw", "Prepared");
     // Publish the veto before cleanup; a failed Podman operation cannot restore permission.
     files::publish_public(&p.root.join("Authorization/Withdrawal.json"), b"1")?;
     s.withdrawn = true;
@@ -176,6 +180,12 @@ pub(super) fn withdraw(p: &Profile, s: &mut State) -> Result<Value> {
     if let Err(e) = cleanup {
         result["cleanupError"] = json!(format!("{e:#}"));
     }
+    result["auditRecorded"] = json!(crate::runtime_audit::restrictive(
+        &p.root,
+        &p.manifest,
+        "Withdraw",
+        "Committed"
+    ));
     result["networkPublished"] = json!(false);
     Ok(result)
 }
@@ -196,7 +206,7 @@ pub(super) fn withdrawal_receipt(p: &Profile, s: &State, output: &Path) -> Resul
         V::Bytes(p.manifest.incarnation.to_vec()),
         V::Bytes(p.manifest.deployment.to_vec()),
         V::Bytes(p.manifest.operator.to_vec()),
-        V::Bytes(wire::digest(&p.manifest.desired()?).to_vec()),
+        V::Bytes(p.manifest.operational_digest()?.to_vec()),
         V::Uint(1),
         V::Bool(cleanup),
     ]))?;
@@ -246,13 +256,11 @@ pub(super) fn epoch(p: &Profile, s: &mut State, input: &Path, args: &[String]) -
         s.container.is_none(),
         "stop the service before an authority epoch transition"
     );
+    crate::runtime_audit::record(&p.root, &p.manifest, "EpochAdvance", "Prepared")?;
     initialise(p, s)?;
-    Ok(serde_json::from_slice(&workload::finite(
-        p,
-        s,
-        args,
-        Some(input),
-    )?)?)
+    let result = serde_json::from_slice(&workload::finite(p, s, args, Some(input))?)?;
+    crate::runtime_audit::record(&p.root, &p.manifest, "EpochAdvance", "Committed")?;
+    Ok(result)
 }
 fn requester_scope(role: u64, initialised: bool, resources: bool) -> Result<()> {
     ensure!(
@@ -306,6 +314,9 @@ pub(super) fn requester(
     let input = bytes
         .as_ref()
         .map(|_| p.root.join(format!("RequesterInput{}", files::random_id())));
+    if expected.is_some() {
+        crate::runtime_audit::record(&p.root, &p.manifest, "Recovery", "Prepared")?;
+    }
     let reply = (|| {
         if let (Some(path), Some(bytes)) = (&input, &bytes) {
             files::directory(path)?;
@@ -345,6 +356,9 @@ pub(super) fn requester(
         "requester recovery returned another Bridge identity"
     );
     files::create(output, metadata.canonical())?;
+    if expected.is_some() {
+        crate::runtime_audit::record(&p.root, &p.manifest, "Recovery", "Committed")?;
+    }
     let state = metadata.state();
     Ok(json!({
         "status":if expected.is_some(){"BridgeRequesterFenced"}else{"BridgeRequesterStatusExported"},
@@ -358,7 +372,7 @@ pub(super) fn requester(
         "unknownOutcomes":"Retained; fencing does not establish whether an old effect occurred"
     }))
 }
-pub(super) fn start(path: &Path, request: &Path) -> Result<Value> {
+pub(in crate::runtime_management) fn start(path: &Path, request: &Path) -> Result<Value> {
     let root = files::root(path)?;
     let _manager = files::manager_lock(&root.join("Manager"))?;
     super::super::STOP.store(false, Ordering::Relaxed);
@@ -374,6 +388,7 @@ pub(super) fn start(path: &Path, request: &Path) -> Result<Value> {
         {
             let _lock = files::lock(&root)?;
             let (p, mut s) = load(&root)?;
+            super::super::transition::require_servable(&root)?;
             permitted(&p, &s)?;
             ensure!(
                 s.container.is_none(),
@@ -385,6 +400,7 @@ pub(super) fn start(path: &Path, request: &Path) -> Result<Value> {
                 parsed.operation().recipient == p.role()?.service_key,
                 "activation request has another recipient"
             );
+            crate::runtime_audit::record(&root, &p.manifest, "Start", "Prepared")?;
             initialise(&p, &mut s)?;
             files::publish_public(&root.join("Authorization/ActivationRequest.cbor"), &bytes)?;
             let command = match p.role()?.role {
@@ -402,6 +418,7 @@ pub(super) fn start(path: &Path, request: &Path) -> Result<Value> {
             files::podman(&files::strings(&["start", &id]))?;
             let r = s.container.as_ref().unwrap();
             workload::verify(&p, r)?;
+            crate::runtime_audit::record(&root, &p.manifest, "Start", "Committed")?;
             println!(
                 "{}",
                 json!({"status":"ServiceStarting","session":"Foreground","automaticBoot":false,"serviceReadiness":"NotProbed"})

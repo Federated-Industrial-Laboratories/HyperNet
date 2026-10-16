@@ -85,7 +85,10 @@ impl Fixture {
         h.envelope = wire::sign_envelope(&h.payload().unwrap(), &deployment::key(90)).unwrap();
         assert_eq!(
             f.run(
-                |_| page::Command::HostRegister { profile: h.clone() }.into(),
+                |_| page::Command::HostRegister {
+                    profile: Box::new(h.clone())
+                }
+                .into(),
                 5
             )
             .code,

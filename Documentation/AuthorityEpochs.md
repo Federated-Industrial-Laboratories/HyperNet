@@ -9,7 +9,7 @@ never appoints an alternative committee.
 The installed workflow currently requires four fresh authority identities and
 four distinct admitted deployments. Each operator must approve the same ordered
 peer identities, addresses, ports, transport keys and certificates. Reusing an
-old voter or changing an admitted deployment's immutable consent is refused.
+old voter or changing an admitted deployment's permanent identity or rights is refused.
 Other admitted services and their consent remain historical records; replacement
 does not rewrite or renew them.
 
@@ -113,3 +113,16 @@ If either required quorum is unavailable, the network remains safely stopped.
 [Exceptional recovery](NetworkRecovery.md) creates a new network identity that
 requires explicit independently authenticated acceptance. It does not restore
 revoked grants or silently resume the previous identity.
+
+## Operational consent after appointment
+
+A prepared or activated epoch voter retains its exact original nomination and
+installation anchor. Renewal before readiness activation preserves that nomination;
+activation verifies the current consent and the retained appointment separately.
+Finite host consent, host boot and approved software can subsequently be
+changed only through the [stopped runtime successor](Runtime.md#stopped-consent-renewal-reboot-and-software-replacement).
+The anchor continues to authenticate the committed appointment; the successor must
+preserve its identities, peer mapping, resources, permissions and placement and
+name the exact immediately preceding local profile. Reboot recovery therefore does
+not require a replacement committee and cannot silently create one. Signer journal
+and independently retained generation floors survive every operational successor.

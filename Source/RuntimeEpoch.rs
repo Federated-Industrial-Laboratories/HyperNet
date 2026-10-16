@@ -235,6 +235,12 @@ pub fn run(command: Command) -> Result<Value> {
             &signer_generation(&root)?.to_string(),
         ]));
     }
+    let audit_operation = match &command {
+        Command::Prepare { .. } => "EpochPrepare",
+        Command::Activate { .. } => "EpochActivate",
+        Command::Terminal { .. } | Command::Handoff { .. } => "EpochAdvance",
+    };
+    crate::runtime_audit::record(&root, &p.manifest.canonical()?, audit_operation, "Prepared")?;
     let input = root.join(format!("EpochInput{}", random_id()));
     directory(&input)?;
     for (name, body) in &inputs {
@@ -360,7 +366,24 @@ pub fn run(command: Command) -> Result<Value> {
         result["networkServing"] = json!(false);
         Ok(result)
     })();
+    let audit = if finished.is_ok() {
+        crate::runtime_audit::record(
+            &root,
+            &p.manifest.canonical()?,
+            audit_operation,
+            "Committed",
+        )
+    } else {
+        crate::runtime_audit::restrictive(
+            &root,
+            &p.manifest.canonical()?,
+            audit_operation,
+            "Failed",
+        );
+        Ok(())
+    };
     let removed = export.map_or(Ok(()), fs::remove_dir_all);
+    audit?;
     match (finished, removed) {
         (Err(error), Err(cleanup)) => Err(error.context(format!(
             "Could not remove temporary epoch output: {cleanup}"

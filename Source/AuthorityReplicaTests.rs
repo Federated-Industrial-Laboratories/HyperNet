@@ -180,3 +180,83 @@ fn confined_destinations_accept_public_ipv4_ipv6_but_no_dns() {
     config.peers[0].origin = "https://peer.example:443/".into();
     assert!(confined_inputs(&config).is_err());
 }
+
+// Reuse the real journalled committee fixture at its prepared, non-voting boundary.
+pub(crate) fn activate_prepared_after_operational_successor(
+    original: crate::runtime_manifest::Manifest,
+    bootstrap: &[u8],
+    evidence: &[u8],
+    history: &[u8],
+    ready: &[u8],
+    engine: &mut Engine,
+) {
+    let mut successor = original.clone();
+    successor.generation += 1;
+    successor.previous_profile = Some(trust_wire::digest(&original.desired().unwrap()));
+    successor.previous_consent = Some(trust_wire::digest(&original.unsigned_consent(0).unwrap()));
+    successor.validity.1 += 10000;
+    successor.clock.kernel_boot = "22345678-1234-1234-1234-123456789abc".into();
+    successor.successor_of(&original).unwrap();
+    let appointed = Manifest::from_canonical(original).unwrap();
+    let current = Manifest::from_canonical(successor).unwrap();
+    let config = serde_json::to_vec(&current.config).unwrap();
+    let mut record = Record {
+        format: "HyperNetAuthorityReplica/1".into(),
+        bootstrap_digest: digest(bootstrap),
+        signer: current.signer.clone(),
+        config_generation: 2,
+        config_digest: digest(&config),
+        config: hex::encode(&config),
+        minimum_generation: engine.generation(),
+        consent_digest: digest(
+            &trust_wire::sign_envelope(
+                &current.consent(0).unwrap(),
+                &crate::authority_deployment_tests::key(90),
+            )
+            .unwrap(),
+        ),
+        authorization: current.clone(),
+        preparation: Some(epoch::Preparation {
+            chain: vec![],
+            evidence: hex::encode(evidence),
+            history: hex::encode(history),
+        }),
+        appointment_authorization: Some(appointed.clone()),
+    };
+    let (_, terminal) = record
+        .preparation
+        .as_ref()
+        .unwrap()
+        .configuration(bootstrap, &record.bootstrap_digest)
+        .unwrap();
+    assert!(epoch::nomination(&current, &terminal).is_err());
+    record.verify_appointment(&terminal).unwrap();
+    let floor = engine.generation();
+    let signer = engine.signer();
+    assert_eq!(record.signer, hex::encode(signer));
+    let application = engine.application().to_vec();
+    assert!(!engine.can_vote());
+    record.authorization.resources.memory_bytes += 1;
+    assert!(epoch::activate_ready(&record, bootstrap, ready, engine).is_err());
+    record.authorization = current.clone();
+    record.appointment_authorization = Some(current.clone());
+    assert!(epoch::activate_ready(&record, bootstrap, ready, engine).is_err());
+    record.appointment_authorization = Some(appointed);
+    assert!(epoch::activate_ready(&record, bootstrap, &ready[..ready.len() - 1], engine).is_err());
+    assert!(!engine.can_vote());
+    assert_eq!(engine.generation(), floor);
+    assert_eq!(engine.application(), application);
+    epoch::activate_ready(&record, bootstrap, ready, engine).unwrap();
+    assert!(engine.can_vote());
+    assert_eq!(engine.signer(), signer);
+    assert_eq!(engine.application(), application);
+    assert!(engine.generation() > floor);
+    let committed = engine.generation();
+    epoch::activate_ready(&record, bootstrap, ready, engine).unwrap();
+    assert_eq!(engine.generation(), committed);
+    assert_eq!(
+        record.authorization.digest().unwrap(),
+        current.digest().unwrap()
+    );
+    assert_eq!(record.config_generation, 2);
+}

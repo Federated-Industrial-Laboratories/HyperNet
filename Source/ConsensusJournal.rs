@@ -22,8 +22,20 @@ const HEADER: usize = 64;
 pub struct Journal {
     directory: PathBuf,
     _lock: File,
+    owner_pid: libc::pid_t,
     generation: u64,
     poisoned: bool,
+}
+impl Drop for Journal {
+    fn drop(&mut self) {
+        if self.owner_pid == unsafe { libc::getpid() } {
+            // A forked helper can retain this open description until exec. End
+            // ownership explicitly when its creating process drops the journal.
+            unsafe {
+                libc::flock(self._lock.as_raw_fd(), libc::LOCK_UN);
+            }
+        }
+    }
 }
 fn private(file: &File) -> Result<()> {
     let m = file.metadata()?;
@@ -78,6 +90,7 @@ impl Journal {
         Ok(Self {
             directory: directory.to_path_buf(),
             _lock: lock,
+            owner_pid: unsafe { libc::getpid() },
             generation: 0,
             poisoned: false,
         })
@@ -143,6 +156,10 @@ impl Journal {
         self.generation
     }
     pub fn healthy(&self) -> Result<()> {
+        ensure!(
+            self.owner_pid == unsafe { libc::getpid() },
+            "Signer journal belongs to another process"
+        );
         ensure!(
             !self.poisoned,
             "Signer journal is quarantined after a persistence failure"
@@ -236,6 +253,25 @@ pub(crate) mod tests {
             .set_len(70)
             .unwrap();
         assert!(Journal::open::<Vec<u64>>(&path.0, 0).is_err());
+    }
+    #[test]
+    fn owner_drop_releases_inherited_description_without_weakening_exclusion() {
+        let path = Directory::new();
+        let writer = Journal::create(&path.0, &vec![1u64]).unwrap();
+        let inherited = writer._lock.try_clone().unwrap();
+        assert!(Journal::open::<Vec<u64>>(&path.0, 1).is_err());
+        drop(writer);
+        let (mut resumed, value) = Journal::open::<Vec<u64>>(&path.0, 1).unwrap();
+        assert_eq!(value, vec![1]);
+        drop(inherited);
+        assert!(Journal::open::<Vec<u64>>(&path.0, 1).is_err());
+        let child_description = resumed._lock.try_clone().unwrap();
+        resumed.owner_pid = 0;
+        assert!(resumed.commit(&vec![2u64]).is_err());
+        drop(resumed);
+        assert!(Journal::open::<Vec<u64>>(&path.0, 1).is_err());
+        drop(child_description);
+        assert_eq!(Journal::open::<Vec<u64>>(&path.0, 1).unwrap().1, vec![1]);
     }
     #[test]
     fn failed_sync_path_poisoning_prevents_later_signer_progress() {

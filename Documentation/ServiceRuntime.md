@@ -85,6 +85,12 @@ permission. Failed runtime dependencies report a bounded, terminal-escaped
 excerpt of their standard error. Request bytes and standard output are not
 included in that error.
 
+Use `runtime services diagnose --directory /Private/Service` for a bounded,
+redacted snapshot of recorded local state without a process or network probe.
+Export requires the preview's exact `--preview-digest` and a new private
+`--output` file. [Diagnostics](Diagnostics.md) lists the selected fields and makes
+the distinction between retained consent and current readiness explicit.
+
 Export the historical activation report while running or after stop:
 
 ```sh
@@ -143,3 +149,28 @@ attachment, media mount, activation or listener. It leaves the Bridge stopped
 and retains unknown outcomes, original Permits, recipient claims and cached
 restrictions. See [Bridge](Bridge.md#operate-and-recover) for retry semantics
 and the required response to unauthenticated pending cache state.
+
+## Renew, recover and replace a stopped service
+
+Services use the same reviewed [stopped successor](Runtime.md#stopped-consent-renewal-reboot-and-software-replacement)
+transaction as authorities, under `runtime services transition`. Stop the service
+and its manager first. Prepare, preview and apply an exact successor; after an
+interruption use `runtime services transition recover` with the same operation ID.
+The role profile envelope and its existing publication approvals remain unchanged.
+Requester and recipient journals are opened and verified, never recreated, together
+with content, deletion tombstones, identity keys and anti-rollback state.
+
+The new host manifest and local consent are consecutive generations. Register the
+new deployment admission through Suite and export a fresh activation request naming
+that generation before restarting. Changing finite host consent does not extend an
+independently shorter domain validity interval or a previously issued effect lease.
+Stop and permanent withdrawal remain available during an interrupted transition.
+
+Managed boot uses `runtime services managed preview` and `enable`, with the same
+`--clock-monitor` and reviewed digest as authorities, plus
+`--activation-request /Private/ActivationRequest.cbor`. It requires explicit Managed
+consent and user lingering. Each boot rechecks the exact signed request, current
+quorum, recipient floors, finite consent and actual pinned monitor boot. Managed
+startup grants no permission by itself. Use `managed status` and `managed disable`
+to inspect or stop automatic operation. A stale request or unavailable quorum
+leaves the service stopped; export a current request and explicitly enable it again.

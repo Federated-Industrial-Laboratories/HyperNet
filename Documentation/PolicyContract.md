@@ -579,6 +579,17 @@ supplies these explicit signer-authority contexts; signatures from both cohorts
 are never pooled to satisfy either threshold. Genesis has only the proposed
 acceptance envelope and the independently authenticated bootstrap binding.
 
+The normal ordered update is `AuthorityPolicyApply`, with parameters
+`[200,1,"AuthorityPolicyApply",grant102,previous100,previous114,next100,next114,
+oldCustodyEnvelope,newCustodyEnvelope,expectedSnapshot]`. Record fields carry
+canonical byte strings. When custody is unchanged, next114 equals previous114
+and both envelopes are null. The network policy always advances one generation;
+changed custody advances one generation in the same committed transaction.
+Current AdministerPolicy, exact predecessor digests and the complete dependency
+snapshot are checked at committed order. Applications cannot administer policy.
+The result contains exact current references and both resulting record bytes.
+Current recovery keys cannot be replaced by pooling old and new cohorts.
+
 `RecoveryDeclaration` (115) body is `[operation, predecessorNetwork,
 predecessorIncarnation, predecessorCheckpoint, predecessorRecoveryPolicy,
 successorNetwork, successorIncarnation, successorDescriptor,
@@ -741,12 +752,30 @@ cursor behaviour. Each uses these record identities and refusal semantics.
 
 DeploymentAdmission129 body is `[deployment,host,operator,serviceBindings,
 transportBindings,monitorKey,profileRef117,consentRef105,registrar,grantRef102,
-expectedSnapshot]`. DeploymentWithdrawal130 body is `[deployment,admissionRef129,
-operator,withdrawalGeneration,expectedSnapshot]`. Both are create-only generation1.
-Bindings are sorted `[role,serviceKey]` and `[ownedServiceKey,transportKey]` lists.
-The exact canonical manifest and operator-signed105 derive117 and consent105.
-Current RegisterService13 over the deployment authorises admission. Each service,
-owned TLS key and monitor must supply independent purpose-bound possession.
+expectedSnapshot,canonicalManifest]`. DeploymentWithdrawal130 body is
+`[deployment,admissionRef129,operator,withdrawalGeneration,expectedSnapshot]`.
+Withdrawal is create-only generation1 and permanently terminal. Admission starts
+at generation1; each successor129 retains its exact predecessor digest and the
+next generation of105/117. Bindings are sorted `[role,serviceKey]` and
+`[ownedServiceKey,transportKey]` lists. The complete current canonical manifest
+and operator-signed105 derive117 and consent105.
+
+Current RegisterService13 over the deployment authorises each admission. The
+initial admission requires independent purpose-bound possession by each service,
+owned TLS key and monitor. Exact unchanged admitted identities can omit repeated
+possession during operational renewal. A successor preserves host, operator,
+roles, keys, endpoints, volumes, placement and resource rights. Only the explicitly
+reviewed operational lifetime, boot/session and software/image bindings can change.
+Existing service definitions remain stable; current operational consent limits
+all serving effects.
+
+Signed Register parameters have nine fields, with the final boolean selecting
+historical admission. This mode requires an expired, non-initial, exact next
+successor, unchanged operational identity and a deployment that was not withdrawn.
+It checks the current manager capability and exact authority snapshot. It retains
+history without extending serving authority. Synchronisation can submit expired
+predecessors individually before the fresh final generation. No expired or
+future consent authorises a running service.
 
 Operators and monitor keys may own several deployments within their own class.
 Services and transports belong permanently to one deployment. All classes remain
@@ -780,3 +809,26 @@ The operational mappings for preview106 and search119 are described in
 [Tier administration](Tiers.md) and [catalogue and search](Search.md). Current
 tier generations restrict retained grants through authenticated predecessor
 history; historical tier references never restore superseded permissions.
+
+## Cold content archives
+
+Records169,170 and171 contain respectively a named destination, an immutable
+owner-signed archive manifest and an immutable archive withdrawal. A destination
+holds separately signed operator consent: installed manifest, fixed destination
+ID/name and volume, byte/object quotas, maximum retention, exact X25519 encryption
+recipients, permitted owners and opaque-content acceptance. Its quota consumes
+only explicit volume surplus above existing service allocations. Destination
+withdrawal does not replace its consent or release retained offline bytes.
+
+`AuthorityDomain` Backup commands inspect/register/withdraw destinations,
+prepare/create/get/list archives, authorise restore and record withdrawal. Create
+and restore select exact current Page placement and complete associated asset
+references; ordinary authority ordering closes revocation races. Both author and
+outer sealed placement must include each backup destination. Storage consent
+must also permit that sealed reviewer. Backup records contain no content bytes.
+
+Cold packages contain the signed destination, owner-signed archive manifest and
+age-encrypted content. The native store acknowledges only after bounded durable
+import. Restoration cannot import authority journals or indexes; current policy,
+publication and tombstone checks precede normal source/media repair. Search
+indexes require fresh authorised rebuilding.

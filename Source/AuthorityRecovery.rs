@@ -44,37 +44,34 @@ pub struct Predecessor {
 impl Predecessor {
     pub fn new(bootstrap: &Verified, prefix: &Prefix) -> Result<Self> {
         let scope = bootstrap.descriptor().scope();
+        let reference = VersionRef {
+            kind: 114,
+            id: scope.network,
+            generation: 1,
+            digest: wire::digest(&bootstrap.recovery_payload),
+        };
+        Self::retained(bootstrap, prefix, &bootstrap.recovery_payload, &reference)
+    }
+    /// The caller authenticates the exact current policy reference from its durable certified floor.
+    pub fn retained(
+        bootstrap: &Verified,
+        prefix: &Prefix,
+        bytes: &[u8],
+        minimum: &VersionRef,
+    ) -> Result<Self> {
+        let scope = bootstrap.descriptor().scope();
         ensure!(
-            !bootstrap.summary.draft,
-            "recovery predecessor bootstrap lacks custody acceptance"
-        );
-        ensure!(
-            prefix.scope().epoch != 0 || prefix.scope() == scope,
-            "genesis recovery prefix differs from accepted bootstrap"
-        );
-        ensure!(
-            prefix.scope().network == scope.network
+            !bootstrap.summary.draft
+                && prefix.scope().network == scope.network
                 && prefix.scope().incarnation == scope.incarnation,
-            "recovery predecessor prefix has another identity"
+            "recovery predecessor differs from accepted bootstrap"
         );
-        let policy = wire::decode(&bootstrap.recovery_payload)?;
-        let p = policy.array(13)?;
+        let custody =
+            crate::authority_policies::Custody::parse(bytes, scope.network, scope.incarnation)?;
         ensure!(
-            p[0].uint()? == 114
-                && p[1].uint()? == 1
-                && p[4].uint()? == 1
-                && p[5] == V::Null
-                && p[12] == V::Null,
-            "unsupported retained recovery policy"
+            custody.reference == *minimum,
+            "retained recovery policy is stale or conflicts with the authenticated floor"
         );
-        let keys = p[9]
-            .list(3)?
-            .iter()
-            .map(|v| {
-                let pair = v.array(2)?;
-                Ok((pair[1].fixed()?, pair[0].fixed()?))
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?;
         Ok(Self {
             network: scope.network,
             incarnation: scope.incarnation,
@@ -83,15 +80,10 @@ impl Predecessor {
                 V::Uint(prefix.height()),
                 b(prefix.policy_state()),
             ]),
-            policy: VersionRef {
-                kind: 114,
-                id: scope.network,
-                generation: 1,
-                digest: wire::digest(&bootstrap.recovery_payload),
-            },
-            threshold: usize::try_from(p[7].uint()?)?,
-            keys,
-            shared: p[6].uint()? == 2,
+            policy: custody.reference,
+            threshold: custody.threshold,
+            keys: custody.keys.into_iter().map(|(p, k)| (k, p)).collect(),
+            shared: custody.mode == 2,
         })
     }
 }

@@ -413,11 +413,11 @@ impl Disk {
         state.time = now;
         state.records.retain(|_, e| e.expires > now);
         let retained_count = state.records.len();
-        if *effect == MediaEffect::Upload {
+        if effect.writes() {
             ensure!(
                 payload.len() as u64 == *bytes
                     && Some(hash(payload)) == *digest
-                    && now < asset.upload_expires_ms,
+                    && (*effect != MediaEffect::Upload || now < asset.upload_expires_ms),
                 "media upload payload differs from signed range or digest"
             );
             state
@@ -448,7 +448,7 @@ impl Disk {
         );
         let mut changed = retained_count != self.state.records.len();
         let output = match effect {
-            MediaEffect::Upload => {
+            MediaEffect::Upload | MediaEffect::Repair => {
                 let start = usize::try_from(*offset)?;
                 let end = start
                     .checked_add(payload.len())
@@ -510,7 +510,7 @@ impl Disk {
             V::Uint(effect.code()),
             V::Uint(*offset),
             V::Uint(*bytes),
-            b(&if *effect == MediaEffect::Upload {
+            b(&if effect.writes() {
                 (*digest).context("upload digest absent")?
             } else {
                 hash(&output)

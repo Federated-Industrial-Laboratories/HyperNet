@@ -7,6 +7,8 @@ mod authority_content_service;
 mod authority_application;
 #[path = "AuthorityApplications.rs"]
 mod authority_applications;
+#[path = "AuthorityBackupCli.rs"]
+mod authority_backup_cli;
 #[path = "AuthorityBridgeService.rs"]
 mod authority_bridge_service;
 #[path = "AuthorityCapacity.rs"]
@@ -47,8 +49,12 @@ mod authority_membership;
 mod authority_object_files;
 #[path = "AuthorityObjects.rs"]
 mod authority_objects;
+#[path = "AuthorityOperationalConsent.rs"]
+mod authority_operational_consent;
 #[path = "AuthorityPageService.rs"]
 mod authority_page_service;
+#[path = "AuthorityPolicies.rs"]
+mod authority_policies;
 #[path = "AuthorityProof.rs"]
 mod authority_proof;
 #[path = "AuthorityRecipient.rs"]
@@ -99,6 +105,8 @@ mod route_runtime;
 mod route_state;
 #[path = "RouteTls.rs"]
 mod route_tls;
+#[path = "RuntimeAudit.rs"]
+mod runtime_audit;
 #[path = "RuntimeAuthorization.rs"]
 mod runtime_authorization;
 #[path = "RuntimeBootstrapKeys.rs"]
@@ -109,6 +117,8 @@ mod runtime_guard;
 mod runtime_management;
 #[path = "RuntimeManifest.rs"]
 mod runtime_manifest;
+#[path = "RuntimeProvision.rs"]
+mod runtime_provision;
 #[path = "RuntimeServiceActivate.rs"]
 mod runtime_service_activate;
 #[path = "RuntimeServiceAuthorization.rs"]
@@ -176,6 +186,11 @@ enum Command {
         #[arg(last = true)]
         arguments: Vec<String>,
     },
+    /// Manage explicitly consented encrypted content backup destinations.
+    Backup {
+        #[command(subcommand)]
+        command: authority_backup_cli::Command,
+    },
     /// Prepare and manage an explicitly consented local runtime.
     Runtime {
         #[command(subcommand)]
@@ -188,6 +203,8 @@ enum Command {
     },
     #[command(hide = true)]
     RuntimeServiceInitialise,
+    #[command(hide = true)]
+    RuntimeServiceVerify,
     /// Run the exact consented private relay or application endpoint.
     PrivateRouteService,
     #[command(hide = true)]
@@ -258,12 +275,14 @@ fn run() -> Result<()> {
             expires,
             arguments,
         } => runtime_guard::run(kind, expires, arguments)?,
+        Command::Backup { command } => authority_backup_cli::run(command)?,
         Command::Runtime { command } => runtime_management::run(command)?,
         Command::PrivateRouteService => runtime_service_entry::routes()?,
         Command::PrivateRouteEgress => runtime_management::services::egress::run()?,
         Command::RuntimeServiceInitialise => {
             runtime_service_entry::initialise()?;
         }
+        Command::RuntimeServiceVerify => runtime_service_entry::verify_existing()?,
         Command::RuntimeServiceReceipt => runtime_service_entry::receipt()?,
         Command::RuntimeServiceRequesterStatus => runtime_service_entry::bridge_requester(false)?,
         Command::RuntimeServiceRequesterFence => runtime_service_entry::bridge_requester(true)?,

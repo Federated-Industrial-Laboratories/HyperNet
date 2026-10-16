@@ -78,6 +78,9 @@ pub struct AuthorityConfig {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Manifest {
+    pub generation: u64,
+    pub previous_profile: Option<Key>,
+    pub previous_consent: Option<Key>,
     pub network: Key,
     pub incarnation: Key,
     pub deployment: Key,
@@ -197,6 +200,16 @@ impl Manifest {
             .all(|id| *id != [0; 32]),
             "Zero manifest identity or digest"
         );
+        ensure!(
+            self.generation > 0
+                && ((self.generation == 1
+                    && self.previous_profile.is_none()
+                    && self.previous_consent.is_none())
+                    || (self.generation > 1
+                        && self.previous_profile.is_some_and(|v| v != [0; 32])
+                        && self.previous_consent.is_some_and(|v| v != [0; 32]))),
+            "Manifest successor generation or predecessor differs"
+        );
         wire::valid_key(&self.operator)?;
         wire::valid_key(&self.clock.monitor_key)?;
         ensure!(
@@ -204,7 +217,8 @@ impl Manifest {
             "Overlapping manifest identities"
         );
         ensure!(
-            self.session_mode == 0
+            self.session_mode <= 1
+                && (self.clock.kernel_boot == "CurrentHost") == (self.session_mode == 1)
                 && self.validity.0 > 0
                 && self.validity.1 > self.validity.0
                 && self.validity.1 - self.validity.0 <= 604800000,
@@ -450,6 +464,53 @@ impl Manifest {
         }
         Ok(())
     }
+    pub fn successor_of(&self, previous: &Self) -> Result<()> {
+        self.validate()?;
+        previous.validate()?;
+        ensure!(
+            self.generation
+                == previous
+                    .generation
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("Manifest generation exhausted"))?
+                && self.previous_profile == Some(wire::digest(&previous.desired()?))
+                && self.previous_consent == Some(wire::digest(&previous.unsigned_consent(0)?)),
+            "Successor does not name the exact preceding profile and consent"
+        );
+        self.same_operational_identity(previous)
+    }
+    /// Stable installed resource identity excludes only explicitly renewable operating conditions.
+    pub fn operational_digest(&self) -> Result<Key> {
+        self.validate()?;
+        let mut stable = self.clone();
+        stable.generation = 1;
+        stable.previous_profile = None;
+        stable.previous_consent = None;
+        stable.validity = (1, 2);
+        stable.session_mode = 0;
+        stable.clock.kernel_boot = "InitialHost".into();
+        stable.software_digest = [1; 32];
+        for role in &mut stable.roles {
+            role.image_digest = [1; 32];
+        }
+        Ok(wire::digest(&stable.encode()?))
+    }
+    pub fn permits_definition(&self, original: &Self) -> Result<()> {
+        self.validate()?;
+        original.validate()?;
+        ensure!(
+            self.generation >= original.generation,
+            "Operational profile predates the approved service definition"
+        );
+        self.same_operational_identity(original)
+    }
+    pub fn same_operational_identity(&self, previous: &Self) -> Result<()> {
+        ensure!(
+            self.operational_digest()? == previous.operational_digest()?,
+            "Stopped successor cannot change permanent identities, permissions, routes, storage or resource limits"
+        );
+        Ok(())
+    }
     fn placement_value(&self) -> V {
         a([
             ids(&self.placement.hosts),
@@ -555,6 +616,9 @@ impl Manifest {
                 ids(&self.consent_policy.reviewer_roots),
             ]),
             config,
+            V::Uint(self.generation),
+            self.previous_profile.as_ref().map_or(V::Null, b),
+            self.previous_consent.as_ref().map_or(V::Null, b),
         ]))?;
         ensure!(bytes.len() <= MAXIMUM, "Canonical manifest exceeds 48 KiB");
         Ok(bytes)
@@ -562,7 +626,7 @@ impl Manifest {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         ensure!(bytes.len() <= MAXIMUM, "Canonical manifest exceeds 48 KiB");
         let value = wire::decode(bytes)?;
-        let v = value.array(20)?;
+        let v = value.array(23)?;
         ensure!(
             v[0].uint()? == 200 && v[1].uint()? == 1 && v[2].text()? == "HyperNetRuntimeManifest",
             "Invalid runtime manifest envelope"
@@ -635,6 +699,17 @@ impl Manifest {
             })
         };
         let manifest = Self {
+            generation: v[20].uint()?,
+            previous_profile: if v[21] == V::Null {
+                None
+            } else {
+                Some(key(&v[21])?)
+            },
+            previous_consent: if v[22] == V::Null {
+                None
+            } else {
+                Some(key(&v[22])?)
+            },
             network: key(&v[3])?,
             incarnation: key(&v[4])?,
             deployment: key(&v[5])?,
@@ -676,8 +751,13 @@ impl Manifest {
             V::Uint(1),
             b(&self.network),
             b(&self.incarnation),
-            V::Uint(1),
-            V::Null,
+            V::Uint(self.generation),
+            if kind == 117 {
+                self.previous_profile.as_ref()
+            } else {
+                self.previous_consent.as_ref()
+            }
+            .map_or(V::Null, b),
         ]
     }
     pub fn desired(&self) -> Result<Vec<u8>> {
@@ -693,7 +773,7 @@ impl Manifest {
             a(self.limits.map(V::Uint)),
             self.placement_value(),
             b(&digest),
-            V::Uint(1),
+            V::Uint(self.generation),
         ]);
         wire::encode(&a(values))
     }

@@ -219,6 +219,19 @@ pub fn prepare(root: &Path, p: &Profile) -> Result<()> {
     publish_preparation(root, &preparation)
 }
 
+pub(in crate::runtime_management) fn successor(root: &Path, p: &Profile) -> Result<()> {
+    let mut preparation: Preparation = super::super::files::json(&root.join("Preparation.json"))?;
+    let metadata = fs::symlink_metadata(root.join("Launch"))?;
+    ensure!(
+        metadata.is_dir()
+            && Some(metadata.dev()) == preparation.device
+            && Some(metadata.ino()) == preparation.inode,
+        "Stopped successor cannot replace the retained launch directory"
+    );
+    preparation.configuration = p.configuration_digest()?;
+    super::super::files::save(&root.join("Preparation.json"), &preparation)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

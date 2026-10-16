@@ -165,8 +165,8 @@ impl RegisteredProfile {
                 && own.transport_key == p.identity.transport_key
                 && own.leaf_der == p.identity.leaf_der
                 && (p.mode == 3 || p.address == Some(SocketAddr::new(own.address, own.port)))
-                && p.deployment_profile.generation == 1
-                && p.consent.generation == 1
+                && p.deployment_profile.generation == p.manifest.generation
+                && p.consent.generation == p.manifest.generation
                 && p.deployment_profile.digest == wire::digest(&p.manifest.desired()?)
                 && p.consent.digest == wire::digest(&p.manifest.unsigned_consent(0)?)
                 && p.validity.0 >= p.manifest.validity.0

@@ -86,8 +86,9 @@ A client-only installation needs no host runtime, inbound listener, storage
 contribution or voter key. Offline provisioning imports independently authenticated
 network and relay identities into a private profile. It does not redeem an
 invitation or grant membership. Online joining requires the approved relay path.
-Until that connector is implemented and available, online joining is unavailable;
-there is no transitional direct-reader mode.
+The installed Suite `network join` and `network connect` commands use that approved
+relay path without a direct fallback. See [PrivateRoutes](PrivateRoutes.md) for
+the route contract and the Suite's installed manuals for invitation redemption.
 
 Offline bootstrap binds the descriptor, initial governance, recovery-policy
 acceptance and planned relay/admission identities under one independently pinned
@@ -148,6 +149,9 @@ space. Operational event loss is counted and visible.
 Diagnostics are local and previewable. An explicit export writes only the selected
 redacted data to an operator-selected local destination. No provider upload,
 automatic network probe or direct reader connection is part of diagnosis.
+Installed `runtime diagnose` and `runtime services diagnose` commands preview
+bounded recorded local state and bind explicit private export to its exact digest;
+see [Diagnostics](Diagnostics.md). They do not certify current authority or collect logs.
 Hash chains and signatures provide attributable evidence under stated trust
 assumptions. Retained external or authority-committed heads are needed to detect
 tail removal; a local signature cannot prove that an emitter reported everything.

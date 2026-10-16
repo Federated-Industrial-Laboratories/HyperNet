@@ -200,6 +200,7 @@ pub struct Request {
     pub minimum_signer_generation: Option<u64>,
 }
 pub fn load(root: &Path) -> Result<(Profile, State)> {
+    super::transition::require_idle(root)?;
     let profile: Profile = json(&root.join("Profile.json"))?;
     profile.validate(root)?;
     let mut state: State = json(&root.join("State.json"))?;

@@ -340,6 +340,18 @@ pub(super) fn evaluate_serving(
                     c.expires = c.expires.min(value.upload_expires_ms);
                     "MediaSubmit"
                 }
+                MediaEffect::Repair => {
+                    let (_, published, _, _) = c.publication(revision.author.raw_page)?;
+                    ensure!(
+                        intent.requester == revision.author.intent.requester
+                            && published
+                                .published
+                                .as_ref()
+                                .is_some_and(|p| p.id == value.revision.id),
+                        "media repair requires its current published author"
+                    );
+                    "MediaSubmit"
+                }
                 MediaEffect::Read => {
                     let (_, published, _, _) = c.publication(revision.author.raw_page)?;
                     ensure!(
@@ -371,14 +383,22 @@ pub(super) fn evaluate_serving(
         }
         Command::MediaReceipt { receipt } => {
             let (asset, revision, ledger) = c.asset(&receipt.asset, true)?;
+            let pending = ledger.pending.as_ref() == Some(&asset.revision);
+            let published = ledger
+                .published
+                .as_ref()
+                .is_some_and(|r| r.id == asset.revision.id);
+            if published {
+                c.publication(revision.author.raw_page)?;
+            }
             ensure!(
-                ledger.pending.as_ref() == Some(&asset.revision)
+                (pending || published)
                     && asset.hosts.contains(&receipt.host)
                     && receipt.bytes == asset.manifest.bytes
                     && hex::encode(receipt.digest) == asset.manifest.digest
                     && receipt.recorded_ms <= at.saturating_add(250)
-                    && asset.upload_expires_ms > at.saturating_add(1250),
-                "media receipt differs from current pending asset"
+                    && (!pending || asset.upload_expires_ms > at.saturating_add(1250)),
+                "media receipt differs from current asset"
             );
             c.host(&receipt.host, Some(&revision.author.namespace), true)?;
             if intent.requester == receipt.host.id {

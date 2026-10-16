@@ -529,7 +529,7 @@ pub(super) fn create(
     containers::image::verify(&id, &hex::encode(p.manifest.software_digest))?;
     Ok(id)
 }
-pub(super) fn finite(
+pub(in crate::runtime_management) fn finite(
     p: &Profile,
     s: &mut State,
     command: &[String],

@@ -44,8 +44,7 @@ fn parse(
             && profile.deployment == manifest.deployment
             && profile.service == manifest.roles[0].service_key
             && profile.operator == manifest.operator
-            && profile.validity.0 >= manifest.validity.0
-            && profile.validity.1 <= manifest.validity.1,
+            && manifest.permits_definition(&profile.manifest).is_ok(),
         "route profile differs from exact local deployment consent"
     );
     let own = manifest

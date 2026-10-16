@@ -7,7 +7,8 @@ SHA-256 digest as HyperNet inside the signed image. It contains no network keys,
 personal state. The daemon continues to require its confined rootless OCI
 profile; installing a package does not start a service or open an ingress port.
 
-Use a trusted copy of `Tools/Bundle.py`, Python 3.11 or later and OpenSSH
+Use trusted copies of `Tools/Bundle.py` and its adjacent `Tools/PackageTrust.py`,
+Python 3.11 or later and OpenSSH
 `ssh-keygen` with Ed25519 SSHSIG support. The default verifier is
 `/usr/bin/ssh-keygen`; an independently trusted alternative can be supplied using
 `--ssh-keygen` before the operation. Keep the publisher's public key through a
@@ -41,6 +42,9 @@ supplied build files. Package version identifies the actual HyperNet runtime;
 the current runtime is 0.7.5. Other runtime contracts are rejected.
 The helper generates no signing identity. Select and protect the operator's own
 offline signing key; no signing secret enters the package.
+After assembly, use `Authorise` to sign the exact finite update target. See
+[offline update trust and recovery](UpgradeRecovery.md) for that command, explicit
+root pinning, sequence and version floors, expiry and independent root rotation.
 
 The detached signature covers the entire exact archive under SSHSIG namespace
 `HyperNetBundle1`. Manifest format 1 identifies product, runtime version, native
@@ -58,7 +62,10 @@ supply those source packages or constitute public release qualification.
 ## Verify and install
 
 Run verification from an independently trusted helper, before running any tool
-from a downloaded package:
+from a downloaded package. Initialise the separate private package trust directory
+through the independently authenticated `TrustInit` procedure in
+[UpgradeRecovery](UpgradeRecovery.md). Install requires that retained trust and
+the exact signed `Target.json` policy; there is no policy-free installation mode:
 
 ```sh
 python3 Tools/Bundle.py Verify \
@@ -69,6 +76,8 @@ python3 Tools/Bundle.py Install \
   --archive /Incoming/HyperNet.tar \
   --signature /Incoming/HyperNet.tar.sig \
   --public-key /Trust/Publisher.pub \
+  --trust-directory /Private/CorePackageTrust \
+  --policy /Incoming/Target.json --policy-signature /Incoming/Target.json.sig \
   --prefix /Private/HyperNetCurrent
 ```
 
@@ -86,6 +95,9 @@ configuration change occurs. `Manifest.json` and `ImageId.txt` identify the sele
 runtime. The original archive and signature are retained under `Package` for later
 verification. A successful image load can remain if installation subsequently
 fails; inspect that exact image ID before any separate cleanup.
+The update sequence and exact target digest are durable before publication.
+An interrupted retry must use the same valid target, or a larger sequence; it
+cannot restore an older trust floor. Policy expiry is checked again at publication.
 
 ## Verify, switch and remove
 
@@ -98,7 +110,9 @@ python3 Tools/Qualify.py --work-directory /Private/QualificationWork \
 
 VerifyInstalled rechecks the retained archive against the independently supplied
 key and compares every installed file, mode and directory with its signed
-inventory. It does not trust a modified local manifest. Qualify uses the native
+inventory. It does not trust a modified local manifest. Verify, VerifyInstalled
+and Remove establish historical integrity, not current update freshness.
+Qualify uses the native
 kernel and a disposable bounded container to verify actual confinement. A
 userspace container on another distribution is not a native kernel qualification.
 

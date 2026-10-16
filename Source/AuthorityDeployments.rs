@@ -89,7 +89,7 @@ impl Offer {
             outputs.push(bytes.to_vec());
         }
         ensure!(
-            actual == expected,
+            actual == expected || (parsed.generation > 1 && actual.is_empty()),
             "deployment lacks exact service, transport or monitor possession"
         );
         Ok(Self {
@@ -155,6 +155,7 @@ pub enum Operation {
     Register {
         grant: VersionRef,
         offer: Offer,
+        historical: bool,
         snapshot: Snapshot,
     },
     Get {
@@ -184,7 +185,7 @@ impl Operation {
             "deployment request profile generation differs"
         );
         let value = wire::decode(&intent.parameters)?;
-        let f = value.list(8)?;
+        let f = value.list(9)?;
         ensure!(
             f.len() >= 3
                 && f[0].uint()? == 200
@@ -219,7 +220,7 @@ impl Operation {
                 }
             }
             "AuthorityDeploymentRegister" => {
-                let f = value.array(8)?;
+                let f = value.array(9)?;
                 let grant = version(&f[3])?;
                 let offer = Offer::parse(f[4].bytes()?, f[5].bytes()?, &f[6])?;
                 ensure!(
@@ -232,6 +233,7 @@ impl Operation {
                 Self::Register {
                     grant,
                     offer,
+                    historical: f[8].boolean()?,
                     snapshot: Snapshot::parse(&f[7])?,
                 }
             }
@@ -305,8 +307,22 @@ impl Operation {
                 grant,
                 offer,
                 snapshot,
+                ..
             } => {
                 let m = &offer.manifest;
+                prefix[4] = V::Uint(m.generation);
+                if m.generation > 1 {
+                    let previous = snapshot
+                        .references
+                        .iter()
+                        .find(|r| r.kind == 129 && r.id == m.deployment)
+                        .context("Successor registration requires the exact preceding admission")?;
+                    ensure!(
+                        previous.generation.checked_add(1) == Some(m.generation),
+                        "Admission generation is not the next successor"
+                    );
+                    prefix[5] = b(&previous.digest);
+                }
                 let desired = m.desired()?;
                 let consent = m.unsigned_consent(0)?;
                 prefix.extend([
@@ -327,6 +343,7 @@ impl Operation {
                     b(&intent.requester),
                     reference(grant),
                     snapshot.value.clone(),
+                    b(&offer.manifest_bytes),
                 ]);
                 Ok(vec![desired, consent, wire::encode(&a(prefix))?])
             }
@@ -486,7 +503,12 @@ impl Operation {
                     .map(|r| Ok(b(g.record_bytes(r.kind, r.id)?)))
                     .collect::<Result<Vec<_>>>()?));
             }
-            Self::Register { grant, offer, .. } => {
+            Self::Register {
+                grant,
+                offer,
+                snapshot,
+                historical,
+            } => {
                 let c = match capability(grant.id, 13) {
                     Ok(c) => c,
                     Err(_) => {
@@ -495,26 +517,93 @@ impl Operation {
                     }
                 };
                 d.dependencies = c.dependencies;
-                d.expires_ms = c.expires_ms.min(offer.manifest.validity.1);
+                d.expires_ms = if *historical {
+                    c.expires_ms
+                } else {
+                    c.expires_ms.min(offer.manifest.validity.1)
+                };
                 if !all.contains(grant) {
                     d.refuse(12)
                 }
-                if !current(at, offer.manifest.validity) || (!replay && !offer.current(at)?) {
+                if if *historical {
+                    offer.manifest.generation <= 1 || at < offer.manifest.validity.1
+                } else {
+                    !current(at, offer.manifest.validity) || (!replay && !offer.current(at)?)
+                } {
                     d.refuse(7)
                 }
                 let created = self.derive(intent)?;
                 let record = created.last().unwrap();
                 let registration = Registration::parse(record, intent.network, intent.incarnation)?;
                 d.created = Some(registration.reference.clone());
-                if let Some(prior) = index.deployments.get(&intent.resource) {
+                if offer.manifest.generation > 1 {
+                    let preceding = snapshot
+                        .references
+                        .iter()
+                        .filter(|r| matches!(r.kind, 105 | 117 | 129) && r.id == intent.resource)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if preceding.len() != 3
+                        || preceding
+                            .iter()
+                            .any(|r| r.generation.checked_add(1) != Some(offer.manifest.generation))
+                        || !preceding.iter().any(|r| {
+                            r.kind == 117 && Some(r.digest) == offer.manifest.previous_profile
+                        })
+                        || !preceding.iter().any(|r| {
+                            r.kind == 105 && Some(r.digest) == offer.manifest.previous_consent
+                        })
+                    {
+                        d.refuse(12);
+                    }
+                    d.dependencies.extend(preceding.clone());
+                    if let Some(prior) = index.deployments.get(&intent.resource) {
+                        if replay {
+                            if prior.reference != registration.reference {
+                                d.refuse(28);
+                            }
+                        } else {
+                            if !preceding.contains(&prior.reference)
+                                || !preceding.contains(&prior.profile)
+                                || !preceding.contains(&prior.consent)
+                            {
+                                d.refuse(12);
+                            }
+                            if offer.manifest.successor_of(&prior.manifest).is_err() {
+                                d.refuse(38);
+                            }
+                        }
+                        if prior.host != registration.host
+                            || prior.operator != registration.operator
+                            || prior.services != registration.services
+                            || prior.transports != registration.transports
+                            || prior.monitor != registration.monitor
+                        {
+                            d.refuse(38);
+                        }
+                    } else {
+                        d.refuse(12);
+                    }
+                    if index.withdrawals.contains_key(&intent.resource) {
+                        d.refuse(28);
+                    }
+                } else if let Some(prior) = index.deployments.get(&intent.resource) {
                     if !replay || prior.reference != registration.reference {
-                        d.refuse(28)
+                        d.refuse(28);
                     }
                 } else if replay {
-                    d.refuse(12)
+                    d.refuse(12);
                 }
                 if !replay {
-                    let mut next = entries.to_vec();
+                    let mut next = entries
+                        .iter()
+                        .filter(|entry| {
+                            records::reference(entry).map_or(true, |r| {
+                                !(matches!(r.kind, 105 | 117 | 129) && r.id == intent.resource)
+                            })
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
                     next.extend(created.clone());
                     crate::authority_membership::sort_records(&mut next)?;
                     if records::Index::parse(
@@ -578,7 +667,8 @@ impl Operation {
                         .iter()
                         .find(|v| v.index() == m.index())
                         .is_some_and(|v| {
-                            v.generation < m.generation
+                            (grant.is_some() && m.kind == 100 && v != m)
+                                || v.generation < m.generation
                                 || v.generation == m.generation && v.digest != m.digest
                         })
                         || m.kind == 130 && m.id == *deployment && withdrawn.is_none()
@@ -632,6 +722,10 @@ impl Operation {
             d.refuse(12)
         }
         if let Some(created) = &d.created {
+            if matches!(self, Self::Register { .. }) {
+                d.dependencies
+                    .retain(|r| !(matches!(r.kind, 105 | 117 | 129) && r.id == intent.resource));
+            }
             d.dependencies.push(created.clone());
             if matches!(self, Self::Register { .. }) {
                 for bytes in self.derive(intent)?.iter().take(2) {

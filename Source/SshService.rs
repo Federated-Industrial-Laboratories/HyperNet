@@ -111,10 +111,15 @@ impl Config {
             profile.deployment == manifest.deployment
                 && profile.operator == manifest.operator
                 && profile.service == role.service_key
-                && profile.deployment_profile.digest == wire::digest(&manifest.desired()?)
-                && profile.consent.digest == wire::digest(&manifest.unsigned_consent(0)?)
-                && profile.validity.0 >= manifest.validity.0
-                && profile.validity.1 <= manifest.validity.1
+                && manifest.permits_definition(&profile.manifest).is_ok()
+                && crate::authority_membership::current(
+                    now.wall_ms,
+                    crate::authority_operational_consent::validity(
+                        &manifest,
+                        &profile.manifest,
+                        profile.validity
+                    )?
+                )
                 && role.bind_endpoint_ids == [profile.endpoint]
                 && endpoint.service_key == profile.service
                 && endpoint.port == raw.listen.port()

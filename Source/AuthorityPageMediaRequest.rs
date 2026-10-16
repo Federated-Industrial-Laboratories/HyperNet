@@ -313,7 +313,7 @@ impl Request {
         let payload = f[9].bytes()?;
         let raw_digest = f[8].fixed::<32>()?;
         match effect {
-            MediaEffect::Upload => ensure!(
+            MediaEffect::Upload | MediaEffect::Repair => ensure!(
                 payload.is_empty() && Some(raw_digest) == *digest,
                 "media upload response differs from its signed chunk"
             ),

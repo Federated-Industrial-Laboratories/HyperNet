@@ -50,6 +50,7 @@ pub(super) fn check_artifacts(root: &Path, p: &Profile) -> Result<()> {
     Ok(())
 }
 fn start(root: &Path, p: &Profile, s: &mut State) -> Result<()> {
+    super::transition::require_servable(root)?;
     ensure!(
         capacity(root)? >= p.resources.state_bytes,
         "Available storage is below the consented admission budget"
@@ -114,47 +115,55 @@ fn preview(p: &Profile, s: &State) -> Result<Value> {
         "backend":"BasicHotStuff","roles":["Authority"],"committeeSize":4,"quorumSize":3,
         "endpoints":{"peerListener":format!("{}:{}",p.bind,p.port),"peers":p.config.peers},
         "resources":p.resources,"storageEnforcement":"Engine bounded objects and journals; available-space admission is not a filesystem quota",
-        "expires":p.expires,"sessionPolicy":p.session_policy,"selinuxRelabel":p.selinux_relabel,"bootEnabled":false,
+        "expires":p.expires,"sessionPolicy":p.session_policy,"selinuxRelabel":p.selinux_relabel,"managedBootPolicy":p.session_policy=="Managed",
         "logoutBehaviour":"Graceful foreground supervisor exit stops the owned replica; abrupt loss retains independent consent expiry and withdrawal enforcement",
         "delta":if s.accepted_consent.is_none(){"Exact authority appointment and listed resources require consent"}else{"No resource expansion"},
         "requirements":["Accepted independently pinned bootstrap and appointed voter key","Rootless Podman with delegated cgroup v2","Landlock ABI 6 and seccomp","Signed healthy clock witness","Explicit IPv4 peer origins and published listener"],
-        "unsupported":["DomainHosting","ServiceRegistration","ReaderJoin","IPv6InstalledProfile","Renew","Update","UnattendedBoot"],
+        "unsupported":["DomainHosting","ServiceRegistration","ReaderJoin","IPv6InstalledProfile"],
         "quorum":"NotProbed","manifest":p.manifest}),
     )
 }
-fn mutation_capacity(
-    operation: &Operation,
-    count: usize,
-    stopped: bool,
-    withdrawn: bool,
-) -> Result<()> {
-    match operation {
-        Operation::Stop => ensure!(
-            !stopped && count < 121,
-            "No new stop is needed or the stop receipt reserve is exhausted"
-        ),
-        Operation::Withdraw => ensure!(
-            !withdrawn && count < 122,
-            "Withdrawal is already terminal or its receipt reserve is exhausted"
-        ),
-        _ => ensure!(
-            count < 120,
-            "Receipt capacity reached; stop or withdraw this deployment"
-        ),
+fn compact_receipts(
+    receipts: &mut std::collections::BTreeMap<String, Receipt>,
+    pending: Option<&str>,
+) {
+    if receipts.len() <= 64 {
+        return;
     }
-    Ok(())
+    let mut previous: Vec<_> = receipts
+        .iter()
+        .filter(|(id, _)| pending != Some(id.as_str()))
+        .map(|(id, receipt)| {
+            (
+                receipt.result["generation"].as_u64().unwrap_or(0),
+                id.clone(),
+            )
+        })
+        .collect();
+    previous.sort();
+    for (_, id) in previous.into_iter().take(receipts.len() - 64) {
+        receipts.remove(&id);
+    }
 }
 pub fn dispatch(root: &Path, request: Request) -> Result<Value> {
+    if matches!(request.operation, Operation::Diagnose) {
+        return super::diagnostics::preview(super::diagnostics::collect_authority(root));
+    }
     let root = super::files::root(root)?;
     let _lock = lock(&root)?;
+    if root.join("Transition.json").try_exists()? {
+        return match request.operation {
+            Operation::Stop => super::transition::restrict(&root, false, false),
+            Operation::Withdraw => super::transition::restrict(&root, false, true),
+            Operation::Status | Operation::Preview => super::transition::pending_status(&root),
+            _ => {
+                anyhow::bail!("Resume the exact stopped successor before another runtime operation")
+            }
+        };
+    }
     let (p, mut s) = load(&root)?;
     match request.operation {
         Operation::Preview => return preview(&p, &s),
-        Operation::Diagnose => {
-            return Ok(
-                json!({"deployment":p.deployment,"generation":s.generation,"recordedState":s.status,"resourceCount":s.resources.len(),"withdrawalGeneration":s.withdrawal_generation,"pendingOperation":s.pending.is_some(),"initialised":s.initialised,"failureCode":s.failure_code,"networkProbed":false,"exported":false}),
-            );
-        }
         Operation::Status => {
             let health = if matches!(
                 s.status.as_str(),
@@ -171,7 +180,7 @@ pub fn dispatch(root: &Path, request: Request) -> Result<Value> {
                 "clockReady":health.as_ref().is_some_and(|v|v["clockReady"]==true),"authority":health,
                 "minimumSignerGeneration":signer_generation(&root)?,"consentValid":verify_consent(&root,&p,&s).is_ok(),
                 "expires":p.expires,"withdrawalGeneration":s.withdrawal_generation,"resourceCount":s.resources.len(),
-                "failureCode":s.failure_code,"pendingOperation":s.pending.is_some(),"readerRouting":"Unavailable","bootEnabled":false}),
+                "failureCode":s.failure_code,"pendingOperation":s.pending.is_some(),"readerRouting":"Unavailable","managedBootPolicy":p.session_policy=="Managed"}),
             );
         }
         _ => {}
@@ -225,18 +234,35 @@ pub fn dispatch(root: &Path, request: Request) -> Result<Value> {
     }
     let emergency = matches!(request.operation, Operation::Stop | Operation::Withdraw);
     if !retrying_withdrawal {
-        mutation_capacity(
-            &request.operation,
-            s.receipts.len(),
-            s.status == "Stopped" && !s.resources.iter().any(|r| r.kind == "container"),
-            s.withdrawal_generation > 0,
-        )?;
+        ensure!(
+            !matches!(request.operation, Operation::Stop)
+                || s.status != "Stopped"
+                || s.resources.iter().any(|r| r.kind == "container"),
+            "Already stopped"
+        );
+        ensure!(
+            !matches!(request.operation, Operation::Withdraw) || s.withdrawal_generation == 0,
+            "Withdrawal is already terminal"
+        );
     }
     ensure!(
         emergency || s.pending.is_none(),
         "Interrupted operation requires stop or withdrawal"
     );
     ensure!(emergency || now()? >= s.last_time, "Clock moved backwards");
+    let audit_manifest = p.manifest.canonical()?;
+    let audit_operation = match request.operation {
+        Operation::Consent => "Consent",
+        Operation::Start => "Start",
+        Operation::Stop => "Stop",
+        Operation::Withdraw => "Withdraw",
+        _ => unreachable!(),
+    };
+    if emergency {
+        crate::runtime_audit::restrictive(&root, &audit_manifest, audit_operation, "Prepared");
+    } else {
+        crate::runtime_audit::record(&root, &audit_manifest, audit_operation, "Prepared")?;
+    }
     s.generation = s
         .generation
         .checked_add(1)
@@ -248,6 +274,7 @@ pub fn dispatch(root: &Path, request: Request) -> Result<Value> {
         request_digest: digest.clone(),
         result: json!({"ok":false,"generation":s.generation,"status":"Recovering","failureCode":"InterruptedOperation"}),
     });
+    compact_receipts(&mut s.receipts, s.pending.as_deref());
     if let Err(error) = save(&root, &s) {
         if emergency {
             let _ = containers::stop(&root, &p, &mut s);
@@ -320,7 +347,7 @@ pub fn dispatch(root: &Path, request: Request) -> Result<Value> {
         })(),
         _ => unreachable!(),
     };
-    let result = match outcome {
+    let mut result = match outcome {
         Ok(()) => {
             json!({"ok":true,"operation":request.operation,"generation":s.generation,"profileDigest":s.profile_digest,"status":s.status,"minimumSignerGeneration":signer_generation(&root)?})
         }
@@ -347,11 +374,36 @@ pub fn dispatch(root: &Path, request: Request) -> Result<Value> {
             s.pending = None;
             s.receipts.insert(operation_id.into(),Receipt{request_digest:digest,result:json!({"ok":false,"generation":s.generation,"status":s.status,"failureCode":s.failure_code})});
             save(&root, &s)?;
+            crate::runtime_audit::restrictive(&root, &audit_manifest, audit_operation, "Failed");
             return Err(
                 error.context("Runtime operation failed; state retained for stop or withdrawal")
             );
         }
     };
+    save(&root, &s)?;
+    if emergency {
+        result["auditRecorded"] = json!(crate::runtime_audit::restrictive(
+            &root,
+            &audit_manifest,
+            audit_operation,
+            "Committed"
+        ));
+    } else if let Err(error) =
+        crate::runtime_audit::record(&root, &audit_manifest, audit_operation, "Committed")
+    {
+        if matches!(request.operation, Operation::Start) {
+            let _ = stop(&root, &p, &mut s);
+        }
+        s.pending = None;
+        s.status = "Failed".into();
+        s.failure_code = Some("AuditUnavailable".into());
+        s.receipts.insert(operation_id.into(), Receipt { request_digest: digest,
+            result: json!({"ok":false,"generation":s.generation,"status":s.status,"failureCode":s.failure_code}) });
+        save(&root, &s)?;
+        return Err(error.context("Runtime outcome retained; audit completion failed"));
+    } else {
+        result["auditRecorded"] = json!(true);
+    }
     s.pending = None;
     s.receipts.insert(
         operation_id.into(),
@@ -367,7 +419,9 @@ pub fn session_stop(root: &Path) -> Result<()> {
     let root = super::files::root(root)?;
     let _lock = lock(&root)?;
     let (p, mut s) = load(&root)?;
+    crate::runtime_audit::restrictive(&root, &p.manifest.canonical()?, "Stop", "Prepared");
     stop(&root, &p, &mut s)?;
+    crate::runtime_audit::restrictive(&root, &p.manifest.canonical()?, "Stop", "Committed");
     if s.withdrawal_generation == 0 {
         s.status = "Stopped".into();
     }
@@ -383,6 +437,9 @@ pub fn withdrawal_receipt(root: &Path) -> Result<Value> {
     use crate::trust_wire::{self as wire, Value as V};
     let root = super::files::root(root)?;
     let _lock = lock(&root)?;
+    if root.join("Transition.json").try_exists()? {
+        return super::transition::withdrawal_receipt(&root, false, None);
+    }
     let (profile, state) = load(&root)?;
     let generation = withdrawal(&root)?;
     ensure!(
@@ -403,7 +460,7 @@ pub fn withdrawal_receipt(root: &Path) -> Result<Value> {
         V::Bytes(manifest.incarnation.to_vec()),
         V::Bytes(manifest.deployment.to_vec()),
         V::Bytes(manifest.operator.to_vec()),
-        V::Bytes(wire::digest(&manifest.desired()?).to_vec()),
+        V::Bytes(manifest.operational_digest()?.to_vec()),
         V::Uint(generation),
         V::Bool(cleanup),
     ]))?;
@@ -419,13 +476,21 @@ pub fn withdrawal_receipt(root: &Path) -> Result<Value> {
 mod tests {
     use super::*;
     #[test]
-    fn finite_receipts_preserve_terminal_stop_and_withdrawal() {
-        assert!(mutation_capacity(&Operation::Start, 120, false, false).is_err());
-        assert!(mutation_capacity(&Operation::Stop, 120, false, false).is_ok());
-        assert!(mutation_capacity(&Operation::Stop, 121, false, false).is_err());
-        assert!(mutation_capacity(&Operation::Withdraw, 121, false, false).is_ok());
-        assert!(mutation_capacity(&Operation::Withdraw, 122, false, false).is_err());
-        assert!(mutation_capacity(&Operation::Stop, 1, true, false).is_err());
-        assert!(mutation_capacity(&Operation::Withdraw, 1, false, true).is_err());
+    fn completed_receipts_compact_without_evicting_pending_operation() {
+        let mut receipts = std::collections::BTreeMap::new();
+        for generation in 1..=200u64 {
+            receipts.insert(
+                generation.to_string(),
+                Receipt {
+                    request_digest: "digest".into(),
+                    result: json!({"generation":generation}),
+                },
+            );
+            compact_receipts(&mut receipts, Some("1"));
+        }
+        assert_eq!(receipts.len(), 64);
+        assert!(receipts.contains_key("1"));
+        assert!(receipts.contains_key("200"));
+        assert!(!receipts.contains_key("136"));
     }
 }

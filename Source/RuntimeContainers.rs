@@ -7,7 +7,7 @@ use std::{collections::BTreeMap, fs, path::Path};
 #[path = "RuntimeImage.rs"]
 pub(super) mod image;
 #[path = "RuntimePreparation.rs"]
-mod preparation;
+pub(super) mod preparation;
 pub use preparation::prepare;
 
 fn topology(p: &Profile, role: &str) -> Result<BTreeMap<String, String>> {
@@ -539,6 +539,41 @@ pub fn temporary(root: &Path, p: &Profile, s: &mut State, initialise: bool) -> R
             "--minimum-generation",
             &signer_generation(root)?.to_string(),
         ]));
+    }
+    run_temporary(root, p, s, role, args, MAXIMUM)
+}
+pub(super) fn consent_successor(
+    root: &Path,
+    p: &Profile,
+    s: &mut State,
+    previous: &str,
+) -> Result<Value> {
+    let role = "Inspect";
+    let mut args = workload_args(root, p, role)?;
+    if root.join("OperationalOffers").try_exists()? {
+        mount(
+            p,
+            &mut args,
+            &root.join("OperationalOffers"),
+            "/History",
+            false,
+        );
+    }
+    args.extend(strings(&[
+        &p.image,
+        "authority-replica",
+        "apply-consent",
+        "--directory",
+        "/State/Replica",
+        "--minimum-generation",
+        &signer_generation(root)?.to_string(),
+        "--expected-profile-digest",
+        previous,
+        "--authorization",
+        "/Authorization",
+    ]));
+    if root.join("OperationalOffers").try_exists()? {
+        args.extend(strings(&["--history-directory", "/History"]));
     }
     run_temporary(root, p, s, role, args, MAXIMUM)
 }

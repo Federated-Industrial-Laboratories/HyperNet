@@ -419,3 +419,49 @@ fn receipt_reservation_precedes_revocation_and_preserves_original_completion_met
     );
     assert_eq!(completion.reason, 0);
 }
+
+#[test]
+fn policy_discovery_exposes_only_the_network_contract_without_admin_inspection() {
+    let f = Fixture::with_extra_administrator(1000, vec![0]);
+    let request = intent(
+        &f,
+        1,
+        "AuthorityPolicyContext",
+        (f.app.config.scope.network, 0, 0),
+        &[],
+        array(vec![
+            V::Uint(200),
+            V::Uint(1),
+            V::Text("AuthorityPolicyContext".into()),
+            b(&f.app.config.scope.network),
+        ]),
+    );
+    let result = f
+        .app
+        .execute(
+            &f.initial,
+            &f.committed(&request, 3500, 5000, 1),
+            &crate::authority_objects::Resolved::default(),
+        )
+        .unwrap();
+    assert_eq!(result_code(&result), 0);
+    let v = page(&result);
+    let f = v.array(5).unwrap();
+    assert_eq!(f[2].text().unwrap(), "AuthorityPolicyContext");
+    let records = f[4].array(2).unwrap();
+    assert_eq!(
+        wire::decode(records[0].bytes().unwrap())
+            .unwrap()
+            .array(17)
+            .unwrap()[0],
+        V::Uint(100)
+    );
+    assert_eq!(
+        wire::decode(records[1].bytes().unwrap())
+            .unwrap()
+            .array(13)
+            .unwrap()[0],
+        V::Uint(114)
+    );
+    assert_eq!(f[3].array(2).unwrap().len(), 2);
+}

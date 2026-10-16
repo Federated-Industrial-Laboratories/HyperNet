@@ -135,6 +135,7 @@ impl Fixture {
                 b(&offer.consent),
                 offer.possessions_value(),
                 deployment::snapshot(refs),
+                V::Bool(false),
             ]);
             Intent::from_signed(&deployment::signed(
                 &deployment::key(5),

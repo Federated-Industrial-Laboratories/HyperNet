@@ -28,6 +28,9 @@ pub struct Resources {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Manifest {
+    pub generation: u64,
+    pub previous_profile: Option<[u8; 32]>,
+    pub previous_consent: Option<[u8; 32]>,
     pub version: u64,
     pub deployment: String,
     pub network: String,
@@ -81,7 +84,7 @@ fn path(value: &Path) -> Result<()> {
 impl Manifest {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.version == 1 && self.session_policy == "Session",
+            self.version == 1 && matches!(self.session_policy.as_str(), "Session" | "Managed"),
             "Unsupported runtime manifest"
         );
         for value in [
@@ -290,6 +293,9 @@ impl Manifest {
         let mut outbound = ordered.clone();
         outbound.sort();
         let manifest = m::Manifest {
+            generation: self.generation,
+            previous_profile: self.previous_profile,
+            previous_consent: self.previous_consent,
             network: parse(&self.network)?,
             incarnation: parse(&self.incarnation)?,
             deployment,
@@ -298,7 +304,7 @@ impl Manifest {
             bootstrap_digest: parse(&self.bootstrap_digest)?,
             software_digest: parse(&self.software_digest)?,
             validity: (self.created * 1000, self.expires * 1000),
-            session_mode: 0,
+            session_mode: u64::from(self.session_policy == "Managed"),
             roles: vec![m::Role {
                 role: 0,
                 service_key: signer,
@@ -410,6 +416,9 @@ impl Manifest {
             .try_into()
             .map_err(|_| anyhow::anyhow!("Four peers required"))?;
         let result = Self {
+            generation: manifest.generation,
+            previous_profile: manifest.previous_profile,
+            previous_consent: manifest.previous_consent,
             version: 1,
             deployment: hex::encode(manifest.deployment),
             network: hex::encode(manifest.network),
@@ -456,7 +465,12 @@ impl Manifest {
                 .iter()
                 .map(|e| (hex::encode(e.service_key), hex::encode(&e.leaf_der)))
                 .collect(),
-            session_policy: "Session".into(),
+            session_policy: if manifest.session_mode == 1 {
+                "Managed"
+            } else {
+                "Session"
+            }
+            .into(),
         };
         ensure!(
             result.canonical()? == manifest,

@@ -41,20 +41,27 @@ fn committee() -> Vec<u8> {
     seeds.sort_by_key(|s| vectors::key(*s).verifying_key().to_bytes());
     seeds
 }
-fn offer(index: usize) -> crate::authority_deployments::Offer {
+fn offer(index: usize, bootstrap: &[u8]) -> crate::authority_deployments::Offer {
     use crate::authority_deployments::Offer;
     let seeds = committee();
     let public = |seed| vectors::key(seed).verifying_key().to_bytes();
     let mut manifest = vectors::manifest();
     manifest.deployment = [161 + index as u8; 32];
-    manifest.host = [171 + index as u8; 32];
+    manifest.host = manifest.deployment;
+    manifest.bootstrap_digest = wire::digest(bootstrap);
     manifest.roles.truncate(1);
     manifest.volumes.truncate(1);
     manifest.endpoints = seeds
         .iter()
         .enumerate()
         .map(|(i, seed)| Endpoint {
-            endpoint_id: [210 + i as u8; 32],
+            endpoint_id: wire::digest(
+                &wire::encode(&array(vec![
+                    V::Text("AuthorityEndpoint".into()),
+                    b(&public(*seed)),
+                ]))
+                .unwrap(),
+            ),
             service_key: public(*seed),
             address: std::net::Ipv4Addr::new(192, 0, 2, 40 + i as u8).into(),
             port: 24000,
@@ -63,7 +70,11 @@ fn offer(index: usize) -> crate::authority_deployments::Offer {
         })
         .collect();
     manifest.roles[0].service_key = public(seeds[index]);
-    manifest.roles[0].bind_endpoint_ids = vec![[210 + index as u8; 32]];
+    manifest.roles[0].bind_endpoint_ids = vec![manifest.endpoints[index].endpoint_id];
+    let volume =
+        wire::digest(format!("{}/ReplicaState", hex::encode(manifest.deployment)).as_bytes());
+    manifest.volumes[0].volume_id = volume;
+    manifest.roles[0].volume_ids = vec![volume];
     manifest.roles[0].outbound_endpoint_ids =
         manifest.endpoints.iter().map(|e| e.endpoint_id).collect();
     manifest.placement.hosts = vec![manifest.host];
@@ -74,7 +85,12 @@ fn offer(index: usize) -> crate::authority_deployments::Offer {
         .as_mut()
         .unwrap()
         .ordered_peer_endpoint_ids = manifest.roles[0].outbound_endpoint_ids.clone();
+    manifest
+        .endpoints
+        .sort_by_key(|endpoint| endpoint.endpoint_id);
+    manifest.roles[0].outbound_endpoint_ids.sort();
     Manifest::parse(&manifest.encode().unwrap()).unwrap();
+    crate::runtime_authorization::Manifest::from_canonical(manifest.clone()).unwrap();
     let consent =
         wire::sign_envelope(&manifest.unsigned_consent(0).unwrap(), &vectors::key(90)).unwrap();
     let mut signers = [
@@ -109,7 +125,7 @@ fn offer(index: usize) -> crate::authority_deployments::Offer {
 }
 fn register(f: &tests::Fixture, prior: &[u8], index: usize) -> Vec<u8> {
     let state = State::parse(&f.app.config, prior).unwrap();
-    let offer = offer(index);
+    let offer = offer(index, &f.bootstrap);
     let grant = Governance::parse(
         f.app.config.scope.network,
         f.app.config.scope.incarnation,
@@ -130,6 +146,7 @@ fn register(f: &tests::Fixture, prior: &[u8], index: usize) -> Vec<u8> {
             b(&offer.consent),
             offer.possessions_value(),
             vectors::snapshot(refs),
+            V::Bool(false),
         ])
     };
     let preliminary = sign(
@@ -482,7 +499,14 @@ fn fresh_committee_preserves_policy_state_and_votes_only_after_durable_ready_quo
     )
     .unwrap();
     assert!(!reopened.can_vote());
-    reopened.activate_epoch(&activation).unwrap();
+    crate::authority_replica::tests::activate_prepared_after_operational_successor(
+        offer(0, &f.bootstrap).manifest,
+        &f.bootstrap,
+        &evidence,
+        &history,
+        activation.ready(),
+        &mut reopened,
+    );
     let minimum = reopened.generation();
     drop(reopened);
     let reopened = Engine::open(

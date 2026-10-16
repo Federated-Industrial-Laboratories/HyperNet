@@ -441,7 +441,7 @@ pub fn evaluate(
                 c.profile(profile, true)?;
                 let kind = if profile.role == 1 { 147 } else { 143 };
                 let host = Host {
-                    profile: profile.clone(),
+                    profile: profile.as_ref().clone(),
                     manager: intent.requester,
                     grant: grant.clone(),
                     withdrawn: false,

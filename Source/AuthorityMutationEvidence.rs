@@ -46,6 +46,14 @@ impl Entry {
             config.evidence_context(intent.minimum_policy_epoch, self.height, self.at, height)?;
         let operation = transactions::Operation::parse(&intent, &historical)?;
         let (records, snapshot) = match operation {
+            transactions::Operation::Policy(policy) => {
+                let mut records = Vec::new();
+                if policy.recovery != policy.previous_recovery {
+                    records.push(policy.recovery.clone());
+                }
+                records.push(policy.policy.clone());
+                (records, policy.snapshot.clone())
+            }
             transactions::Operation::Tier(tier) => (
                 vec![
                     tier.derive(&intent)?
@@ -54,11 +62,17 @@ impl Entry {
                 tier.snapshot().clone(),
             ),
             transactions::Operation::Deployment(deployment) => {
-                if let crate::authority_deployments::Operation::Register { offer, .. } = &deployment
+                if let crate::authority_deployments::Operation::Register {
+                    offer, historical, ..
+                } = &deployment
                 {
                     ensure!(
-                        offer.current(self.at)?,
-                        "historical deployment offer was not current"
+                        if *historical {
+                            offer.manifest.generation > 1 && self.at >= offer.manifest.validity.1
+                        } else {
+                            offer.current(self.at)?
+                        },
+                        "deployment offer differs from its committed current or historical validity"
                     );
                 }
                 let snapshot = deployment
@@ -133,13 +147,15 @@ impl Entry {
                 && intent.minimum_policy_epoch == snapshot.epoch
                 && intent.minimum_policy_height == snapshot.height
                 && wire::digest(record) == self.created.digest
-                && (self.created.kind == 101 || self.created.generation == 1),
+                && (matches!(self.created.kind, 100 | 101 | 129) || self.created.generation == 1),
             "mutation evidence derivation or position differs"
         );
         let fields = wire::decode(record)?;
         let fields = fields.list(32)?;
         let kind = fields[0].uint()?;
-        let id = if matches!(kind, 126 | 128) {
+        let id = if matches!(kind, 100 | 114) {
+            config.scope.network
+        } else if matches!(kind, 126 | 128) {
             version(&fields[6])?.id
         } else {
             fields[6].fixed()?
@@ -151,7 +167,7 @@ impl Entry {
         Ok(records)
     }
     fn maximum(&self) -> usize {
-        if self.created.kind == 129 {
+        if matches!(self.created.kind, 100 | 129) {
             crate::authority_capacity::MAX_DEPLOYMENT_EVIDENCE
         } else {
             crate::authority_capacity::MAX_OTHER_EVIDENCE
@@ -183,6 +199,69 @@ impl Evidence {
             }
         }
         Ok(None)
+    }
+    pub fn genesis_policy(
+        value: &V,
+        kind: u64,
+        network: [u8; 32],
+        incarnation: [u8; 32],
+    ) -> Result<Option<Vec<u8>>> {
+        ensure!(matches!(kind, 100 | 114), "unsupported genesis policy kind");
+        for item in value.list(crate::authority_capacity::MAX_RECORDS)? {
+            let f = item.array(4)?;
+            let r = version(&f[0])?;
+            if r.kind != 100 || r.id != network {
+                continue;
+            }
+            let intent = Intent::from_signed(f[1].bytes()?)?;
+            let operation = crate::authority_policies::Operation::parse(&intent)?;
+            let bytes = if kind == 100 {
+                &operation.previous_policy
+            } else {
+                &operation.previous_recovery
+            };
+            let old =
+                crate::authority_policies::record_reference(bytes, network, incarnation, kind)?;
+            let v = wire::decode(bytes)?;
+            if old.generation == 1 && v.list(17)?.last() == Some(&V::Null) {
+                return Ok(Some(bytes.clone()));
+            }
+        }
+        Ok(None)
+    }
+    pub fn recovery_reservations(
+        &self,
+        base: &crate::authority_membership::Reservations,
+    ) -> Result<crate::authority_membership::Reservations> {
+        let mut keys = base
+            .0
+            .iter()
+            .map(|(role, key)| (*key, *role))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for entry in self.0.iter().filter(|e| e.created.kind == 100) {
+            let intent = Intent::from_signed(&entry.signed)?;
+            let operation = crate::authority_policies::Operation::parse(&intent)?;
+            for bytes in [&operation.previous_recovery, &operation.recovery] {
+                let custody = crate::authority_policies::Custody::parse(
+                    bytes,
+                    intent.network,
+                    intent.incarnation,
+                )?;
+                for (_, key) in custody.keys {
+                    ensure!(
+                        keys.get(&key).is_none_or(|role| *role == 1),
+                        "recovery custody reuses another dedicated role key"
+                    );
+                    keys.insert(key, 1);
+                }
+            }
+        }
+        let mut entries = keys
+            .into_iter()
+            .map(|(key, role)| (role, key))
+            .collect::<Vec<_>>();
+        entries.sort();
+        Ok(crate::authority_membership::Reservations(entries))
     }
     pub fn creation_height(&self, created: &VersionRef) -> Result<u64> {
         self.0
@@ -273,6 +352,7 @@ impl Evidence {
                 let f = value.list(32)?;
                 let kind = f[0].uint()?;
                 let id = match kind {
+                    100 | 114 => config.scope.network,
                     105 => f[7].fixed()?,
                     126 | 128 => version(&f[6])?.id,
                     _ => f[6].fixed()?,
@@ -311,6 +391,62 @@ impl Evidence {
                         );
                     }
                     derived.insert((kind, id), bytes);
+                } else if matches!(kind, 100 | 114) {
+                    let intent = Intent::from_signed(&entry.signed)?;
+                    let policy = crate::authority_policies::Operation::parse(&intent)?;
+                    let previous = if kind == 100 {
+                        &policy.previous_policy
+                    } else {
+                        &policy.previous_recovery
+                    };
+                    let old = crate::authority_policies::record_reference(
+                        previous,
+                        config.scope.network,
+                        config.scope.incarnation,
+                        kind,
+                    )?;
+                    ensure!(
+                        f[4].uint()?
+                            == old
+                                .generation
+                                .checked_add(1)
+                                .context("policy generation exhausted")?
+                            && f[5].fixed::<32>()? == old.digest,
+                        "policy provenance does not extend exact predecessor"
+                    );
+                    if let Some(retained) = derived.get(&(kind, id)) {
+                        ensure!(retained == previous, "policy provenance history forked");
+                    } else {
+                        ensure!(
+                            old.generation == 1
+                                && wire::decode(previous)?.list(17)?.last() == Some(&V::Null),
+                            "policy provenance begins outside authenticated genesis"
+                        );
+                    }
+                    derived.insert((kind, id), bytes);
+                } else if matches!(kind, 105 | 117 | 129) {
+                    if let Some(previous) = derived.get(&(kind, id)) {
+                        let previous_fields = wire::decode(previous)?;
+                        let previous_fields = previous_fields.list(32)?;
+                        ensure!(
+                            previous_fields[4].uint()?.checked_add(1) == Some(f[4].uint()?)
+                                && f[5].fixed::<32>()? == wire::digest(previous),
+                            "deployment provenance does not extend exact predecessor"
+                        );
+                        if kind == 129 {
+                            let prior = crate::runtime_manifest::Manifest::parse(
+                                previous_fields[17].bytes()?,
+                            )?;
+                            let current = crate::runtime_manifest::Manifest::parse(f[17].bytes()?)?;
+                            current.successor_of(&prior)?;
+                        }
+                    } else {
+                        ensure!(
+                            f[4].uint()? == 1 && f[5] == V::Null,
+                            "deployment provenance begins without initial registration"
+                        );
+                    }
+                    derived.insert((kind, id), bytes);
                 } else {
                     ensure!(
                         derived.insert((kind, id), bytes).is_none(),
@@ -335,6 +471,7 @@ impl Evidence {
         let Some(entry) = self
             .0
             .iter()
+            .rev()
             .find(|e| e.created.kind == 129 && e.created.id == deployment)
         else {
             return Ok(None);
@@ -356,7 +493,8 @@ impl Evidence {
     ) -> Result<()> {
         ensure!(
             !self.0.iter().any(|e| e.created.index() == created.index()
-                && (created.kind != 101 || e.created.generation == created.generation)),
+                && (!matches!(created.kind, 100 | 101 | 129)
+                    || e.created.generation == created.generation)),
             "mutation provenance already exists"
         );
         self.0.push(Entry {

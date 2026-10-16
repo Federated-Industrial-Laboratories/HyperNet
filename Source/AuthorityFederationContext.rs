@@ -51,12 +51,15 @@ impl page::Evaluation<'_> {
             .get(&manifest.deployment)
             .context("bridge deployment is absent")?
             .clone();
+        deployment.manifest.permits_definition(manifest)?;
+        let validity = deployment.manifest.validity;
         ensure!(
             deployment.operator == manifest.operator
                 && deployment.services.get(&7) == Some(&profile.service)
-                && self.governance.record_bytes(117, manifest.deployment)? == manifest.desired()?
+                && self.governance.record_bytes(117, manifest.deployment)?
+                    == deployment.manifest.desired()?
                 && self.governance.record_bytes(105, manifest.deployment)?
-                    == manifest.unsigned_consent(0)?,
+                    == deployment.manifest.unsigned_consent(0)?,
             "bridge profile differs from exact admitted deployment"
         );
         self.dependencies
@@ -66,7 +69,7 @@ impl page::Evaluation<'_> {
             anyhow::bail!("bridge deployment withdrawn")
         }
         ensure!(
-            crate::authority_membership::current(self.at, manifest.validity),
+            crate::authority_membership::current(self.at, validity),
             "bridge deployment expired"
         );
         self.capability(
@@ -77,7 +80,7 @@ impl page::Evaluation<'_> {
             None,
             0,
         )?;
-        self.expires = self.expires.min(manifest.validity.1);
+        self.expires = self.expires.min(validity.1);
         Ok(())
     }
     pub(super) fn federation_bridge(

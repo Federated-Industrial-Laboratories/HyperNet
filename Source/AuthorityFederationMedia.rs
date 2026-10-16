@@ -106,6 +106,9 @@ fn principal(
                 Some(head.raw_page),
             )?;
         }
+        page::MediaEffect::Repair => {
+            anyhow::bail!("foreign media repair requires its own current bridge authority");
+        }
         page::MediaEffect::Inspect => {
             ensure!(
                 head.pending.as_ref() == Some(&asset.revision),

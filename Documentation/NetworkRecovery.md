@@ -7,9 +7,11 @@ The offline tools are in the separate HyperNetSuite `network recovery` commands.
 
 Kinds115 and116 encode a threshold proposal and explicit client acceptance.
 They do not confer current authority, membership, hosting or content access.
-The old accepted recovery policy supplies all eligible custody keys and its
-threshold. Duplicate keys, foreign signatures and mixed declaration payloads
-refuse. Shared custody also requires distinct enrolled principal identities.
+The latest recovery policy authenticated by the retained requester floor supplies
+all eligible custody keys and its threshold. Committed custody replacement is
+retained; the bootstrap generation is never substituted for a newer floor.
+Duplicate keys, foreign signatures and mixed declaration payloads refuse.
+Shared custody also requires distinct enrolled principal identities.
 Signatures cannot prove that different people control those identities.
 
 Different threshold-authorized successors can coexist if a custodian equivocates.

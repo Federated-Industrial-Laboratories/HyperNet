@@ -42,7 +42,12 @@ impl Source {
                 let key =
                     crate::protocol::fixed_hex::<32>(public_key).map_err(anyhow::Error::msg)?;
                 let bytes = read_opened_observation(open_signed_observation(path)?, false)?;
-                verify(&bytes, key, kernel_boot, clock::moment()?)
+                let boot = if kernel_boot == "CurrentHost" {
+                    clock::kernel_boot()?
+                } else {
+                    kernel_boot.clone()
+                };
+                verify(&bytes, key, &boot, clock::moment()?)
             }
         }
     }

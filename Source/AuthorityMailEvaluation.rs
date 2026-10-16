@@ -58,11 +58,14 @@ impl Evaluation<'_> {
             .get(&m.deployment)
             .context("mail deployment absent")?
             .clone();
+        r.manifest.permits_definition(m)?;
+        let validity = r.manifest.validity;
         ensure!(
             r.operator == m.operator
                 && r.services.get(&3) == Some(&p.service)
-                && self.governance.record_bytes(117, m.deployment)? == m.desired()?
-                && self.governance.record_bytes(105, m.deployment)? == m.unsigned_consent(0)?,
+                && self.governance.record_bytes(117, m.deployment)? == r.manifest.desired()?
+                && self.governance.record_bytes(105, m.deployment)?
+                    == r.manifest.unsigned_consent(0)?,
             "mail profile differs from exact registered consent"
         );
         self.dependencies
@@ -72,8 +75,8 @@ impl Evaluation<'_> {
             ensure!(!live, "mail deployment withdrawn");
         }
         if live {
-            ensure!(current(self.at, m.validity), "mail consent expired");
-            self.expires = self.expires.min(m.validity.1);
+            ensure!(current(self.at, validity), "mail consent expired");
+            self.expires = self.expires.min(validity.1);
             self.capability(&r.grant, r.registrar, &[13], (5, m.deployment), 0)?;
         }
         Ok(())
