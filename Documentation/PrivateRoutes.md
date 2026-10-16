@@ -118,17 +118,20 @@ request rejection, authority admission, admitted permission expiry, unavailable
 attachments, forwarding failure and transient listener failure without logging
 peer addresses or content.
 These category counters remain active after the timing sample allowance is spent.
-At most four connection samples per process also report fixed stages and
-elapsed monotonic time. Relay timings start when channel authentication finishes
+At most 64 connection samples per process also report fixed stages,
+elapsed monotonic time and boot-time timestamps. Relay timings start when channel authentication finishes
 and the request enters the admission queue. Endpoint timings start at acceptance.
 They distinguish queue delay, voucher inspection, permission reservation, egress
 connection, readiness and final TLS without logging identities or request data.
-Each sampled connection also reports at most four application-frame sequences
-and four permission renewals. Endpoint stages separate request arrival, dispatch,
+Each sampled connection also reports at most 32 application-frame sequences
+and four relay permission renewals. Endpoint stages separate request arrival, dispatch,
 local response and final flush. Renewal stages identify expired permission and
-resumption after a fresh proof. These samples do not contain application data.
-If endpoint permission expires between dispatch and readiness, the bound channel
-waits for renewed permission within its original limits. Closed permission still
+resumption after a fresh proof. Each endpoint activation also reports its first
+64 permission renewals, including old and new boot-time expiry and fixed failure
+codes. These samples do not contain application data.
+Before announcing readiness, an endpoint refreshes permission that is too close
+to expiry for its measured renewal budget. If permission expires between dispatch
+and readiness, the bound channel waits for renewal within its original limits. Closed permission still
 refuses. Sampled readiness stages distinguish binding, byte-budget and write failures.
 
 Connection limits bound resources; they do not guarantee concurrent throughput.

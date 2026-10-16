@@ -39,6 +39,9 @@ impl Fixture {
         Self::with_operator_separation(true)
     }
     fn with_operator_separation(separate: bool) -> Self {
+        Self::with_route_transport(separate, None)
+    }
+    fn with_route_transport(separate: bool, relay: Option<(u8, Vec<u8>)>) -> Self {
         let f = deployment::Fixture::with_actions(vec![0, 6, 10, 11, 12, 13, 26]);
         let governance = Governance::parse(N, I, &f.records).unwrap();
         let root = governance
@@ -65,8 +68,16 @@ impl Fixture {
             .into_iter()
             .find(|r| r.kind == 102 && r.id == [170; 32])
             .unwrap();
-        let profiles =
-            [0, 1].map(|index| Self::admit(&mut records, &f.reservations, &root, index, separate));
+        let profiles = [0, 1].map(|index| {
+            Self::admit(
+                &mut records,
+                &f.reservations,
+                &root,
+                index,
+                separate,
+                relay.as_ref().filter(|_| index == 0),
+            )
+        });
         Self {
             records,
             reserved: f.reservations,
@@ -83,9 +94,10 @@ impl Fixture {
         grant: &VersionRef,
         index: u8,
         separate: bool,
+        reserved_transport: Option<&(u8, Vec<u8>)>,
     ) -> RegisteredProfile {
         let service = 160 + index;
-        let transport = 110 + index;
+        let transport = reserved_transport.map_or(110 + index, |(seed, _)| *seed);
         let operator = 90 + index * 2 * u8::from(separate);
         let mut manifest = deployment::manifest();
         manifest.deployment = [60 + index; 32];
@@ -98,7 +110,9 @@ impl Fixture {
         manifest.endpoints.retain(|e| e.endpoint_id == [85; 32]);
         manifest.endpoints[0].service_key = public(service);
         manifest.endpoints[0].transport_key = public(transport);
-        manifest.endpoints[0].leaf_der = deployment::leaf(transport);
+        manifest.endpoints[0].leaf_der = reserved_transport
+            .map(|(_, leaf)| leaf.clone())
+            .unwrap_or_else(|| deployment::leaf(transport));
         manifest.endpoints[0].port += u16::from(index);
         let consent = wire::sign_envelope(
             &manifest.unsigned_consent(0).unwrap(),
@@ -178,7 +192,13 @@ impl Fixture {
             consent: registration.consent,
             endpoint: endpoint.endpoint_id,
             identity: Identity {
-                service: if index == 0 { RELAY } else { DESTINATION },
+                service: if reserved_transport.is_some() {
+                    [0x12; 32]
+                } else if index == 0 {
+                    RELAY
+                } else {
+                    DESTINATION
+                },
                 server_name: "route.invalid".into(),
                 transport_key: public(transport),
                 leaf_der: endpoint.leaf_der.clone(),
@@ -656,6 +676,86 @@ fn certified_attachment_lookup_covers_current_relay_and_endpoint() {
         None,
     );
     assert_eq!(f.request(command, 160, None).2.code, 3);
+}
+
+#[test]
+fn registered_route_merges_immutable_transport_roots_after_lookup_projection() {
+    use std::{fs, os::unix::fs::PermissionsExt, process::Command as Process};
+    let leaf = |seed: u8| {
+        let path = std::env::temp_dir().join(format!(
+            "HyperNetReservedRoute{}",
+            hex::encode(crate::route_protocol::random().unwrap())
+        ));
+        fs::create_dir(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut secret = vec![
+            0x30, 0x2e, 0x02, 0x01, 0, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04,
+            0x20,
+        ];
+        secret.extend([seed; 32]);
+        fs::write(path.join("Key.der"), secret).unwrap();
+        let output = Process::new("openssl")
+            .args(["req", "-x509", "-keyform", "DER", "-key"])
+            .arg(path.join("Key.der"))
+            .args(["-outform", "DER", "-out"])
+            .arg(path.join("Leaf.der"))
+            .args(["-days", "1", "-subj", "/CN=HyperNetReservedRoute"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let bytes = fs::read(path.join("Leaf.der")).unwrap();
+        fs::remove_dir_all(path).unwrap();
+        bytes
+    };
+    let mut f = Fixture::with_route_transport(true, Some((9, leaf(9))));
+    let profile = f.profiles[0].clone();
+    let service = profile.identity.service;
+    f.apply(
+        Command::Register {
+            profile: Box::new(profile.clone()),
+        },
+        5,
+        Some(f.root.clone()),
+    );
+    let decision = f.request(Command::Lookup { service }, 160, None).2;
+    assert_eq!(decision.code, 0);
+    let value = decision.value.array(5).unwrap();
+    let cached = value[4].array(4).unwrap()[2]
+        .list(64)
+        .unwrap()
+        .iter()
+        .map(|v| v.bytes().unwrap().to_vec())
+        .collect::<Vec<_>>();
+    assert!(
+        Governance::record_versions(N, I, &cached)
+            .unwrap()
+            .iter()
+            .all(|r| r.kind != 131)
+    );
+    assert!(Index::parse(&cached, &f.reserved, N, I).is_err());
+    let bootstrap = crate::trust_bootstrap::check(&f.bootstrap, true, 1000).unwrap();
+    let retained =
+        crate::route_authority::registered(&bootstrap, &f.state, &cached, service, 5000).unwrap();
+    assert_eq!(retained.envelope, profile.envelope);
+
+    let changed = Fixture::with_route_transport(true, Some((10, leaf(10))));
+    assert_eq!(
+        changed
+            .request(
+                Command::Register {
+                    profile: Box::new(changed.profiles[0].clone()),
+                },
+                5,
+                Some(changed.root.clone()),
+            )
+            .2
+            .code,
+        3
+    );
+    assert!(
+        crate::route_authority::registered(&bootstrap, &f.state, &changed.records, service, 5000,)
+            .is_err()
+    );
 }
 
 #[test]

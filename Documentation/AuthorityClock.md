@@ -29,6 +29,13 @@ HyperNet authority-clock monitor --directory /Private/Clock
 
 `observe` publishes one observation. `status` reports current readiness.
 `monitor` refreshes observations until stopped and reports readiness changes.
+Each change is one JSON record with `state` and a boot-relative `bootMs` timestamp.
+Unavailable records include a fixed `reason`; probe failures also include
+`probeElapsedMs` and, when calculated, `maximumErrorMs`. Unavailable measurements
+use `null`. Records omit dependency error text, paths and raw source reports.
+Query failures identify the fixed query step in `queryPhase` and report a typed
+`queryFailure` when available. An untyped subprocess timeout or exit failure is
+`UnknownQueryFailure`; the monitor does not infer causes from error text.
 Only one monitor may own the directory at a time. A failed measurement does not
 extend the previous observation's validity. Stopping the monitor therefore makes
 its observation unusable after its original one-second lifetime.

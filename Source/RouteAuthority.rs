@@ -29,6 +29,44 @@ fn b(v: &[u8]) -> V {
 fn random() -> Result<Digest> {
     crate::route_protocol::random()
 }
+pub(crate) fn registered(
+    bootstrap: &crate::trust_bootstrap::Verified,
+    state: &domains::State,
+    records: &[Vec<u8>],
+    service: Digest,
+    now: u64,
+) -> Result<routes::RegisteredProfile> {
+    let selected = routes::Service::parse(
+        &state.record(165, service)?.payload,
+        state.network,
+        state.incarnation,
+    )?;
+    ensure!(!selected.withdrawn, "route service has been withdrawn");
+    let index = crate::authority_deployment_records::Index::parse(
+        &result::merge(bootstrap, records)?,
+        &Reservations(bootstrap.reservations().to_vec()),
+        state.network,
+        state.incarnation,
+    )?;
+    let deployment = index
+        .deployments
+        .get(&selected.profile.deployment)
+        .context("Route deployment admission is absent")?;
+    ensure!(
+        !index.withdrawals.contains_key(&deployment.deployment),
+        "Route deployment has been withdrawn"
+    );
+    let validity = crate::authority_operational_consent::validity(
+        &deployment.manifest,
+        &selected.profile.manifest,
+        selected.profile.validity,
+    )?;
+    ensure!(
+        validity.0 <= now && now < validity.1,
+        "Route service is outside current operational consent"
+    );
+    Ok(selected.profile)
+}
 pub struct Client<'a> {
     config: &'a Config,
     guard: &'a Guard,
@@ -500,37 +538,7 @@ impl<'a> Client<'a> {
     }
     fn registered(&self, service: Digest) -> Result<routes::RegisteredProfile> {
         let (state, records) = self.disk.context();
-        let selected = routes::Service::parse(
-            &state.record(165, service)?.payload,
-            state.network,
-            state.incarnation,
-        )?;
-        ensure!(!selected.withdrawn, "route service has been withdrawn");
-        let index = crate::authority_deployment_records::Index::parse(
-            records,
-            &Reservations(self.guard.bootstrap.reservations().to_vec()),
-            state.network,
-            state.incarnation,
-        )?;
-        let deployment = index
-            .deployments
-            .get(&selected.profile.deployment)
-            .context("Route deployment admission is absent")?;
-        ensure!(
-            !index.withdrawals.contains_key(&deployment.deployment),
-            "Route deployment has been withdrawn"
-        );
-        let validity = crate::authority_operational_consent::validity(
-            &deployment.manifest,
-            &selected.profile.manifest,
-            selected.profile.validity,
-        )?;
-        let now = self.now()?;
-        ensure!(
-            validity.0 <= now && now < validity.1,
-            "Route service is outside current operational consent"
-        );
-        Ok(selected.profile)
+        registered(&self.guard.bootstrap, state, records, service, self.now()?)
     }
     pub fn own(&mut self) -> Result<()> {
         let own = self.lookup(self.config.profile.identity.service)?;
