@@ -313,6 +313,14 @@ Shutdown and final journal-reopen markers distinguish protocol shutdown from
 validation of the stopped journal. These observations do not alter deadlines,
 proof requirements or admission limits.
 
+Envelope signature counters in numeric activity diagnostics describe strict
+verification attempts, verification time, cache lookups, hits and evictions.
+They cover the synchronous turn's thread and contain no payloads or identifiers.
+Queued-proof classification has its own non-overlapping synchronous turn, including
+inputs that are deferred or do not form a batch.
+These timings can overlap application-state parsing; they must not be added to
+other overlapping timings as independent costs.
+
 Before a checkpoint is available, requested repair can walk a longer certified
 branch by importing smaller complete QC-rooted subclosures. It keeps the original
 target and re-fetches transient upper records as needed, without exceeding the

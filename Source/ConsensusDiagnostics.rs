@@ -209,6 +209,7 @@ impl Code {
 }
 #[derive(Clone, Copy)]
 pub(super) enum Stage {
+    Classification,
     LocalIngress,
     Restore,
     Peer,
@@ -221,6 +222,7 @@ pub(super) enum Stage {
 impl Stage {
     fn name(self) -> &'static str {
         match self {
+            Self::Classification => "Classification",
             Self::LocalIngress => "LocalIngress",
             Self::Restore => "Restore",
             Self::Peer => "Peer",
@@ -315,6 +317,26 @@ impl Activity {
             .storage
             .certificate_cache_hits
             .saturating_add(storage.certificate_cache_hits);
+        self.storage.envelope_signature_calls = self
+            .storage
+            .envelope_signature_calls
+            .saturating_add(storage.envelope_signature_calls);
+        self.storage.envelope_signature_ns = self
+            .storage
+            .envelope_signature_ns
+            .saturating_add(storage.envelope_signature_ns);
+        self.storage.envelope_cache_lookups = self
+            .storage
+            .envelope_cache_lookups
+            .saturating_add(storage.envelope_cache_lookups);
+        self.storage.envelope_cache_hits = self
+            .storage
+            .envelope_cache_hits
+            .saturating_add(storage.envelope_cache_hits);
+        self.storage.envelope_cache_evictions = self
+            .storage
+            .envelope_cache_evictions
+            .saturating_add(storage.envelope_cache_evictions);
         self.storage.state_parse_calls = self
             .storage
             .state_parse_calls
@@ -366,6 +388,11 @@ impl Activity {
             "certificateSignatureCalls": self.storage.certificate_signature_calls,
             "certificateSignatureNs": self.storage.certificate_signature_ns,
             "certificateCacheHits": self.storage.certificate_cache_hits,
+            "envelopeSignatureCalls": self.storage.envelope_signature_calls,
+            "envelopeSignatureNs": self.storage.envelope_signature_ns,
+            "envelopeCacheLookups": self.storage.envelope_cache_lookups,
+            "envelopeCacheHits": self.storage.envelope_cache_hits,
+            "envelopeCacheEvictions": self.storage.envelope_cache_evictions,
             "stateParseCalls": self.storage.state_parse_calls,
             "stateParseNs": self.storage.state_parse_ns,
             "stateCacheHits": self.storage.state_cache_hits,
@@ -428,6 +455,10 @@ impl Diagnostics {
         if let Ok(mut phases) = self.phases.lock() {
             phases.mark(node, phase, Instant::now());
         }
+    }
+    #[cfg(test)]
+    pub(super) fn signature_lookups(&self) -> u64 {
+        self.activity.lock().unwrap().storage.envelope_cache_lookups
     }
     #[cfg(test)]
     pub(super) fn has_phase(&self, node: &super::Node, phase: Phase) -> bool {
@@ -495,6 +526,11 @@ impl Diagnostics {
                 record["certificateSignatureCalls"] = storage.certificate_signature_calls.into();
                 record["certificateSignatureNs"] = storage.certificate_signature_ns.into();
                 record["certificateCacheHits"] = storage.certificate_cache_hits.into();
+                record["envelopeSignatureCalls"] = storage.envelope_signature_calls.into();
+                record["envelopeSignatureNs"] = storage.envelope_signature_ns.into();
+                record["envelopeCacheLookups"] = storage.envelope_cache_lookups.into();
+                record["envelopeCacheHits"] = storage.envelope_cache_hits.into();
+                record["envelopeCacheEvictions"] = storage.envelope_cache_evictions.into();
                 record["stateParseCalls"] = storage.state_parse_calls.into();
                 record["stateParseNs"] = storage.state_parse_ns.into();
                 record["stateCacheHits"] = storage.state_cache_hits.into();
@@ -726,6 +762,11 @@ mod tests {
             certificate_signature_calls: 3,
             certificate_signature_ns: 30,
             certificate_cache_hits: 4,
+            envelope_signature_calls: 1,
+            envelope_signature_ns: 2,
+            envelope_cache_lookups: 3,
+            envelope_cache_hits: 4,
+            envelope_cache_evictions: 5,
             state_parse_calls: 1,
             state_parse_ns: 2,
             state_cache_hits: 3,
@@ -758,6 +799,11 @@ mod tests {
         assert_eq!(record["certificateSignatureCalls"], 300);
         assert_eq!(record["certificateSignatureNs"], 3000);
         assert_eq!(record["certificateCacheHits"], 400);
+        assert_eq!(record["envelopeSignatureCalls"], 100);
+        assert_eq!(record["envelopeSignatureNs"], 200);
+        assert_eq!(record["envelopeCacheLookups"], 300);
+        assert_eq!(record["envelopeCacheHits"], 400);
+        assert_eq!(record["envelopeCacheEvictions"], 500);
         assert_eq!(record["stateParseCalls"], 100);
         assert_eq!(record["stateParseNs"], 200);
         assert_eq!(record["stateCacheHits"], 300);
@@ -778,6 +824,11 @@ mod tests {
         assert_eq!(next["journalCommits"], 0);
         assert_eq!(next["storageElapsedNs"], 0);
         assert_eq!(next["certificateSignatureCalls"], 0);
+        assert_eq!(next["envelopeSignatureCalls"], 0);
+        assert_eq!(next["envelopeSignatureNs"], 0);
+        assert_eq!(next["envelopeCacheLookups"], 0);
+        assert_eq!(next["envelopeCacheHits"], 0);
+        assert_eq!(next["envelopeCacheEvictions"], 0);
         assert_eq!(next["certificateSignatureNs"], 0);
         assert_eq!(next["certificateCacheHits"], 0);
         assert_eq!(next["stateParseCalls"], 0);

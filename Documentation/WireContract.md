@@ -165,6 +165,16 @@ carry their referenced parent/command/justification as bounded sidecars or obtai
 them through authenticated bounded retrieval. Missing dependencies prevent voting.
 An envelope digest never substitutes for a verified payload or chain.
 
+Successful strict Ed25519 verification may be reused from a bounded volatile
+cache keyed by the exact signature-message digest, public key and signature.
+The default implementation uses 4096 fixed process-wide slots; collisions evict
+entries and require strict verification again. Failed checks are never retained.
+Canonical decoding, envelope shape, signer limits/order and weak-key rejection
+still run on each call. Scope, key authority, expiry, generations, permissions
+and current policy remain separate checks on every use. Cached cryptographic
+validity grants no permission and cannot convert historical evidence into a
+current authorisation.
+
 The phase, persistence and view rules are in [AuthorityContract.md](AuthorityContract.md).
 A prepare QC or commit vote by itself does not certify an executed result.
 

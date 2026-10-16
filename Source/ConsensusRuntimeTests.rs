@@ -206,6 +206,12 @@ fn queued_peer_votes_publish_once_and_retain_fourth_signer_on_reopen() {
             responses.push((response, digest));
         }
         let first = events.remove(0);
+        let before = driver.diagnostics.signature_lookups();
+        assert!(driver.queued_evidence(&first).is_some());
+        assert!(
+            driver.diagnostics.signature_lookups() > before,
+            "Queue classification must retain its signature work before event processing"
+        );
         for event in events {
             sender
                 .try_send(event)

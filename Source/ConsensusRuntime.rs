@@ -363,6 +363,11 @@ impl Driver {
         let Event::Peer { sender, body, .. } = event else {
             return None;
         };
+        // Classification authenticates queued proofs before event processing.
+        // Its separate synchronous boundary also covers deferred and unbatched inputs.
+        let _turn =
+            self.diagnostics
+                .begin(diagnostics::Stage::Classification, self.engine.view(), None);
         self.engine.voting().ok()?;
         match peer::decode(self.config(), *sender, body).ok()? {
             Message::Vote(input) => {

@@ -18,6 +18,11 @@ pub(super) struct Summary {
     pub certificate_signature_calls: u64,
     pub certificate_signature_ns: u64,
     pub certificate_cache_hits: u64,
+    pub envelope_signature_calls: u64,
+    pub envelope_signature_ns: u64,
+    pub envelope_cache_lookups: u64,
+    pub envelope_cache_hits: u64,
+    pub envelope_cache_evictions: u64,
     pub state_parse_calls: u64,
     pub state_parse_ns: u64,
     pub state_cache_hits: u64,
@@ -35,10 +40,18 @@ thread_local! {
 // nest: a task can resume on another thread, and a nested guard would reset it.
 pub(super) fn reset() {
     COUNTERS.set(Summary::default());
+    crate::trust_wire::take_signature_statistics();
 }
 
 pub(super) fn take() -> Summary {
-    COUNTERS.replace(Summary::default())
+    let mut summary = COUNTERS.replace(Summary::default());
+    let signatures = crate::trust_wire::take_signature_statistics();
+    summary.envelope_signature_calls = signatures.strict_verifications;
+    summary.envelope_signature_ns = signatures.strict_verification_ns;
+    summary.envelope_cache_lookups = signatures.lookups;
+    summary.envelope_cache_hits = signatures.hits;
+    summary.envelope_cache_evictions = signatures.evictions;
+    summary
 }
 
 pub(super) fn journal_commit() {

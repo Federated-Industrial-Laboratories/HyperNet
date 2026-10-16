@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: MIT
 // Exact bounded CBOR records and purpose-separated bootstrap signatures.
 use anyhow::{Result, bail, ensure};
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
+
+#[path = "TrustSignatureCache.rs"]
+mod signature_cache;
+#[cfg(test)]
+#[path = "TrustSignatureTests.rs"]
+mod signature_tests;
 
 pub const MAXIMUM: usize = 262144;
 
@@ -250,7 +256,18 @@ pub fn sign_envelope(payload: &[u8], key: &SigningKey) -> Result<Vec<u8>> {
 }
 
 pub type SignedRecord = (Vec<u8>, Vec<([u8; 32], [u8; 64])>);
+pub(crate) fn take_signature_statistics() -> signature_cache::SignatureStatistics {
+    signature_cache::take_signature_statistics()
+}
+
 pub fn envelope(bytes: &[u8], maximum: usize) -> Result<SignedRecord> {
+    envelope_with_cache(bytes, maximum, signature_cache::global())
+}
+fn envelope_with_cache(
+    bytes: &[u8],
+    maximum: usize,
+    cache: &signature_cache::Cache,
+) -> Result<SignedRecord> {
     let value = decode(bytes)?;
     let record = value.array(4)?;
     ensure!(
@@ -271,9 +288,10 @@ pub fn envelope(bytes: &[u8], maximum: usize) -> Result<SignedRecord> {
             previous.is_none_or(|prior| prior < key),
             "repeated or unsorted signer"
         );
-        valid_key(&key)?.verify_strict(
+        cache.verify(
+            &valid_key(&key)?,
             &signature_message(payload, &key),
-            &Signature::from_bytes(&signature),
+            signature,
         )?;
         previous = Some(key);
         signatures.push((key, signature));
