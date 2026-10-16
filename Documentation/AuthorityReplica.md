@@ -193,7 +193,11 @@ proposal candidates while application catches up; speculative requests and new
 challenges remain eligible, and consensus view progression remains independent.
 Outstanding safety obligations or unavailable expiry evidence can defer reclamation.
 
-`Objects/` holds immutable node, command, certificate and executed-result bodies.
+`Objects/` holds immutable node, command, certificate, executed-result and
+application-state bodies. Current application, checkpoint and candidate roots
+name their exact state digest. Identical roots share one stored object and one
+allocation charge. Resolved state bytes remain shared in memory; journal
+transactions do not repeat those bodies.
 The journal contains their exact identities, hashes, lengths and allocation charges.
 The pending profile permits 4096 nodes, 20480 objects and 256 MiB; ordinary
 requests use at most 3584 nodes, 17920 objects and 224 MiB. The remaining capacity
@@ -206,7 +210,11 @@ must produce a finite capacity refusal. An inert command produces no reply bundl
 A128MiB maintenance allowance bounds reply bundles, archive transfers and
 staging. Journal storage is separate: each journal has at most224MiB encoded
 metadata and225MiB allocated bytes, plus its atomic replacement. Application
-states and checkpoint candidates are at most8MiB each. Allocation charges round up the object header and body to
+states and checkpoint candidates are at most8MiB each. Their unique objects use
+the existing pending object and byte limits. Before application execution, one
+complete maximum-size state allocation is reserved while old roots remain
+durable. A new checkpoint candidate aliases that same state object.
+Allocation charges round up the object header and body to
 at least 4096 bytes using the filesystem fragment size (at most 65536), plus a
 256-byte index charge. Unsupported allocation units or excess actual file blocks
 refuse publication. These are this storage profile's allocation limits, not a
@@ -221,6 +229,13 @@ a vote or application result until authenticated repair restores them. Pending
 checkpoint transfers pin their exact input closure; expiry releases those pins
 and durably collects unreferenced partial inputs. Preserve the complete
 journal directory, including `Objects/`, when retaining signer state.
+
+Signer snapshot format3 accepts only descriptor-backed state bodies. Inline-state
+snapshots from earlier internal formats are incompatible; no in-place conversion
+is provided. Never initialise over an existing signer directory or discard it to
+resolve this incompatibility. Package state compatibility must be established
+before activation. The private state-object kind is not a peer repair object;
+authorised checkpoint transfer retains its existing proof and chunk protocol.
 
 Use persistent storage that honors file and directory synchronization. Proposal
 persistence, scheduling and delivery must fit the one-second proposal admission

@@ -207,6 +207,16 @@ the signer. A checksum detects corruption; it does not detect an adversary
 restoring an internally consistent older snapshot. Do not represent ordinary
 backup restoration as rollback-proof storage.
 
+Application, certified-checkpoint and candidate state bodies are immutable
+objects referenced by their exact existing state digests. Shared roots retain
+one body and allocation charge. New objects reach durable storage before archive
+visibility and the atomic journal reference; collection follows that journal
+publication. Reopen resolves and verifies every state root before collection,
+including checkpoint, applied-result and execution-cursor bindings. Missing,
+altered or incompatible state objects refuse restart. Internal signer format3
+requires this representation and does not accept earlier inline-state layouts.
+Consensus records, state digests and checkpoint transfer formats are unchanged.
+
 A checkpoint binds its configuration, committed position/node, complete state
 digest, deterministic receipts, revoked generations, consumed invitations and
 required ancestry boundary. Three distinct eligible signers certify the exact

@@ -24,6 +24,7 @@ pub const ORDINARY_OBJECTS: usize = 17920;
 pub const ORDINARY_BYTES: u64 = 224 * 1024 * 1024;
 pub const MAX_RESULTS: usize = 64;
 pub const EXECUTION: u16 = 4096;
+pub const APPLICATION_STATE: u16 = 4098;
 const MAGIC: &[u8; 16] = b"HyperNetObject1\0";
 const HEADER: usize = 64;
 const INDEX: u64 = 256;
@@ -95,6 +96,60 @@ impl Object {
         self.raw = None;
     }
 }
+
+// State bodies remain shared in memory, while only their bounded immutable
+// descriptor is journalled. Deserialised roots must be resolved before use.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub(super) struct StateObject {
+    pub object: Object,
+    #[serde(skip)]
+    bytes: Arc<Vec<u8>>,
+}
+impl std::ops::Deref for StateObject {
+    type Target = Vec<u8>;
+    fn deref(&self) -> &Self::Target {
+        &self.bytes
+    }
+}
+impl StateObject {
+    pub fn staged(store: &Store, bytes: Vec<u8>) -> Result<Self> {
+        crate::trust_wire::decode_state(&bytes)?;
+        let bytes = Arc::new(bytes);
+        let object = store.staged_shared(
+            APPLICATION_STATE,
+            crate::trust_wire::digest(&bytes),
+            bytes.clone(),
+        )?;
+        Ok(Self { object, bytes })
+    }
+    pub fn resolve(&mut self, store: &Store, known: &mut BTreeMap<String, Self>) -> Result<()> {
+        ensure!(
+            self.object.kind == APPLICATION_STATE,
+            "Application state object kind differs"
+        );
+        let key = self.object.key();
+        if let Some(prior) = known.get(&key) {
+            ensure!(
+                self.object.hash == prior.object.hash
+                    && self.object.len == prior.object.len
+                    && self.object.charge == prior.object.charge,
+                "Aliased application state descriptors differ"
+            );
+            self.bytes = prior.bytes.clone();
+        } else {
+            let bytes = store.read(&self.object)?;
+            ensure!(
+                crate::trust_wire::digest(&bytes) == self.object.identity,
+                "Application state object identity differs"
+            );
+            crate::trust_wire::decode_state(&bytes)?;
+            self.bytes = bytes;
+            known.insert(key, self.clone());
+        }
+        Ok(())
+    }
+}
 pub fn maximum(kind: u16) -> Result<usize> {
     Ok(match kind {
         14 => 1024,
@@ -102,6 +157,7 @@ pub fn maximum(kind: u16) -> Result<usize> {
         22 => 98303,
         super::inputs::STORAGE_KIND => crate::authority_objects::PAGE_BUNDLE_BYTES,
         EXECUTION => super::peer::MAX_PAYLOAD,
+        APPLICATION_STATE => super::checkpoint::MAX_STATE,
         _ => anyhow::bail!("Unsupported stored object kind"),
     })
 }
@@ -182,13 +238,20 @@ impl Store {
             !bytes.is_empty() && bytes.len() <= maximum(kind)?,
             "Object exceeds its kind bound"
         );
+        self.staged_shared(kind, identity, Arc::new(bytes.to_vec()))
+    }
+    fn staged_shared(&self, kind: u16, identity: Digest, bytes: Arc<Vec<u8>>) -> Result<Object> {
+        ensure!(
+            !bytes.is_empty() && bytes.len() <= maximum(kind)?,
+            "Object exceeds its kind bound"
+        );
         Ok(Object {
             kind,
             identity,
-            hash: Sha256::digest(bytes).into(),
+            hash: Sha256::digest(bytes.as_slice()).into(),
             len: bytes.len().try_into()?,
             charge: self.charge(bytes.len())?,
-            raw: Some(Arc::new(bytes.to_vec())),
+            raw: Some(bytes),
         })
     }
     fn validate_body(&self, object: &Object, raw: &[u8]) -> Result<()> {

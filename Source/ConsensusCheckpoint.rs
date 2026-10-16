@@ -33,7 +33,7 @@ pub fn chunk(input: &[u8]) -> Result<(Digest, usize, usize, Vec<u8>)> {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Candidate {
-    pub state: Vec<u8>,
+    pub state: storage::StateObject,
     pub share: Vec<u8>,
     pub deciding: Digest,
     pub target: Digest,
@@ -41,7 +41,7 @@ pub(super) struct Candidate {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Certified {
-    pub state: Vec<u8>,
+    pub state: storage::StateObject,
     pub proof: Vec<u8>,
 }
 pub fn verified(config: &Configuration, proof: &[u8]) -> Result<history::ValidatedCheckpoint> {
@@ -282,6 +282,10 @@ impl Engine {
             "Transferred checkpoint state or archive differs"
         );
         wire::decode_state(state)?;
+        ensure!(
+            Self::state_reservation(&self.snapshot)?,
+            "Checkpoint state allocation exhausted"
+        );
         validate(state, c.height())?;
         self.input_reader()?.verify(references)?;
         ensure!(
@@ -316,14 +320,14 @@ impl Engine {
         if committed.height < c.height() {
             next.committed = *c.node();
         }
-        next.application = state.to_vec();
+        next.application = storage::StateObject::staged(objects(&next)?, state.to_vec())?;
         next.inputs.set_application(references)?;
         next.inputs.checkpoint(wire::digest(state), references)?;
         next.archive_size = c.height();
         next.archive_root = *c.head().root();
         next.checkpoint = Some(Certified {
             proof: proof.to_vec(),
-            state: state.to_vec(),
+            state: next.application.clone(),
         });
         next.candidates.retain(|h, _| *h > c.height());
         // An applied-state certificate permits state adoption, not a new
@@ -442,7 +446,7 @@ impl Engine {
         &self,
         next: &mut Snapshot,
         applied: &Node,
-        state: Vec<u8>,
+        state: storage::StateObject,
     ) -> Result<()> {
         if !applied.height.is_multiple_of(INTERVAL) {
             return Ok(());

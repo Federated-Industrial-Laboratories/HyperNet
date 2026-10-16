@@ -105,12 +105,12 @@ class Packages(unittest.TestCase):
             PackageTrust.trust_command(Bundle, argparse.Namespace(command='TrustInit',
                 trust_directory=args.trust_directory, public_key=args.public_key,
                 root_pin=PackageTrust.pin(Bundle.public_key(args.public_key)), root_generation=1,
-                version_floor='0.7.5', state_contract='HyperNet080Authority1'))
+                version_floor='0.7.5', state_contract='HyperNet080Authority2'))
         args.policy = self.directory / ('Target' + str(self.counter) + '.json')
         args.policy_signature = Path(str(args.policy) + '.sig')
         PackageTrust.authorise(Bundle, argparse.Namespace(archive=args.archive, signature=args.signature,
             public_key=args.public_key, signing_key=self.key, output=args.policy,
-            root_generation=1, sequence=1, version_floor='0.7.5', state_contract='HyperNet080Authority1',
+            root_generation=1, sequence=1, version_floor='0.7.5', state_contract='HyperNet080Authority2',
             not_before=int(time.time()) - 1, expires=int(time.time()) + 3600, ssh_keygen='/usr/bin/ssh-keygen'))
 
     def test_signature_namespace_pinned_key_and_private_copy_precede_parsing(self):
@@ -340,7 +340,8 @@ class OfflineUpdates(unittest.TestCase):
     def test_update_expiry_scope_contract_and_numeric_bounds_fail_closed(self):
         for changes in ({'expires': self.now}, {'notBefore': self.now + 30},
                         {'rootGeneration': 2}, {'rootPin': '0' * 64},
-                        {'stateContract': 'Other'}, {'product': 'Other'},
+                        {'stateContract': 'Other'}, {'stateContract': 'HyperNet080Authority1'},
+                        {'product': 'Other'},
                         {'architecture': 'Other'}, {'sequence': True},
                         {'sequence': 1 << 63}, {'archiveBytes': True},
                         {'versionFloor': '0.7.6'}, {'archiveSha256': '0' * 64}):
@@ -348,6 +349,9 @@ class OfflineUpdates(unittest.TestCase):
                 self.accept(self.policy(changes))
         self.assertEqual(self.state()['sequence'], 0)
         self.assertIsNone(self.state()['targetDigest'])
+        previous = dict(self.state(), stateContract='HyperNet080Authority1')
+        with self.assertRaisesRegex(ValueError, 'Unsupported package state contract'):
+            PackageTrust.validate_trust(Bundle, previous)
 
     def test_update_rechecks_expiry_at_floor_and_publication_boundaries(self):
         args = self.policy()

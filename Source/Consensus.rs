@@ -80,7 +80,7 @@ struct Snapshot {
     committed: Digest,
     commit_certificates: BTreeMap<String, Digest>,
     applied: Digest,
-    application: Vec<u8>,
+    application: storage::StateObject,
     executed: BTreeMap<String, application::StoredExecution>,
     incidents: Vec<[Vec<u8>; 2]>,
     quarantined: bool,
@@ -354,7 +354,7 @@ impl Engine {
         let store = storage::Store::open(directory, true)?;
         let mut snapshot = Snapshot {
             objects: Some(store.clone()),
-            version: 1,
+            version: 3,
             archive_size: 0,
             archive_root: archive::empty_root(),
             checkpoint: None,
@@ -388,7 +388,7 @@ impl Engine {
             committed: genesis_digest,
             commit_certificates: BTreeMap::new(),
             applied: genesis_digest,
-            application: initial_state,
+            application: storage::StateObject::staged(&store, initial_state)?,
             executed: BTreeMap::new(),
             incidents: Vec::new(),
             quarantined: false,
@@ -437,7 +437,9 @@ impl Engine {
         minimum_generation: u64,
     ) -> Result<Self> {
         let (journal, mut snapshot): (_, Snapshot) = Journal::open(directory, minimum_generation)?;
+        ensure!(snapshot.version == 3, "Unsupported signer snapshot format");
         snapshot.objects = Some(storage::Store::open(directory, false)?);
+        Self::resolve_states(&mut snapshot)?;
         let archive = archive::Archive::open(
             directory,
             configuration.scope.configuration,
@@ -1393,7 +1395,7 @@ impl Engine {
         let state = &self.snapshot;
         state.inputs.validate_metadata(objects(state)?)?;
         ensure!(
-            state.version == 1
+            state.version == 3
                 && state.configuration == self.configuration.bytes
                 && state.signer == self.key.verifying_key().to_bytes(),
             "Signer snapshot identity differs"
@@ -1605,7 +1607,7 @@ impl Engine {
                 &self.configuration,
                 &position,
                 &Execution {
-                    state: state.application.clone(),
+                    state: state.application.to_vec(),
                     output,
                 },
             )?;

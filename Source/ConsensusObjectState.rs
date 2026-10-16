@@ -4,6 +4,32 @@ use super::*;
 use std::collections::BTreeSet;
 
 impl Engine {
+    fn state_objects(state: &Snapshot) -> impl Iterator<Item = &storage::Object> {
+        let mut seen = BTreeSet::new();
+        std::iter::once(&state.application)
+            .chain(state.checkpoint.iter().map(|c| &c.state))
+            .chain(state.candidates.values().map(|c| &c.state))
+            .map(|state| &state.object)
+            .filter(move |object| seen.insert(object.key()))
+    }
+    pub(super) fn resolve_states(state: &mut Snapshot) -> Result<()> {
+        ensure!(
+            state.candidates.len() <= 2,
+            "State root count exceeds its bound"
+        );
+        let store = state
+            .objects
+            .clone()
+            .context("State object store unavailable")?;
+        let mut known = BTreeMap::new();
+        for root in std::iter::once(&mut state.application)
+            .chain(state.checkpoint.iter_mut().map(|c| &mut c.state))
+            .chain(state.candidates.values_mut().map(|c| &mut c.state))
+        {
+            root.resolve(&store, &mut known)?;
+        }
+        Ok(())
+    }
     pub(super) fn pending_objects(state: &Snapshot) -> impl Iterator<Item = &storage::Object> {
         state
             .nodes
@@ -11,33 +37,16 @@ impl Engine {
             .chain(state.commands.values())
             .chain(state.certificates.values())
             .chain(state.inputs.objects())
+            .chain(Self::state_objects(state))
     }
-    pub(super) fn object_budget(state: &Snapshot, ordinary: bool) -> Result<Vec<u8>> {
+    fn pending_allocation(state: &Snapshot) -> Result<(usize, u64)> {
         let store = objects(state)?;
-        let node_limit = if ordinary {
-            storage::ORDINARY_NODES
-        } else {
-            MAX_NODES
-        };
-        let object_limit = if ordinary {
-            storage::ORDINARY_OBJECTS
-        } else {
-            storage::MAX_OBJECTS
-        };
-        let byte_limit = if ordinary {
-            storage::ORDINARY_BYTES
-        } else {
-            storage::MAX_BYTES
-        };
-        ensure!(
-            state.nodes.len() <= node_limit,
-            "Pending node capacity exhausted"
-        );
         let (reserved_inputs, reserved_bytes) = state.inputs.reservation(store)?;
         let count = state.nodes.len()
             + state.commands.len()
             + state.certificates.len()
             + state.inputs.objects().count()
+            + Self::state_objects(state).count()
             + reserved_inputs;
         // Each retained node may acquire one certificate in each of three phases.
         // Reserve those future immutable objects now, not after signing its vote.
@@ -47,12 +56,9 @@ impl Engine {
             .checked_mul(3)
             .and_then(|n| n.checked_sub(state.certificates.len()))
             .context("Certificate reservation differs")?;
-        ensure!(
-            count
-                .checked_add(certificate_reserve)
-                .is_some_and(|n| n <= object_limit),
-            "Pending object capacity exhausted"
-        );
+        let count = count
+            .checked_add(certificate_reserve)
+            .context("Object count overflow")?;
         let mut charged = reserved_bytes;
         let mut keys = BTreeSet::new();
         for object in Self::pending_objects(state) {
@@ -72,6 +78,34 @@ impl Engine {
                     .context("Certificate reservation overflow")?,
             )
             .context("Object accounting overflow")?;
+        Ok((count, charged))
+    }
+    pub(super) fn state_reservation(state: &Snapshot) -> Result<bool> {
+        let (count, charged) = Self::pending_allocation(state)?;
+        let prospective = objects(state)?.charge(checkpoint::MAX_STATE)?;
+        Ok(count
+            .checked_add(1)
+            .is_some_and(|n| n <= storage::MAX_OBJECTS)
+            && charged
+                .checked_add(prospective)
+                .is_some_and(|n| n <= storage::MAX_BYTES))
+    }
+    pub(super) fn object_budget(state: &Snapshot, ordinary: bool) -> Result<Vec<u8>> {
+        let (node_limit, object_limit, byte_limit) = if ordinary {
+            (
+                storage::ORDINARY_NODES,
+                storage::ORDINARY_OBJECTS,
+                storage::ORDINARY_BYTES,
+            )
+        } else {
+            (MAX_NODES, storage::MAX_OBJECTS, storage::MAX_BYTES)
+        };
+        ensure!(
+            state.nodes.len() <= node_limit,
+            "Pending node capacity exhausted"
+        );
+        let (count, charged) = Self::pending_allocation(state)?;
+        ensure!(count <= object_limit, "Pending object capacity exhausted");
         ensure!(charged <= byte_limit, "Pending byte capacity exhausted");
         let started = std::time::Instant::now();
         let encoded = serde_json::to_vec(state)?;
@@ -142,6 +176,12 @@ impl Engine {
     }
     pub(super) fn unstage_objects(state: &mut Snapshot) {
         state.inputs.unstage();
+        for root in std::iter::once(&mut state.application)
+            .chain(state.checkpoint.iter_mut().map(|c| &mut c.state))
+            .chain(state.candidates.values_mut().map(|c| &mut c.state))
+        {
+            root.object.unstaged();
+        }
         for object in state
             .nodes
             .values_mut()
