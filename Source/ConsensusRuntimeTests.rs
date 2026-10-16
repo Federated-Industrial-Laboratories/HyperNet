@@ -1353,6 +1353,120 @@ fn committed_application_cursor_remains_ready_without_a_retry_tick() {
     assert!(!driver.application_ready);
 }
 
+#[tokio::test]
+async fn ready_application_and_continuous_ingress_both_progress_without_a_retry_tick() {
+    let (configuration, keys) = fixture();
+    let (_directories, mut engines) = fixtures::engines(&configuration, &keys);
+    let command = fixtures::request(&configuration, 73);
+    fixtures::enter(&configuration, &keys, &mut engines, 1);
+    let commit = fixtures::phases(&configuration, &mut engines, &command);
+    let mut engine = engines.remove(0);
+    engine.decide(&commit.bytes).unwrap();
+    let directory = Directory::new();
+    let mut driver = repair_driver(
+        engine,
+        &directory.0,
+        &keys,
+        configuration.voters[1],
+        ingress::Mailbox::new(),
+    );
+    driver.apply().unwrap();
+    assert_eq!(driver.engine.applied().unwrap().height, 0);
+    assert!(driver.application_ready);
+
+    let (events, mut receiver) = mpsc::channel(MAX_EVENTS);
+    let (stop, mut shutdown) = watch::channel(false);
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(std::future::pending::<Result<()>>());
+    // Isolate ready work: neither a retry tick nor another Commit can apply it.
+    let mut interval =
+        tokio::time::interval_at(Instant::now() + Duration::from_secs(3600), RETRANSMIT);
+    let mut pending = None;
+    let request = wire::encode(&V::Array(vec![
+        V::Uint(41),
+        V::Uint(1),
+        configuration.scope.value(),
+        V::Uint(5),
+        V::Bytes(wire::encode(&V::Array(vec![])).unwrap()),
+    ]))
+    .unwrap();
+    let mut responses = Vec::new();
+    let mut answered = 0;
+    for _ in 0..MAX_EVENTS {
+        while events.capacity() > 0 {
+            let (answer, response) = oneshot::channel();
+            events
+                .try_send(Event::Local {
+                    body: request.clone(),
+                    answer,
+                    queued: Instant::now(),
+                })
+                .unwrap_or_else(|_| panic!("Ingress capacity changed"));
+            responses.push(response);
+        }
+        assert!(!receiver.is_empty());
+        assert!(
+            driver
+                .turn(
+                    &mut receiver,
+                    &mut pending,
+                    &mut shutdown,
+                    &mut tasks,
+                    &mut interval
+                )
+                .await
+                .unwrap()
+        );
+        responses.retain_mut(|response| match response.try_recv() {
+            Ok(bytes) => {
+                let reply = wire::decode(&bytes).unwrap();
+                assert_eq!(reply.array(9).unwrap()[0].uint().unwrap(), 59);
+                answered += 1;
+                false
+            }
+            Err(oneshot::error::TryRecvError::Empty) => true,
+            Err(error) => panic!("Ingress response lost: {error}"),
+        });
+        if driver.engine.applied().unwrap().height == 1 && !driver.application_ready && answered > 0
+        {
+            break;
+        }
+        // Every subsequent selection again starts with immediately ready ingress.
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(driver.engine.applied().unwrap().height, 1);
+    assert!(!driver.application_ready);
+    assert!(answered > 0);
+
+    while receiver.try_recv().is_ok() {}
+    {
+        use std::{future::Future, task::Context};
+        let mut quiet = std::pin::pin!(driver.turn(
+            &mut receiver,
+            &mut pending,
+            &mut shutdown,
+            &mut tasks,
+            &mut interval,
+        ));
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        assert!(quiet.as_mut().poll(&mut context).is_pending());
+    }
+    stop.send(true).unwrap();
+    assert!(
+        !driver
+            .turn(
+                &mut receiver,
+                &mut pending,
+                &mut shutdown,
+                &mut tasks,
+                &mut interval
+            )
+            .await
+            .unwrap()
+    );
+    tasks.abort_all();
+}
+
 #[test]
 fn early_execution_shares_recover_by_query_after_committed_request_suppression() {
     let (configuration, keys) = fixture();
@@ -1384,6 +1498,24 @@ fn early_execution_shares_recover_by_query_after_committed_request_suppression()
             inputs: Resolved::default(),
         })
         .unwrap();
+    let queried_at = Instant::now();
+    let unrelated = [251; 32];
+    for requested in [digest, unrelated] {
+        let pending = wire::decode(&driver.result_at(requested, queried_at).unwrap()).unwrap();
+        assert_eq!(pending.array(10).unwrap()[3].uint().unwrap(), 0);
+    }
+    let mut before_apply = std::collections::BTreeSet::new();
+    while let Some(bytes) = requests.try_pop().unwrap() {
+        if let Message::Query(requested) =
+            peer::decode(&configuration, configuration.voters[0], &bytes).unwrap()
+        {
+            before_apply.insert(requested);
+        }
+    }
+    assert_eq!(
+        before_apply,
+        std::collections::BTreeSet::from([digest, unrelated])
+    );
     for engine in &engines[..2] {
         let node = engine.applied().unwrap();
         let execution = engine.execution(node.digest().unwrap()).unwrap().unwrap();
@@ -1398,11 +1530,19 @@ fn early_execution_shares_recover_by_query_after_committed_request_suppression()
     assert!(driver.shares.is_empty());
     driver.apply().unwrap();
     assert_eq!(driver.engine.applied().unwrap().height, 0);
+    assert_eq!(driver.query_times.get(&digest), Some(&queried_at));
     assert!(!driver.requests.contains_key(&digest));
     assert!(driver.request_order.is_empty());
     driver.apply().unwrap();
     assert_eq!(driver.engine.applied().unwrap().height, 1);
-    let pending = wire::decode(&driver.result(digest).unwrap()).unwrap();
+    assert!(!driver.query_times.contains_key(&digest));
+    assert_eq!(driver.query_times.get(&unrelated), Some(&queried_at));
+    let pending = wire::decode(
+        &driver
+            .result_at(digest, queried_at + Duration::from_millis(1))
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(pending.array(10).unwrap()[3].uint().unwrap(), 0);
     let mut query = None;
     while let Some(bytes) = requests.try_pop().unwrap() {

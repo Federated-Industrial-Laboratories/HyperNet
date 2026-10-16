@@ -248,37 +248,19 @@ pub async fn serve(
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut pending = None;
     let result = loop {
-        tokio::select! {
-            change = shutdown.changed() => {
-                if change.is_err() || *shutdown.borrow() {
-                    diagnostics.emit(diagnostics::Code::ShutdownObserved, diagnostics::Stage::Shutdown, Duration::ZERO, driver.engine.view());
-                    break Ok(());
-                }
-            }
-            ended = tasks.join_next() => { break Err(anyhow::anyhow!("Replica transport task stopped: {}", ended.is_some())); }
-            event = async {
-                if let Some(event) = pending.take() { Some(event) } else { receiver.recv().await }
-            } => {
-                let Some(event) = event else { break Err(anyhow::anyhow!("Replica event channel closed")); };
-                match driver.queued_event(event, &mut receiver) {
-                    Ok(deferred) => pending = deferred,
-                    Err(error) => break Err(error),
-                }
-            }
-            _ = tokio::task::yield_now(), if driver.application_ready => {
-                {
-                    let _turn = diagnostics.begin(diagnostics::Stage::Apply, driver.engine.view(), None);
-                    if let Err(error) = driver.apply() { break Err(error); }
-                }
-                if let Err(error) = driver.drain_turn() { break Err(error); }
-            }
-            _ = interval.tick() => {
-                {
-                    let _turn = diagnostics.begin(diagnostics::Stage::Tick, driver.engine.view(), None);
-                    if let Err(error) = driver.tick() { break Err(error); }
-                }
-                if let Err(error) = driver.drain_turn() { break Err(error); }
-            }
+        match driver
+            .turn(
+                &mut receiver,
+                &mut pending,
+                &mut shutdown,
+                &mut tasks,
+                &mut interval,
+            )
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => break Ok(()),
+            Err(error) => break Err(error),
         }
     };
     tasks.abort_all();
@@ -286,6 +268,50 @@ pub async fn serve(
     result
 }
 impl Driver {
+    async fn turn(
+        &mut self,
+        receiver: &mut mpsc::Receiver<Event>,
+        pending: &mut Option<Event>,
+        shutdown: &mut watch::Receiver<bool>,
+        tasks: &mut tokio::task::JoinSet<Result<()>>,
+        interval: &mut tokio::time::Interval,
+    ) -> Result<bool> {
+        tokio::select! {
+            change = shutdown.changed() => {
+                if change.is_err() || *shutdown.borrow() {
+                    self.diagnostics.emit(diagnostics::Code::ShutdownObserved, diagnostics::Stage::Shutdown, Duration::ZERO, self.engine.view());
+                    return Ok(false);
+                }
+            }
+            ended = tasks.join_next() => {
+                anyhow::bail!("Replica transport task stopped: {}", ended.is_some());
+            }
+            event = async {
+                if let Some(event) = pending.take() { Some(event) } else { receiver.recv().await }
+            } => {
+                let event = event.context("Replica event channel closed")?;
+                *pending = self.queued_event(event, receiver)?;
+            }
+            _ = async {}, if self.application_ready => {
+                {
+                    let _turn = self.diagnostics.begin(diagnostics::Stage::Apply, self.engine.view(), None);
+                    self.apply()?;
+                }
+                self.drain_turn()?;
+                // Yield after the selected bounded turn. A yield used as a
+                // readiness condition can be cancelled by continuously ready ingress.
+                tokio::task::yield_now().await;
+            }
+            _ = interval.tick() => {
+                {
+                    let _turn = self.diagnostics.begin(diagnostics::Stage::Tick, self.engine.view(), None);
+                    self.tick()?;
+                }
+                self.drain_turn()?;
+            }
+        }
+        Ok(true)
+    }
     fn queued_evidence(&self, event: &Event) -> Option<(EvidenceStatement, Vec<u8>)> {
         let Event::Peer { sender, body, .. } = event else {
             return None;
@@ -1169,6 +1195,9 @@ impl Driver {
         if let super::application::Turn::Result(node, record) = progress {
             let command = node.command.context("Applied result command missing")?;
             self.remove_request(&command);
+            // Earlier replies may have arrived before this exact execution was
+            // durable. New progress permits one prompt recovery query.
+            self.query_times.remove(&command);
             self.broadcast(Message::Execution(
                 node.encode()?,
                 record.attestation,
