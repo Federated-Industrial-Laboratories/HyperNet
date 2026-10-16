@@ -165,6 +165,7 @@ fn repair_driver(
         query_times: BTreeMap::new(),
         diagnostics: diagnostics::Diagnostics::new().0,
         shares: BTreeMap::new(),
+        early_execution: None,
         repairs: BTreeMap::new(),
         pending_votes: BTreeMap::new(),
         checkpoint_votes: BTreeMap::new(),
@@ -1329,9 +1330,9 @@ fn committed_unapplied_requests_stop_gossip_without_consuming_alternatives() {
     assert!(drain_submissions().is_empty());
     driver.tick().unwrap();
     assert_eq!(drain_submissions(), alternatives);
-    // Discovery remains a separate bounded turn; voting progression and the
-    // remaining requests do not wait for application to finish.
-    assert_eq!(driver.engine.applied().unwrap().height, 0);
+    // The first direct child was discovered with its Commit. Voting progression
+    // and remaining requests do not wait for the later committed suffix.
+    assert_eq!(driver.engine.applied().unwrap().height, 1);
     assert!(
         driver
             .local
@@ -1375,13 +1376,10 @@ fn committed_application_cursor_remains_ready_without_a_retry_tick() {
         ingress::Mailbox::new(),
     );
     driver.apply().unwrap();
-    assert_eq!(driver.engine.applied().unwrap().height, 0);
-    assert!(driver.application_ready);
-    // The cooperative branch can finish the next bounded turn without gossip,
-    // an additional peer message or advancing any clock.
-    driver.apply().unwrap();
     assert_eq!(driver.engine.applied().unwrap().height, 1);
     assert!(driver.application_ready);
+    // A direct committed child already has durable discovery. The cooperative
+    // branch observes completion without gossip or advancing any clock.
     driver.apply().unwrap();
     assert!(!driver.application_ready);
 }
@@ -1403,7 +1401,9 @@ async fn ready_application_and_continuous_ingress_both_progress_without_a_retry_
         configuration.voters[1],
         ingress::Mailbox::new(),
     );
-    driver.apply().unwrap();
+    // Exercise the production readiness selection with the committed cursor
+    // ready, before any application callback has run.
+    driver.application_ready = true;
     assert_eq!(driver.engine.applied().unwrap().height, 0);
     assert!(driver.application_ready);
 
@@ -1502,6 +1502,11 @@ async fn ready_application_and_continuous_ingress_both_progress_without_a_retry_
 
 #[test]
 fn early_execution_shares_recover_by_query_after_committed_request_suppression() {
+    for retained in [true, false] {
+        early_execution_completion(retained);
+    }
+}
+fn early_execution_completion(retained: bool) {
     let (configuration, keys) = fixture();
     let (_directories, mut engines) = fixtures::engines(&configuration, &keys);
     let command = fixtures::request(&configuration, 70);
@@ -1565,16 +1570,18 @@ fn early_execution_shares_recover_by_query_after_committed_request_suppression()
             .unwrap();
     }
     assert!(driver.shares.is_empty());
-    driver.apply().unwrap();
-    assert_eq!(driver.engine.applied().unwrap().height, 0);
+    assert_eq!(driver.early_execution.as_ref().unwrap().claims.len(), 2);
     assert!(
         !driver
             .diagnostics
             .has_phase(&node, diagnostics::Phase::Executed)
     );
     assert_eq!(driver.query_times.get(&digest), Some(&queried_at));
-    assert!(!driver.requests.contains_key(&digest));
-    assert!(driver.request_order.is_empty());
+    if !retained {
+        // Volatile claims may be evicted or lost at restart. Ordinary recovery
+        // must still use the exact request and the original durable execution.
+        driver.early_execution = None;
+    }
     driver.apply().unwrap();
     assert_eq!(driver.engine.applied().unwrap().height, 1);
     assert!(
@@ -1582,11 +1589,13 @@ fn early_execution_shares_recover_by_query_after_committed_request_suppression()
             .diagnostics
             .has_phase(&node, diagnostics::Phase::Executed)
     );
-    assert!(
-        !driver
+    assert_eq!(
+        driver
             .diagnostics
-            .has_phase(&node, diagnostics::Phase::Quorum)
+            .has_phase(&node, diagnostics::Phase::Quorum),
+        retained
     );
+    assert!(driver.early_execution.is_none());
     assert!(!driver.query_times.contains_key(&digest));
     assert_eq!(driver.query_times.get(&unrelated), Some(&queried_at));
     let pending = wire::decode(
@@ -1595,7 +1604,10 @@ fn early_execution_shares_recover_by_query_after_committed_request_suppression()
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(pending.array(10).unwrap()[3].uint().unwrap(), 0);
+    assert_eq!(
+        pending.array(10).unwrap()[3].uint().unwrap(),
+        u64::from(retained)
+    );
     let mut query = None;
     while let Some(bytes) = requests.try_pop().unwrap() {
         match peer::decode(&configuration, configuration.voters[0], &bytes).unwrap() {
@@ -1604,33 +1616,40 @@ fn early_execution_shares_recover_by_query_after_committed_request_suppression()
             _ => {}
         }
     }
-    let query = query.expect("missing normal execution query");
-    for engine in engines.into_iter().take(2) {
-        let signer = engine.signer();
-        let responses = ingress::Mailbox::new();
-        let mut source = repair_driver(
-            engine,
-            &directory.0,
-            &keys,
-            configuration.voters[0],
-            responses.clone(),
-        );
-        source
-            .receive(configuration.voters[0], query.clone())
-            .unwrap();
-        let mut delivered = false;
-        while let Some(bytes) = responses.try_pop().unwrap() {
-            if let message @ Message::Execution(..) =
-                peer::decode(&configuration, signer, &bytes).unwrap()
-            {
-                driver.receive(signer, message).unwrap();
-                delivered = true;
-            }
-        }
+    if retained {
         assert!(
-            delivered,
-            "query did not regenerate the durable execution share"
+            query.is_none(),
+            "retained matching shares required a recovery query"
         );
+    } else {
+        let query = query.expect("missing normal execution query");
+        for engine in engines.into_iter().take(2) {
+            let signer = engine.signer();
+            let responses = ingress::Mailbox::new();
+            let mut source = repair_driver(
+                engine,
+                &directory.0,
+                &keys,
+                configuration.voters[0],
+                responses.clone(),
+            );
+            source
+                .receive(configuration.voters[0], query.clone())
+                .unwrap();
+            let mut delivered = false;
+            while let Some(bytes) = responses.try_pop().unwrap() {
+                if let message @ Message::Execution(..) =
+                    peer::decode(&configuration, signer, &bytes).unwrap()
+                {
+                    driver.receive(signer, message).unwrap();
+                    delivered = true;
+                }
+            }
+            assert!(
+                delivered,
+                "query did not regenerate the durable execution share"
+            );
+        }
     }
     let completed = wire::decode(&driver.result(digest).unwrap()).unwrap();
     assert!(
@@ -1660,6 +1679,262 @@ fn early_execution_shares_recover_by_query_after_committed_request_suppression()
         3
     );
     assert!(driver.requests.is_empty());
+}
+
+#[test]
+fn conflicting_early_execution_claim_does_not_poison_honest_quorum() {
+    let (configuration, keys) = fixture();
+    let (directories, mut engines) = fixtures::engines(&configuration, &keys);
+    let command = fixtures::request(&configuration, 70);
+    fixtures::enter(&configuration, &keys, &mut engines, 1);
+    let commit = fixtures::phases(&configuration, &mut engines, &command);
+    for (index, engine) in engines.iter_mut().enumerate() {
+        engine.decide(&commit.bytes).unwrap();
+        if index > 0 {
+            engine
+                .apply_committed(|_, c| Ok(fixtures::execution(&configuration, c)))
+                .unwrap();
+        }
+    }
+    let node = engines[0].committed().unwrap();
+    let mut driver = repair_driver(
+        engines.remove(0),
+        &directories[0].0,
+        &keys,
+        configuration.voters[1],
+        ingress::Mailbox::new(),
+    );
+    let wrong = altered_execution_claim(&configuration, &node, &command, &keys[3], vec![99]);
+    driver.attempted_proposal = driver.engine.view();
+    // The forwarding transport is not the attestation signer. Repeated relays
+    // of one Byzantine claim must not occupy another signer's slot.
+    for key in &keys[1..] {
+        assert_eq!(runtime_peer_event(&mut driver, key, &wrong), 0);
+    }
+    assert_eq!(driver.early_execution.as_ref().unwrap().claims.len(), 1);
+    for (index, engine) in engines.iter().take(2).enumerate() {
+        let record = engine.execution(commit.node).unwrap().unwrap();
+        let message = Message::Execution(node.encode().unwrap(), record.attestation, record.result);
+        assert_eq!(
+            runtime_peer_event(&mut driver, &keys[index + 1], &message),
+            0
+        );
+    }
+    assert_eq!(driver.early_execution.as_ref().unwrap().claims.len(), 3);
+    assert!(driver.shares.is_empty());
+    driver.apply().unwrap();
+    let complete = wire::decode(&driver.result(wire::digest(&command)).unwrap()).unwrap();
+    assert_eq!(complete.array(10).unwrap()[3].uint().unwrap(), 1);
+    let signers = &driver.shares[&commit.node].signatures;
+    assert_eq!(signers.len(), 3);
+    assert!(!signers.contains_key(&configuration.voters[3]));
+    assert!(driver.early_execution.is_none());
+}
+
+fn altered_execution_claim(
+    configuration: &Configuration,
+    node: &Node,
+    command: &[u8],
+    signer: &SigningKey,
+    body: Vec<u8>,
+) -> Message {
+    let execution = fixtures::execution(
+        configuration,
+        &Committed {
+            node: node.digest().unwrap(),
+            height: node.height,
+            evaluated_at: node.evaluated_at,
+            command: command.to_vec(),
+        },
+    );
+    let super::super::ExecutionOutput::Result {
+        result,
+        attestation,
+    } = execution.output
+    else {
+        panic!("Expected result");
+    };
+    let mut result = wire::decode(&result).unwrap().array(6).unwrap().to_vec();
+    result[5] = V::Bytes(wire::encode(&V::Bytes(body)).unwrap());
+    let result = wire::encode(&V::Array(result)).unwrap();
+    let mut attestation = wire::decode(&attestation)
+        .unwrap()
+        .array(23)
+        .unwrap()
+        .to_vec();
+    attestation[15] = V::Bytes(wire::digest(&result).to_vec());
+    Message::Execution(
+        node.encode().unwrap(),
+        wire::sign_envelope(&wire::encode(&V::Array(attestation)).unwrap(), signer).unwrap(),
+        result,
+    )
+}
+
+#[test]
+fn early_execution_claims_are_bounded_and_follow_only_the_committed_target() {
+    let (configuration, keys) = fixture();
+    let (directories, mut engines) = fixtures::engines(&configuration, &keys);
+    let command = fixtures::request(&configuration, 70);
+    fixtures::enter(&configuration, &keys, &mut engines, 1);
+    let first = fixtures::phases(&configuration, &mut engines, &command);
+    for engine in &mut engines {
+        engine.decide(&first.bytes).unwrap();
+    }
+    fixtures::enter(&configuration, &keys, &mut engines, 5);
+    let following = fixtures::request(&configuration, 71);
+    let second = fixtures::phases(&configuration, &mut engines, &following);
+    let mut driver = repair_driver(
+        engines.remove(0),
+        &directories[0].0,
+        &keys,
+        configuration.voters[1],
+        ingress::Mailbox::new(),
+    );
+    let node = driver.engine.committed().unwrap();
+    let next = driver.engine.known_node(&second.node).unwrap();
+    // The fixture already sent this view's proposal through all voting phases.
+    driver.attempted_proposal = driver.engine.view();
+    let generation = driver.engine.generation();
+    for key in &keys {
+        // Each independently signed claim fits the existing peer limit, even
+        // when all four result bodies are large and mutually inconsistent.
+        let message = altered_execution_claim(
+            &configuration,
+            &node,
+            &command,
+            key,
+            vec![key.verifying_key().as_bytes()[0]; peer::MAX_PAYLOAD - 4096],
+        );
+        assert_eq!(runtime_peer_event(&mut driver, &keys[1], &message), 0);
+    }
+    let early = driver.early_execution.as_ref().unwrap();
+    assert_eq!(early.claims.len(), 4);
+    assert_eq!(
+        early.bytes,
+        early
+            .claims
+            .values()
+            .map(|bytes| bytes.len())
+            .sum::<usize>()
+    );
+    assert!(early.bytes > 3 * peer::MAX_PAYLOAD && early.bytes <= MAX_EARLY_EXECUTION_BYTES);
+    let retained = early.bytes;
+    // Direct callers get the same size and nested-context checks as transport.
+    let Message::Execution(node_bytes, attestation, result) = altered_execution_claim(
+        &configuration,
+        &node,
+        &command,
+        &keys[1],
+        vec![0; peer::MAX_PAYLOAD],
+    ) else {
+        unreachable!()
+    };
+    assert!(
+        driver
+            .collect_share(node_bytes, attestation, result)
+            .is_err()
+    );
+    assert_eq!(driver.early_execution.as_ref().unwrap().bytes, retained);
+    let Message::Execution(node_bytes, attestation, result) = altered_execution_claim(
+        &configuration,
+        &node,
+        &command,
+        &SigningKey::from_bytes(&[99; 32]),
+        vec![0],
+    ) else {
+        unreachable!()
+    };
+    assert!(
+        driver
+            .collect_share(node_bytes, attestation, result)
+            .is_err()
+    );
+    assert_eq!(driver.early_execution.as_ref().unwrap().claims.len(), 4);
+    let future = altered_execution_claim(&configuration, &next, &following, &keys[1], vec![1]);
+    assert_eq!(runtime_peer_event(&mut driver, &keys[1], &future), 0);
+    assert_eq!(driver.early_execution.as_ref().unwrap().node, first.node);
+    assert_eq!(driver.engine.generation(), generation);
+    assert!(driver.repairs.is_empty() && driver.shares.is_empty());
+    driver.engine.decide(&second.bytes).unwrap();
+    assert_eq!(runtime_peer_event(&mut driver, &keys[1], &future), 0);
+    let early = driver.early_execution.as_ref().unwrap();
+    assert_eq!(early.node, second.node);
+    assert_eq!(early.claims.len(), 1);
+    assert!(early.bytes < retained);
+    let stale = altered_execution_claim(&configuration, &node, &command, &keys[2], vec![2]);
+    assert_eq!(runtime_peer_event(&mut driver, &keys[2], &stale), 0);
+    assert_eq!(driver.early_execution.as_ref().unwrap().node, second.node);
+    assert_eq!(driver.early_execution.as_ref().unwrap().claims.len(), 1);
+}
+
+#[test]
+fn failed_application_publication_does_not_promote_early_execution_claims() {
+    let (configuration, keys) = fixture();
+    let (directories, mut engines) = fixtures::engines(&configuration, &keys);
+    let command = fixtures::request(&configuration, 70);
+    fixtures::enter(&configuration, &keys, &mut engines, 1);
+    let commit = fixtures::phases(&configuration, &mut engines, &command);
+    for (index, engine) in engines.iter_mut().enumerate() {
+        engine.decide(&commit.bytes).unwrap();
+        if index > 0 {
+            engine
+                .apply_committed(|_, c| Ok(fixtures::execution(&configuration, c)))
+                .unwrap();
+        }
+    }
+    let node = engines[0].committed().unwrap();
+    let mailbox = ingress::Mailbox::new();
+    let mut driver = repair_driver(
+        engines.remove(0),
+        &directories[0].0,
+        &keys,
+        configuration.voters[1],
+        mailbox.clone(),
+    );
+    for engine in &engines[..2] {
+        let record = engine.execution(commit.node).unwrap().unwrap();
+        driver
+            .collect_share(node.encode().unwrap(), record.attestation, record.result)
+            .unwrap();
+    }
+    let generation = driver.engine.generation();
+    let pending = directories[0].0.join("SignerPending.bin");
+    std::os::unix::fs::symlink("Signer.bin", &pending).unwrap();
+    assert!(driver.apply().is_err());
+    assert_eq!(driver.engine.generation(), generation);
+    assert_eq!(driver.engine.archive.leaves().len(), 1);
+    assert!(driver.engine.execution(commit.node).unwrap().is_none());
+    assert!(driver.engine.active().is_err());
+    assert!(driver.shares.is_empty());
+    assert_eq!(driver.early_execution.as_ref().unwrap().claims.len(), 2);
+    assert!(
+        !driver
+            .diagnostics
+            .has_phase(&node, diagnostics::Phase::Quorum)
+    );
+    assert!(mailbox.try_pop().unwrap().is_none());
+    drop(driver);
+    std::fs::remove_file(pending).unwrap();
+    let engine = Engine::open(
+        &directories[0].0,
+        configuration.clone(),
+        keys[0].clone(),
+        generation,
+    )
+    .unwrap();
+    let mut driver = repair_driver(
+        engine,
+        &directories[0].0,
+        &keys,
+        configuration.voters[1],
+        mailbox,
+    );
+    assert!(driver.early_execution.is_none());
+    assert!(driver.engine.execution(commit.node).unwrap().is_none());
+    driver.apply().unwrap();
+    assert!(driver.engine.execution(commit.node).unwrap().is_some());
+    let pending = wire::decode(&driver.result(wire::digest(&command)).unwrap()).unwrap();
+    assert_eq!(pending.array(10).unwrap()[3].uint().unwrap(), 0);
 }
 
 #[test]
@@ -2119,6 +2394,7 @@ fn byzantine_unsigned_dependencies_cannot_fill_history_before_honest_progress() 
         assert_eq!(driver.engine.snapshot.nodes.len(), 1);
         assert!(driver.engine.snapshot.commands.is_empty());
         assert!(driver.repairs.is_empty());
+        assert!(driver.early_execution.is_none());
         assert!(driver.pending_votes.len() <= 1);
     }
     // Even the designated leader cannot publish a stream of commands before

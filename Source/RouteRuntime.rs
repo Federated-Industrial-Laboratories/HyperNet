@@ -1226,7 +1226,7 @@ async fn ordinary_requests(
         route_endpoint::validate_packet(scope.0, scope.1, scope.2, &request.packet)?;
         let deadline = request.session.deadline;
         let packet = request.packet.clone();
-        request = response_at(request, packet, permission.clone(), deadline, path).await?;
+        request = response_at(request, packet, scope.0, permission.clone(), deadline, path).await?;
     }
 }
 async fn response(
@@ -1239,6 +1239,7 @@ async fn response(
     response_at(
         request,
         packet,
+        protocol,
         permission,
         effect_deadline,
         application_path(protocol),
@@ -1248,6 +1249,7 @@ async fn response(
 async fn response_at(
     mut request: Request,
     packet: Vec<u8>,
+    protocol: u64,
     permission: route_io::Gate,
     effect_deadline: u64,
     path: &Path,
@@ -1287,8 +1289,14 @@ async fn response_at(
     )
     .await?;
     session.mark(Phase::ResponseFlushed);
+    // A Pending result is still an active exchange while its next poll crosses
+    // the relay. Keep renewal demand through this existing bounded read only.
+    // Terminal replies release it before an idle session waits for new work.
+    let pending = protocol == 1 && route_endpoint::authority_request_pending(&packet, &reply);
+    let activity = pending.then_some(activity);
+    let next = next_packet(request.session, permission).await;
     drop(activity);
-    next_packet(request.session, permission).await
+    next
 }
 struct EndpointPermission {
     gate: route_io::Gate,

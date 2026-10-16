@@ -1365,6 +1365,7 @@ impl Engine {
         if !extends(&self.configuration, next, qc.node, next.committed)? {
             return Ok(Decision::Conflict);
         }
+        self.stage_direct_application(next, qc)?;
         next.committed = qc.node;
         next.commit_certificates.insert(id(&qc.node), qc.digest());
         Ok(Decision::Advanced)

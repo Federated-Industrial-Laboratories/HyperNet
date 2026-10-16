@@ -36,6 +36,23 @@ fn reopen(engine: Engine, directory: &Path, key: &SigningKey) -> Engine {
     Engine::open(directory, config, key.clone(), generation).unwrap()
 }
 
+fn commit_votes(
+    config: &Configuration,
+    replicas: &mut [Engine],
+    mut votes: Vec<SignedVote>,
+) -> Vec<SignedVote> {
+    for _ in 0..2 {
+        let qc = Certificate::collect(config, &votes[..3]).unwrap();
+        votes = replicas
+            .iter_mut()
+            .map(|replica| {
+                SignedVote::parse(config, &replica.advance_phase(&qc.bytes).unwrap()).unwrap()
+            })
+            .collect();
+    }
+    votes
+}
+
 #[test]
 fn advance_retains_own_wish_and_entry_before_lost_broadcast() {
     for peers in [0, 2] {
@@ -167,6 +184,206 @@ fn collected_quorums_publish_next_vote_lock_and_decision_before_lost_reply() {
                 .collect();
         }
     }
+    let generation = target.generation();
+    let mut calls = 0;
+    assert!(matches!(
+        target
+            .apply_turn(|_, position| {
+                calls += 1;
+                Ok(tests::execution(&config, position))
+            })
+            .unwrap(),
+        application::Turn::Result(..)
+    ));
+    assert_eq!(calls, 1);
+    assert_eq!(target.generation(), generation + 1);
+    assert_eq!(target.applied().unwrap().height, 1);
+}
+
+#[test]
+fn direct_child_commit_publishes_reopenable_cursor_before_first_apply() {
+    for delivery in ["Decide", "Certificate", "Repair"] {
+        let (config, keys, directories, mut replicas, votes) = prepared();
+        let votes = commit_votes(&config, &mut replicas, votes);
+        let qc = Certificate::collect(&config, &votes[..3]).unwrap();
+        let mut target = replicas.pop().unwrap();
+        let before = target.generation();
+        match delivery {
+            "Decide" => target.decide(&qc.bytes).unwrap(),
+            "Certificate" => target.receive_certificate(&qc.bytes).unwrap(),
+            "Repair" => {
+                let reference = repair::Reference {
+                    kind: 12,
+                    digest: qc.digest(),
+                    signer: None,
+                };
+                let item = repair::Item {
+                    reference: reference.clone(),
+                    bytes: qc.bytes.clone(),
+                };
+                assert!(
+                    target
+                        .repair_import(&[reference], &[item])
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+            _ => unreachable!(),
+        }
+        // Repair first installs its verified object closure; the deciding
+        // publication itself also retains the ready application cursor.
+        assert_eq!(
+            target.generation(),
+            before + if delivery == "Repair" { 2 } else { 1 }
+        );
+        assert_eq!(target.snapshot.committed, qc.node);
+        assert_eq!(target.applied().unwrap().height, 0);
+        assert_eq!(
+            Engine::cursor_certificate(&target.snapshot),
+            Some(qc.digest())
+        );
+        assert!(target.execution(qc.node).unwrap().is_none());
+        target = reopen(target, &directories[3].0, &keys[3]);
+        target.validate_application_cursor().unwrap();
+
+        let generation = target.generation();
+        let mut calls = 0;
+        assert!(matches!(
+            target
+                .apply_turn(|_, position| {
+                    calls += 1;
+                    assert_eq!(position.node, qc.node);
+                    Ok(tests::execution(&config, position))
+                })
+                .unwrap(),
+            application::Turn::Result(..)
+        ));
+        assert_eq!(calls, 1);
+        assert_eq!(target.generation(), generation + 1);
+        target = reopen(target, &directories[3].0, &keys[3]);
+        assert_eq!(target.snapshot.applied, qc.node);
+        assert!(target.execution(qc.node).unwrap().is_some());
+        assert!(matches!(
+            target
+                .apply_turn(|_, _| anyhow::bail!("Completed command executed twice"))
+                .unwrap(),
+            application::Turn::Idle
+        ));
+    }
+}
+
+#[test]
+fn failed_direct_child_commit_exposes_no_cursor_or_application_callback() {
+    for delivery in ["Votes", "Certificate", "Decide"] {
+        let (config, keys, directories, mut replicas, votes) = prepared();
+        let votes = commit_votes(&config, &mut replicas, votes);
+        let qc = Certificate::collect(&config, &votes[..3]).unwrap();
+        let mut target = replicas.pop().unwrap();
+        if delivery == "Votes" {
+            assert!(target.receive_vote(&votes[0].envelope).unwrap().is_none());
+        }
+        let deliver = |target: &mut Engine| match delivery {
+            "Votes" => target.receive_vote(&votes[1].envelope).map(|_| ()),
+            "Certificate" => target.receive_certificate(&qc.bytes),
+            "Decide" => target.decide(&qc.bytes),
+            _ => unreachable!(),
+        };
+        let generation = target.generation();
+        let pending = directories[3].0.join("SignerPending.bin");
+        std::os::unix::fs::symlink("Signer.bin", &pending).unwrap();
+        assert!(deliver(&mut target).is_err());
+        assert_eq!(target.generation(), generation);
+        assert_eq!(target.committed().unwrap().height, 0);
+        assert!(target.snapshot.apply_cursor.is_none());
+        let mut calls = 0;
+        assert!(
+            target
+                .apply_turn(|_, position| {
+                    calls += 1;
+                    Ok(tests::execution(&config, position))
+                })
+                .is_err()
+        );
+        assert_eq!(calls, 0);
+        std::fs::remove_file(pending).unwrap();
+        assert!(deliver(&mut target).is_err());
+        target = reopen(target, &directories[3].0, &keys[3]);
+        assert!(target.snapshot.apply_cursor.is_none());
+        deliver(&mut target).unwrap();
+        assert_eq!(target.generation(), generation + 1);
+        assert!(matches!(
+            target
+                .apply_turn(|_, position| Ok(tests::execution(&config, position)))
+                .unwrap(),
+            application::Turn::Result(..)
+        ));
+    }
+}
+
+#[test]
+fn later_commit_preserves_cursor_and_longer_suffix_uses_bounded_discovery() {
+    let (config, keys, _directories, mut replicas, votes) = prepared();
+    let votes = commit_votes(&config, &mut replicas, votes);
+    let first = Certificate::collect(&config, &votes[..3]).unwrap();
+    // One replica already owns pending application work; another has only
+    // prepared the same ancestor when the later CommitQC arrives.
+    replicas[0].decide(&first.bytes).unwrap();
+    let cursor = serde_json::to_value(&replicas[0].snapshot.apply_cursor).unwrap();
+    tests::enter(&config, &keys, &mut replicas, 2);
+    let leader = config.member(&config.leader(2).unwrap()).unwrap();
+    replicas.swap(0, leader);
+    let second = tests::phases(&config, &mut replicas, &tests::request(&config, 76));
+    replicas.swap(0, leader);
+    for target in &mut replicas[..2] {
+        target.decide(&second.bytes).unwrap();
+        assert_eq!(target.committed().unwrap().height, 2);
+    }
+    assert_eq!(
+        serde_json::to_value(&replicas[0].snapshot.apply_cursor).unwrap(),
+        cursor
+    );
+    assert!(replicas[1].snapshot.apply_cursor.is_none());
+    let generation = replicas[1].generation();
+    let mut calls = 0;
+    assert!(matches!(
+        replicas[1]
+            .apply_turn(|_, _| {
+                calls += 1;
+                anyhow::bail!("Longer suffix executed before durable discovery")
+            })
+            .unwrap(),
+        application::Turn::Progress
+    ));
+    assert_eq!(calls, 0);
+    assert_eq!(replicas[1].generation(), generation + 1);
+    assert_eq!(
+        Engine::cursor_certificate(&replicas[1].snapshot),
+        Some(second.digest())
+    );
+    for expected in [first.node, second.node] {
+        assert!(matches!(
+            replicas[1]
+                .apply_turn(|_, position| {
+                    calls += 1;
+                    assert_eq!(position.node, expected);
+                    Ok(tests::execution(&config, position))
+                })
+                .unwrap(),
+            application::Turn::Result(..)
+        ));
+    }
+    assert_eq!(calls, 2);
+    assert!(matches!(
+        replicas[0]
+            .apply_turn(|_, position| {
+                assert_eq!(position.node, first.node);
+                Ok(tests::execution(&config, position))
+            })
+            .unwrap(),
+        application::Turn::Result(..)
+    ));
+    assert_eq!(replicas[0].applied().unwrap().height, 1);
+    assert_eq!(replicas[0].committed().unwrap().height, 2);
 }
 
 #[test]

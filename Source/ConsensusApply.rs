@@ -34,6 +34,36 @@ pub enum Turn {
     Result(Node, ExecutionRecord),
 }
 impl Engine {
+    pub(super) fn stage_direct_application(
+        &self,
+        next: &mut Snapshot,
+        qc: &Certificate,
+    ) -> Result<()> {
+        if next.apply_cursor.is_some() {
+            return Ok(());
+        }
+        let target = node(&self.configuration, next, &qc.node)?;
+        if target.parent != Some(next.applied) {
+            return Ok(());
+        }
+        let base = node(&self.configuration, next, &next.applied)?;
+        ensure!(
+            qc.phase == Phase::Commit && base.height.checked_add(1) == Some(target.height),
+            "Direct application cursor lacks its exact deciding child"
+        );
+        // This verified suffix reaches disk in the same publication as its
+        // deciding CommitQC. Execution still starts only from the durable cursor.
+        next.apply_cursor = Some(Cursor {
+            target: qc.node,
+            certificate: qc.digest(),
+            base: next.applied,
+            state: wire::digest(&next.application),
+            scan: next.applied,
+            reverse: vec![qc.node],
+            verified: true,
+        });
+        Ok(())
+    }
     #[cfg(test)]
     pub fn apply_turn(
         &mut self,

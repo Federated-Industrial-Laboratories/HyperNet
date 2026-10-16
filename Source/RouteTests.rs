@@ -851,6 +851,114 @@ async fn private_route_application_demand_renews_pending_work_and_ends_before_id
     assert!(application.await.unwrap_err().is_cancelled());
     fs::remove_dir_all(root).unwrap();
 }
+#[tokio::test]
+async fn private_authority_pending_poll_retains_demand_until_terminal_reply_or_disconnect() {
+    use crate::trust_wire::Value as V;
+    use std::os::{fd::AsRawFd, unix::fs::PermissionsExt};
+    let root = std::env::temp_dir().join(format!(
+        "HyperNetPending{}",
+        hex::encode(protocol::random().unwrap())
+    ));
+    files::create_directory(&root).unwrap();
+    let path = root.join("Control.sock");
+    let directory = files::private_directory(&root).unwrap();
+    let application = tokio::net::UnixListener::bind(
+        Path::new("/proc/self/fd")
+            .join(directory.as_raw_fd().to_string())
+            .join("Control.sock"),
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let scope = crate::authority_proof::Scope {
+        network: [1; 32],
+        incarnation: [2; 32],
+        configuration: [3; 32],
+        epoch: 1,
+    }
+    .value();
+    let digest = [7; 32];
+    let packet = wire::encode(&V::Array(vec![
+        V::Uint(41),
+        V::Uint(1),
+        scope.clone(),
+        V::Uint(1),
+        V::Bytes(digest.to_vec()),
+    ]))
+    .unwrap();
+    let reply = |status| {
+        wire::encode(&V::Array(vec![
+            V::Uint(42),
+            V::Uint(1),
+            scope.clone(),
+            V::Uint(status),
+            V::Uint(0),
+            V::Bytes(digest.to_vec()),
+            V::Null,
+            V::Null,
+            V::Null,
+            V::Array(vec![]),
+        ]))
+        .unwrap()
+    };
+    let replies = [reply(0), reply(2), reply(0)];
+    let expected = packet.clone();
+    let server_replies = replies.clone();
+    let application = tokio::spawn(async move {
+        for reply in server_replies {
+            let (mut stream, _) = application.accept().await.unwrap();
+            assert_eq!(
+                route_io::receive(&mut stream, wire::MAXIMUM).await.unwrap(),
+                expected
+            );
+            route_io::send(&mut stream, &reply).await.unwrap();
+        }
+    });
+    let (mut peer, session, gate, ready) = readiness_fixture(10000);
+    let permission = EndpointPermission {
+        gate: gate.clone(),
+        accepted_at: None,
+        renewals: 0,
+    };
+    gate.renew(crate::authority_challenge::boot_time_ms().unwrap() + 5000)
+        .unwrap();
+    let driver_gate = gate.clone();
+    let driver = tokio::spawn(async move {
+        let request = ready_session(session, ready, driver_gate.clone()).await?;
+        ordinary_requests(request, (1, [1; 32], [2; 32]), driver_gate, &path).await
+    });
+    route_io::receive(&mut peer, 256).await.unwrap();
+    for (index, reply) in replies.iter().enumerate() {
+        route_io::send(&mut peer, &packet).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), route_io::receive(&mut peer, 1024))
+                .await
+                .unwrap()
+                .unwrap(),
+            *reply
+        );
+        tokio::task::yield_now().await;
+        let pending = index != 1;
+        assert_eq!(gate.demanded(), pending);
+        assert_eq!(
+            permission.refresh_due(gate.expiry().unwrap(), 0).unwrap(),
+            pending
+        );
+    }
+    // A pending exchange may renew while the relay delays its next poll, but
+    // the existing bounded read still owns cancellation and idle expiry.
+    drop(peer);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), driver)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    assert!(!gate.demanded());
+    application.await.unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[derive(Default)]
 struct BlockWrites {
     blocked: std::sync::atomic::AtomicBool,

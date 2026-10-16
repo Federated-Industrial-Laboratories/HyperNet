@@ -265,12 +265,8 @@ fn failed_state_or_journal_publication_reopens_old_application_before_retry() {
         }
         let mut target = replicas.pop().unwrap();
         target.decide(&qc.bytes).unwrap();
-        assert!(matches!(
-            target
-                .apply_turn(|_, _| anyhow::bail!("Discovery executed early"))
-                .unwrap(),
-            application::Turn::Progress
-        ));
+        assert!(target.snapshot.apply_cursor.is_some());
+        target.validate_application_cursor().unwrap();
         let before = target.application().to_vec();
         let old_path = directories[3]
             .0

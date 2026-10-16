@@ -44,6 +44,7 @@ pub const MAX_PENDING: usize = 32;
 const MAX_OUTBOX: usize = 128;
 pub(super) const MAX_EVENTS: usize = 64;
 const RETRANSMIT: Duration = Duration::from_millis(250);
+const MAX_EARLY_EXECUTION_BYTES: usize = 4 * peer::MAX_PAYLOAD;
 
 pub trait Application: Send + Sync + 'static {
     fn command_inputs(&self, _ordered: &[u8]) -> Result<Vec<InputReference>> {
@@ -118,6 +119,11 @@ struct ShareSet {
     result: Vec<u8>,
     signatures: BTreeMap<Key, [u8; 64]>,
 }
+struct EarlyExecution {
+    node: Digest,
+    bytes: usize,
+    claims: BTreeMap<Key, Box<[u8]>>,
+}
 struct Driver {
     config: Config,
     engine: Engine,
@@ -132,6 +138,7 @@ struct Driver {
     query_times: BTreeMap<Digest, Instant>,
     diagnostics: diagnostics::Diagnostics,
     shares: BTreeMap<Digest, ShareSet>,
+    early_execution: Option<EarlyExecution>,
     repairs: BTreeMap<Key, repair_driver::Repair>,
     pending_votes: BTreeMap<(u64, u64, Key), SignedVote>,
     checkpoint_votes: BTreeMap<Digest, BTreeMap<Key, [u8; 64]>>,
@@ -225,6 +232,7 @@ pub async fn serve(
         query_times: BTreeMap::new(),
         diagnostics: diagnostics.clone(),
         shares: BTreeMap::new(),
+        early_execution: None,
         repairs: BTreeMap::new(),
         pending_votes: BTreeMap::new(),
         checkpoint_votes: BTreeMap::new(),
@@ -683,6 +691,7 @@ impl Driver {
         self.prune_queues()
     }
     fn prune_queues(&mut self) -> Result<()> {
+        self.prune_early_execution()?;
         if !self.requests.is_empty() && self.engine.committed()?.height > self.last_commit {
             // apply advances last_commit only after this purge. Later arrivals
             // are checked by submit, so unchanged suffixes need no rescan here.
@@ -1155,8 +1164,8 @@ impl Driver {
             }
             Message::RepairResponse(id, items) => self.repair_response(sender, id, items)?,
             Message::Execution(node, attestation, result) => {
-                // Result shares are collected only against locally committed
-                // execution. Their unsigned node bodies cannot initiate repair.
+                // Early claims remain untrusted until exact local execution is
+                // durable. Their unsigned node bodies cannot initiate repair.
                 self.collect_share(node, attestation, result)?;
             }
             Message::Submit(command, sidecar) => {
@@ -1248,6 +1257,7 @@ impl Driver {
         }
         if let super::application::Turn::Result(node, record) = progress {
             self.diagnostics.phase(&node, diagnostics::Phase::Executed);
+            self.reconcile_early_execution(&node, &record)?;
             let command = node.command.context("Applied result command missing")?;
             self.remove_request(&command);
             // Earlier replies may have arrived before this exact execution was
@@ -1287,9 +1297,19 @@ impl Driver {
         let command = node.command.context("Execution command missing")?;
         let digest = node.digest()?;
         let (payload, signatures) = wire::envelope(&envelope, 1)?;
+        ensure!(
+            signatures.len() == 1,
+            "Execution share has more than one signer"
+        );
         self.config().member(&signatures[0].0)?;
         let Some(local) = self.engine.execution(digest)? else {
-            return Ok(());
+            return self.retain_early_execution(
+                node_bytes,
+                envelope,
+                result,
+                digest,
+                signatures[0].0,
+            );
         };
         let (own_payload, own_signatures) = wire::envelope(&local.attestation, 1)?;
         ensure!(
@@ -1326,6 +1346,84 @@ impl Driver {
         shares.signatures.insert(signatures[0].0, signatures[0].1);
         if shares.signatures.len() >= 3 {
             self.diagnostics.phase(&node, diagnostics::Phase::Quorum);
+        }
+        Ok(())
+    }
+    fn prune_early_execution(&mut self) -> Result<()> {
+        if let Some(early) = &self.early_execution
+            && (self.engine.committed()?.digest()? != early.node
+                || self.engine.applied()?.digest()? == early.node)
+        {
+            self.early_execution = None;
+        }
+        Ok(())
+    }
+    fn retain_early_execution(
+        &mut self,
+        node: Vec<u8>,
+        attestation: Vec<u8>,
+        result: Vec<u8>,
+        digest: Digest,
+        signer: Key,
+    ) -> Result<()> {
+        self.prune_early_execution()?;
+        if self.engine.committed()?.digest()? != digest
+            || self.engine.applied()?.digest()? == digest
+        {
+            return Ok(());
+        }
+        // Use the normal message validation even for direct local callers. One
+        // encoded, bounded claim per committee signer owns all retained bytes.
+        let message = Message::Execution(node, attestation, result);
+        let bytes = message.payload()?;
+        Message::parse(self.config(), message.number(), &bytes)?;
+        let early = self.early_execution.get_or_insert(EarlyExecution {
+            node: digest,
+            bytes: 0,
+            claims: BTreeMap::new(),
+        });
+        if early.claims.contains_key(&signer) {
+            return Ok(());
+        }
+        let total = early
+            .bytes
+            .checked_add(bytes.len())
+            .context("Early execution size overflow")?;
+        ensure!(
+            early.claims.len() < 4 && total <= MAX_EARLY_EXECUTION_BYTES,
+            "Early execution claims exceed the committee bound"
+        );
+        early.claims.insert(signer, bytes.into_boxed_slice());
+        early.bytes = total;
+        Ok(())
+    }
+    fn reconcile_early_execution(
+        &mut self,
+        node: &Node,
+        local: &super::ExecutionRecord,
+    ) -> Result<()> {
+        let digest = node.digest()?;
+        if self
+            .early_execution
+            .as_ref()
+            .is_none_or(|early| early.node != digest)
+        {
+            return Ok(());
+        }
+        let early = self.early_execution.take().unwrap();
+        let (own_payload, _) = wire::envelope(&local.attestation, 1)?;
+        for bytes in early.claims.into_values() {
+            let Message::Execution(node, attestation, result) =
+                Message::parse(self.config(), 7, &bytes)?
+            else {
+                unreachable!("Only validated Execution claims are retained");
+            };
+            let (payload, _) = wire::envelope(&attestation, 1)?;
+            // A signed but incorrect claim cannot select the canonical result
+            // or stop other signers from completing the locally executed proof.
+            if payload == own_payload && result == local.result {
+                self.collect_share(node, attestation, result)?;
+            }
         }
         Ok(())
     }

@@ -75,7 +75,7 @@ impl Gate {
         let permission = self.0.borrow();
         !permission.closed && (permission.active > 0 || permission.requested)
     }
-    /// The guard must end before waiting for another application frame.
+    /// Retain through a pending exchange; end before waiting for new work.
     pub(crate) fn activity(&self) -> Result<Activity> {
         let mut acquired = false;
         self.0.send_if_modified(|permission| {

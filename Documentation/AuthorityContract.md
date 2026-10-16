@@ -165,12 +165,19 @@ publication also retains the eligible next phase vote and lock, or committed
 position, in the same atomic journal transaction. No certificate or vote is
 released before that transaction succeeds. Missing inputs or phase prerequisites
 defer voting while the learned QC and its stronger Prepare floor remain durable.
-Application discovery and executed-result publication retain their separate
-bounded durable transitions. A ready application cursor competes directly with
+If a newly committed node is the direct child of the applied position and no
+application cursor exists, the same Commit publication retains its verified
+one-node cursor. Longer ancestry retains bounded durable discovery. Application
+execution and its result still require a subsequent durable publication.
+A ready application cursor competes directly with
 ingress; it does not depend on a quiet queue or retry timer. The runtime yields
 after each selected bounded application turn. A newly durable result clears only
-its request's earlier query throttle so discarded pre-execution shares can be
-requested promptly. Repeated polls still share the normal query interval, and
+its request's earlier query throttle so missing execution shares can be requested
+promptly. A volatile four-signer bucket retains validated early claims for only
+the current committed but unapplied node. They contribute only after matching
+local durable execution; conflicting claims cannot select the local result.
+Discarded or restarted claims use ordinary query recovery.
+Repeated polls still share the normal query interval, and
 only matching locally durable execution contributes to a result quorum.
 Advance publishes its own signed WISH and synchroniser transition together;
 loopback delivery cannot require a second publication of that evidence.

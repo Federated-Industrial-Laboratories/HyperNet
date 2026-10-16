@@ -96,9 +96,112 @@ pub fn validate_packet(
     Ok(())
 }
 
+/// A matching local pending reply keeps an already validated authority exchange active.
+pub(crate) fn authority_request_pending(packet: &[u8], reply: &[u8]) -> bool {
+    let pending = || -> Result<bool> {
+        let request = wire::decode(packet)?;
+        let request = request.array(5)?;
+        ensure!(
+            request[0].uint()? == 41 && request[1].uint()? == 1,
+            "invalid authority request"
+        );
+        let scope = Scope::parse(&request[2])?;
+        let digest = match request[3].uint()? {
+            0 => {
+                let submission = wire::decode(request[4].bytes()?)?;
+                wire::digest(submission.array(2)?[0].bytes()?)
+            }
+            1 => request[4].fixed::<32>()?,
+            _ => return Ok(false),
+        };
+        let response = wire::decode(reply)?;
+        let response = response.array(10)?;
+        Ok(response[0].uint()? == 42
+            && response[1].uint()? == 1
+            && Scope::parse(&response[2])? == scope
+            && response[3].uint()? == 0
+            && response[4].uint()? == 0
+            && response[5].fixed::<32>()? == digest
+            && response[6..9].iter().all(|value| *value == V::Null)
+            && response[9].array(0)?.is_empty())
+    };
+    pending().unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_matching_pending_authority_replies_keep_poll_demand() {
+        let scope = Scope {
+            network: [1; 32],
+            incarnation: [2; 32],
+            configuration: [3; 32],
+            epoch: 1,
+        }
+        .value();
+        let command = vec![7; 32];
+        let digest = wire::digest(&command);
+        let request = |operation, payload| {
+            wire::encode(&V::Array(vec![
+                V::Uint(41),
+                V::Uint(1),
+                scope.clone(),
+                V::Uint(operation),
+                V::Bytes(payload),
+            ]))
+            .unwrap()
+        };
+        let submitted = request(
+            0,
+            wire::encode(&V::Array(vec![V::Bytes(command), V::Array(vec![])])).unwrap(),
+        );
+        let poll = request(1, digest.to_vec());
+        let fields = vec![
+            V::Uint(42),
+            V::Uint(1),
+            scope.clone(),
+            V::Uint(0),
+            V::Uint(0),
+            V::Bytes(digest.to_vec()),
+            V::Null,
+            V::Null,
+            V::Null,
+            V::Array(vec![]),
+        ];
+        let reply = wire::encode(&V::Array(fields.clone())).unwrap();
+        assert!(authority_request_pending(&submitted, &reply));
+        assert!(authority_request_pending(&poll, &reply));
+        assert!(!authority_request_pending(
+            &request(2, wire::encode(&V::Array(vec![])).unwrap()),
+            &reply
+        ));
+        assert!(!authority_request_pending(b"malformed", &reply));
+        assert!(!authority_request_pending(&poll, b"malformed"));
+        let mut foreign = scope.array(4).unwrap().to_vec();
+        foreign[0] = V::Bytes(vec![9; 32]);
+        for (index, value) in [
+            (0, V::Uint(41)),
+            (1, V::Uint(2)),
+            (2, V::Array(foreign)),
+            (3, V::Uint(1)),
+            (3, V::Uint(2)),
+            (4, V::Uint(1)),
+            (5, V::Bytes(vec![8; 32])),
+            (6, V::Bytes(vec![])),
+            (7, V::Bytes(vec![])),
+            (8, V::Bytes(vec![])),
+            (9, V::Array(vec![V::Null])),
+        ] {
+            let mut changed = fields.clone();
+            changed[index] = value;
+            assert!(!authority_request_pending(
+                &poll,
+                &wire::encode(&V::Array(changed)).unwrap()
+            ));
+        }
+    }
+
     #[test]
     fn private_endpoint_refuses_management_and_foreign_scope() {
         let frame = |operation, network| {

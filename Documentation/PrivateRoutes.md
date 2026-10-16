@@ -73,8 +73,11 @@ permission separately. Application access still requires its own current proof.
 An idle admitted channel does not renew either transit or endpoint permission.
 Buffered forwarding writes request renewal; bare reads do not. The endpoint also
 keeps permission current while an application exchange is executing, including
-the wait for its local reply. That activity ends before waiting for the next
-application frame and is released when the exchange fails or is cancelled.
+the wait for its local reply. An exact matching authority Pending reply retains
+activity through the next bounded poll read, allowing endpoint renewal while
+the relay obtains its own current permission. Terminal replies end activity
+before waiting for new work. Failure, cancellation and the original read deadline
+release activity; pending replies do not extend any connection limit.
 An expired raw write, flush or shutdown requests a fresh proof below TLS and
 remains blocked. The same rule covers ciphertext emitted by a TLS read. This
 request is consumed by one renewal, so a cancelled TLS future cannot cause an

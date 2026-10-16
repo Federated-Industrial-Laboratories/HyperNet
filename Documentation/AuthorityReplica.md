@@ -193,6 +193,14 @@ proposal candidates while application catches up; speculative requests and new
 challenges remain eligible, and consensus view progression remains independent.
 Outstanding safety obligations or unavailable expiry evidence can defer reclamation.
 
+Execution claims for the current committed but unapplied node may remain in one
+transient bucket, with one claim per committee signer and at most four complete
+196608-byte peer payloads in total. These claims cannot install dependencies or
+trigger repair. Only an exact match to the locally durable execution contributes
+to a result quorum; a conflicting signer cannot select the result or suppress
+other matching claims. A changed target discards the old bucket. Restart or
+eviction uses the existing bounded result-query recovery.
+
 `Objects/` holds immutable node, command, certificate, executed-result and
 application-state bodies. Current application, checkpoint and candidate roots
 name their exact state digest. Identical roots share one stored object and one
