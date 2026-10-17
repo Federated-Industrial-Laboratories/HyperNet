@@ -35,18 +35,76 @@ pub async fn send<S: AsyncWrite + Unpin>(stream: &mut S, bytes: &[u8]) -> Result
 struct Permission {
     expires: u64,
     closed: bool,
+    active: usize,
+    requested: bool,
 }
 #[derive(Clone)]
-pub struct Gate(tokio::sync::watch::Sender<Permission>);
+pub struct Gate(
+    tokio::sync::watch::Sender<Permission>,
+    Arc<tokio::sync::Notify>,
+);
+pub(crate) struct Activity {
+    gate: Gate,
+}
+impl Drop for Activity {
+    fn drop(&mut self) {
+        self.gate.0.send_modify(|permission| permission.active -= 1);
+        self.gate.1.notify_one();
+    }
+}
 impl Gate {
     pub fn new(expires: u64) -> Self {
+        Self::with_signal(expires, Arc::new(tokio::sync::Notify::new()))
+    }
+    pub(crate) fn with_signal(expires: u64, signal: Arc<tokio::sync::Notify>) -> Self {
         Self(
             tokio::sync::watch::channel(Permission {
                 expires,
                 closed: false,
+                active: 0,
+                requested: false,
             })
             .0,
+            signal,
         )
+    }
+    pub(crate) fn signal(&self) -> Arc<tokio::sync::Notify> {
+        self.1.clone()
+    }
+    pub(crate) fn demanded(&self) -> bool {
+        let permission = self.0.borrow();
+        !permission.closed && (permission.active > 0 || permission.requested)
+    }
+    /// Retain through a pending exchange; end before waiting for new work.
+    pub(crate) fn activity(&self) -> Result<Activity> {
+        let mut acquired = false;
+        self.0.send_if_modified(|permission| {
+            if permission.closed {
+                return false;
+            }
+            let Some(active) = permission.active.checked_add(1) else {
+                return false;
+            };
+            permission.active = active;
+            acquired = true;
+            true
+        });
+        ensure!(acquired, "route permission activity is unavailable");
+        self.1.notify_one();
+        Ok(Activity { gate: self.clone() })
+    }
+    fn request_renewal(&self) -> std::io::Result<()> {
+        let now = crate::authority_challenge::boot_time_ms().map_err(std::io::Error::other)?;
+        if self.0.send_if_modified(|permission| {
+            if permission.closed || permission.expires > now || permission.requested {
+                return false;
+            }
+            permission.requested = true;
+            true
+        }) {
+            self.1.notify_one();
+        }
+        Ok(())
     }
     pub fn expiry(&self) -> Result<u64> {
         let value = *self.0.borrow();
@@ -62,6 +120,8 @@ impl Gate {
         self.0.send_modify(|permission| {
             if !permission.closed {
                 permission.expires = expires;
+                // A cancelled raw TLS write can leave one request, never an activity lease.
+                permission.requested = false;
                 renewed = true;
             }
         });
@@ -70,6 +130,7 @@ impl Gate {
     }
     pub fn close(&self) {
         self.0.send_modify(|value| value.closed = true);
+        self.1.notify_one();
     }
     pub async fn closed(&self) {
         let mut updates = self.0.subscribe();
@@ -232,7 +293,14 @@ impl<S> Transport<S> {
             return match self.boundary.check() {
                 Ok(true) => Poll::Ready(Ok(())),
                 Ok(false) if !writing => Poll::Ready(Ok(())),
-                Ok(false) => Poll::Pending,
+                Ok(false) => {
+                    if let Some(permission) = self.boundary.0.borrow().permission.as_ref()
+                        && let Err(error) = permission.request_renewal()
+                    {
+                        return Poll::Ready(Err(error));
+                    }
+                    Poll::Pending
+                }
                 Err(error) => Poll::Ready(Err(error)),
             };
         }
@@ -338,6 +406,7 @@ async fn guarded_write<S: AsyncWrite + Unpin>(
     idle_ms: u64,
 ) -> Result<()> {
     use std::pin::Pin;
+    let _activity = gate.activity()?;
     let mut idle_deadline = crate::authority_challenge::boot_time_ms()?
         .saturating_add(idle_ms)
         .min(deadline);
@@ -567,6 +636,11 @@ mod tests {
             gate.clone(),
             start + 2000,
         ));
+        tokio::task::yield_now().await;
+        assert!(
+            !gate.demanded(),
+            "idle reads must not renew an expired proof"
+        );
         reader.write_all(&[1; 10000]).await.unwrap();
         let mut first = [0; 1];
         assert!(
@@ -577,13 +651,67 @@ mod tests {
             .await
             .is_err()
         );
+        assert!(
+            gate.demanded(),
+            "buffered forwarding must request fresh permission"
+        );
         gate.renew(start + 2000).unwrap();
         let mut received = [0; 10000];
         destination.read_exact(&mut received).await.unwrap();
         assert_eq!(received, [1; 10000]);
+        tokio::task::yield_now().await;
+        assert!(!gate.demanded(), "completed writes must return to idle");
         gate.renew(start + 3000).unwrap();
         destination.write_all(&[2; 10000]).await.unwrap();
         assert!(task.await.unwrap().is_err());
+        assert!(!gate.demanded());
+    }
+    #[tokio::test]
+    async fn private_route_cancelled_raw_write_requests_only_one_renewal() {
+        let (socket, _peer) = tokio::io::duplex(128);
+        let start = crate::authority_challenge::boot_time_ms().unwrap();
+        let (mut socket, boundary) = Transport::new(socket, start + 2000);
+        let gate = Gate::new(start);
+        boundary.arm_renewable(gate.clone(), start + 2000).unwrap();
+        let mut write = Box::pin(socket.write_all(b"Cancelled ciphertext"));
+        std::future::poll_fn(|cx| {
+            assert!(write.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(gate.demanded());
+        // Demand predates the wait: Notify must retain the wake while the level remains set.
+        tokio::time::timeout(Duration::from_millis(100), gate.signal().notified())
+            .await
+            .unwrap();
+        drop(write);
+        let expires = crate::authority_challenge::boot_time_ms().unwrap() + 50;
+        gate.renew(expires).unwrap();
+        assert!(!gate.demanded());
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(
+            !gate.demanded(),
+            "a cancelled TLS future must not retain activity"
+        );
+        for shutdown in [false, true] {
+            let mut operation: std::pin::Pin<
+                Box<dyn std::future::Future<Output = std::io::Result<()>> + '_>,
+            > = if shutdown {
+                Box::pin(socket.shutdown())
+            } else {
+                Box::pin(socket.flush())
+            };
+            std::future::poll_fn(|cx| {
+                assert!(operation.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            assert!(gate.demanded());
+            drop(operation);
+        }
+        gate.close();
+        assert!(!gate.demanded());
+        assert!(socket.flush().await.is_err());
     }
     #[tokio::test]
     async fn private_route_permission_renewal_never_extends_original_deadline() {
@@ -632,6 +760,7 @@ mod tests {
         });
         // A one-byte buffer proves the frame is still backpressured after its first byte.
         reader.read_exact(&mut [0; 1]).await.unwrap();
+        assert!(gate.demanded());
         gate.close();
         assert!(
             tokio::time::timeout(Duration::from_millis(300), task)
@@ -641,6 +770,7 @@ mod tests {
                 .is_err()
         );
         assert!(gate.renew(deadline).is_err());
+        assert!(!gate.demanded());
     }
     #[tokio::test]
     async fn closing_reader_cancels_both_opaque_directions() {

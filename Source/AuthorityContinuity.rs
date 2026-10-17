@@ -13,7 +13,7 @@ pub struct ContinuityEvidence {
     pub ancestry: Vec<Vec<u8>>,
     pub history: Option<Vec<u8>>,
 }
-pub(super) fn ancestry(scope: &Scope, bytes: &[Vec<u8>]) -> Result<Vec<Node>> {
+pub(crate) fn ancestry(scope: &Scope, bytes: &[Vec<u8>]) -> Result<Vec<Node>> {
     ensure!(
         !bytes.is_empty()
             && bytes.len() <= 128
@@ -47,7 +47,7 @@ pub(super) fn ancestry(scope: &Scope, bytes: &[Vec<u8>]) -> Result<Vec<Node>> {
     }
     Ok(nodes)
 }
-pub(super) fn extends(point: &CertifiedPoint, ancestry: &[Node], floor: &Prefix) -> Result<()> {
+pub(crate) fn extends(point: &CertifiedPoint, ancestry: &[Node], floor: &Prefix) -> Result<()> {
     ensure!(
         point.prefix.scope == floor.scope && point.prefix.height >= floor.height,
         "authority result is below the accepted configuration or prefix"

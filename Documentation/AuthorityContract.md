@@ -160,6 +160,37 @@ first checkpoint and preserves the complete highest Prepare/lock, current and
 previous-view certificate, committed/applied and outstanding execution closures.
 The signature floor does not prohibit verified late QCs or Decide. Collected
 Prepare QCs raise the durable Prepare floor before deferred local delivery.
+When a newly collected or received QC has complete local dependencies, its
+publication also retains the eligible next phase vote and lock, or committed
+position, in the same atomic journal transaction. No certificate or vote is
+released before that transaction succeeds. Missing inputs or phase prerequisites
+defer voting while the learned QC and its stronger Prepare floor remain durable.
+If a newly committed node is the direct child of the applied position and no
+application cursor exists, the same Commit publication retains its verified
+one-node cursor. Longer ancestry retains bounded durable discovery. Application
+execution and its result still require a subsequent durable publication.
+A ready application cursor competes directly with
+ingress; it does not depend on a quiet queue or retry timer. The runtime yields
+after each selected bounded application turn. A newly durable result clears only
+its request's earlier query throttle so missing execution shares can be requested
+promptly. A volatile four-signer bucket retains validated early claims for only
+the current committed but unapplied node. They contribute only after matching
+local durable execution; conflicting claims cannot select the local result.
+Discarded or restarted claims use ordinary query recovery.
+Repeated polls still share the normal query interval, and
+only matching locally durable execution contributes to a result quorum.
+Advance publishes its own signed WISH and synchroniser transition together;
+loopback delivery cannot require a second publication of that evidence.
+Already queued authenticated votes for one exact view, phase and node may share
+a publication. The same applies to WISH evidence for one target or NewView reports
+for the current entered view with already durable Prepare dependencies and
+available immutable inputs. Collection never waits for another message and stops
+at the first unrelated, invalid, conflicting or dependency-missing event within
+the existing ingress bound. Every distinct signer's evidence is retained,
+including a fourth signer. Successful transport acknowledgements and broadcasts
+follow durable publication; a rejected
+later event does not discard the accepted prefix. Uncertain publication stops the
+signer without acknowledgements, broadcasts or an in-process persistence retry.
 
 Correct replicas retain and exchange votes and certificates through bounded
 repair requests independently of a leader or edge broker. A collector withholding
@@ -187,6 +218,16 @@ resume. Uncertain, corrupted, missing or rolled-back signing state quarantines
 the signer. A checksum detects corruption; it does not detect an adversary
 restoring an internally consistent older snapshot. Do not represent ordinary
 backup restoration as rollback-proof storage.
+
+Application, certified-checkpoint and candidate state bodies are immutable
+objects referenced by their exact existing state digests. Shared roots retain
+one body and allocation charge. New objects reach durable storage before archive
+visibility and the atomic journal reference; collection follows that journal
+publication. Reopen resolves and verifies every state root before collection,
+including checkpoint, applied-result and execution-cursor bindings. Missing,
+altered or incompatible state objects refuse restart. Internal signer format3
+requires this representation and does not accept earlier inline-state layouts.
+Consensus records, state digests and checkpoint transfer formats are unchanged.
 
 A checkpoint binds its configuration, committed position/node, complete state
 digest, deterministic receipts, revoked generations, consumed invitations and

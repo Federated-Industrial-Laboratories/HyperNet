@@ -94,6 +94,43 @@ fn page_item<T>(
     Ok(true)
 }
 
+// Both callers select the same publication, media and reader/application closure.
+fn read(
+    c: &mut Evaluation<'_>,
+    operation: &Operation,
+    requester: Key,
+    page: [u8; 16],
+) -> Result<VersionRef> {
+    let (_, _, review, revision) = c.publication(page)?;
+    c.media_metadata(&review.statement.revision, &revision)?;
+    c.principal(
+        requester,
+        grant(operation)?,
+        None,
+        "PagesRead",
+        &revision.author.namespace,
+        Some(page),
+        revision.author.source.len() as u64,
+    )?;
+    content::select_placement(c, &review.statement.revision, &revision, false)
+}
+fn view(
+    c: &mut Evaluation<'_>,
+    operation: &Operation,
+    requester: Key,
+    page: [u8; 16],
+) -> Result<()> {
+    let placement = read(c, operation, requester, page)?;
+    // Metadata inspection can outlive storage. A view must bind live current content.
+    ensure!(
+        !c.state
+            .records
+            .contains_key(&(content::TOMBSTONE_KIND, placement.id)),
+        "Page view content is withdrawn"
+    );
+    content::get(c, operation, &placement, requester)
+}
+
 pub(super) fn grant(operation: &Operation) -> Result<&VersionRef> {
     operation
         .grant
@@ -805,6 +842,24 @@ pub fn evaluate(
                             if queued {
                                 c.select(140, record.reference.id)?;
                                 c.revision(selected.unwrap(), true)?;
+                            } else if searching {
+                                view(c, operation, intent.requester, ledger.raw_page)?;
+                                c.read_capability(
+                                    reader_grant,
+                                    intent.requester,
+                                    &[0, 1],
+                                    (2, record.reference.id),
+                                    Some(namespace),
+                                    0,
+                                )?;
+                                c.application(
+                                    intent.requester,
+                                    reader_grant,
+                                    None,
+                                    "PagesSearch",
+                                    namespace,
+                                    Some(ledger.raw_page),
+                                )?;
                             } else {
                                 let (_, _, _, revision) = c.publication(ledger.raw_page)?;
                                 c.principal(
@@ -816,24 +871,6 @@ pub fn evaluate(
                                     Some(ledger.raw_page),
                                     revision.author.source.len() as u64,
                                 )?;
-                                if searching {
-                                    c.read_capability(
-                                        reader_grant,
-                                        intent.requester,
-                                        &[0, 1],
-                                        (2, revision.author.intent.resource),
-                                        Some(namespace),
-                                        0,
-                                    )?;
-                                    c.application(
-                                        intent.requester,
-                                        reader_grant,
-                                        None,
-                                        "PagesSearch",
-                                        namespace,
-                                        Some(ledger.raw_page),
-                                    )?;
-                                }
                             }
                             Ok(())
                         },
@@ -990,19 +1027,9 @@ pub fn evaluate(
                 }
             }
             Command::Read { page } => {
-                let (_, _, review, revision) = c.publication(*page)?;
-                c.media_metadata(&review.statement.revision, &revision)?;
-                c.principal(
-                    intent.requester,
-                    grant(operation)?,
-                    None,
-                    "PagesRead",
-                    &revision.author.namespace,
-                    Some(*page),
-                    revision.author.source.len() as u64,
-                )?;
-                content::select_placement(&mut c, &review.statement.revision, &revision, false)?;
+                read(&mut c, operation, intent.requester, *page)?;
             }
+            Command::View { page } => view(&mut c, operation, intent.requester, *page)?,
             _ => evaluate_serving(
                 &mut c,
                 operation,
@@ -1054,6 +1081,60 @@ pub fn evaluate(
     };
     Ok(Decision {
         state: (!changed.is_empty()).then_some(next),
+        value,
+        versions,
+        dependencies: c.dependencies,
+        code: 0,
+        expires_ms: c.expires,
+    })
+}
+
+/// The fresh view shares the exact publication and ContentGet selection with ordered views.
+pub(crate) fn evaluate_read(
+    operation: &Operation,
+    state: &State,
+    records: &[Vec<u8>],
+    reserved: &Reservations,
+    requester: Key,
+    at: u64,
+) -> Result<Decision> {
+    let super::super::Command::Page(Command::View { page }) = &operation.command else {
+        anyhow::bail!("fresh Page command differs")
+    };
+    let mut c = Evaluation {
+        state,
+        governance: Governance::parse(state.network, state.incarnation, records)?,
+        index: Index::parse(records, reserved, state.network, state.incarnation)?,
+        at,
+        dependencies: vec![],
+        selected: BTreeMap::new(),
+        expires: u64::MAX,
+    };
+    if let Err(error) = view(&mut c, operation, requester, *page) {
+        return Ok(Decision::refused(if error.is::<Capacity>() {
+            2
+        } else {
+            3
+        }));
+    }
+    if sorted(&mut c.dependencies).is_err() {
+        return Ok(Decision::refused(2));
+    }
+    if operation
+        .snapshot
+        .references
+        .iter()
+        .any(|r| !c.dependencies.contains(r))
+    {
+        return Ok(Decision::refused(12));
+    }
+    let (value, versions) = match result_view(&c, &Command::View { page: *page }, None) {
+        Ok(v) => v,
+        Err(e) if e.is::<Capacity>() => return Ok(Decision::refused(2)),
+        Err(e) => return Err(e),
+    };
+    Ok(Decision {
+        state: None,
         value,
         versions,
         dependencies: c.dependencies,

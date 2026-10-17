@@ -95,6 +95,9 @@ pub enum Command {
     Read {
         page: [u8; 16],
     },
+    View {
+        page: [u8; 16],
+    },
     Sync {
         host: Key,
         namespace: String,
@@ -313,6 +316,12 @@ impl Command {
                     page: raw_page(&f[1])?,
                 }
             }
+            "PageView" => {
+                let f = value.array(2)?;
+                Self::View {
+                    page: raw_page(&f[1])?,
+                }
+            }
             "PageSync" => {
                 let f = value.array(5)?;
                 Self::Sync {
@@ -434,6 +443,7 @@ impl Command {
             Self::List { .. } => "PageList",
             Self::SearchList { .. } => "PageSearchList",
             Self::Read { .. } => "PageRead",
+            Self::View { .. } => "PageView",
             Self::Sync { .. } => "PageSync",
             Self::ReplicaQueue { .. } => "PageReplicaQueue",
             Self::ReplicaContext { .. } => "PageReplicaContext",
@@ -494,7 +504,7 @@ impl Command {
                 V::Text(namespace.clone()),
                 after.as_ref().map_or(V::Null, |v| b(v)),
             ],
-            Self::Inspect { page } | Self::Read { page } => vec![b(page)],
+            Self::Inspect { page } | Self::Read { page } | Self::View { page } => vec![b(page)],
             Self::Review { review, bundle } => vec![
                 b(&review.bytes),
                 bundle.as_ref().map_or(V::Null, Reference::value),
@@ -601,6 +611,7 @@ impl Command {
             Self::Inspect { page }
             | Self::Withdraw { page, .. }
             | Self::Read { page }
+            | Self::View { page }
             | Self::ReplicaContext { page, .. }
             | Self::ReplicaRequest { page, .. } => page_id(page).expect("parsed Page identity"),
             Self::ReplicaDeliver { ticket, .. } | Self::ReplicaResult { ticket } => ticket.id,

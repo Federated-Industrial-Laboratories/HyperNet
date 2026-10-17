@@ -190,10 +190,13 @@ impl Request {
             );
         }
         let reserved = Reservations(bootstrap.reservations().to_vec());
-        state.validate_roles(&records, &reserved)?;
+        // Deployment proofs can refer to immutable bootstrap-appointed identities
+        // without returning their already accepted appointment records again.
+        let roles = super::super::result::merge(bootstrap, &records)?;
+        state.validate_roles(&roles, &reserved)?;
         let recipient = self
             .operation
-            .expected_recipient(&state, &records, &reserved, intent)?;
+            .expected_recipient(&state, &roles, &reserved, intent)?;
         ensure!(
             recipient == challenge.recipient && recipient == executed.recipient,
             "media freshness belongs to another selected store"

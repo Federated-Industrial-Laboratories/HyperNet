@@ -10,6 +10,8 @@ mod ingress;
 mod input_driver;
 #[path = "ConsensusQueue.rs"]
 mod queue;
+#[path = "ConsensusDriverRead.rs"]
+mod read_driver;
 #[path = "ConsensusDriverRepair.rs"]
 mod repair_driver;
 use super::{
@@ -17,6 +19,7 @@ use super::{
     peer::{self, Message},
     records::{
         Certificate, Configuration, Digest, Key, NewView, Node, OrderedRequest, Phase, SignedVote,
+        Vote,
     },
     repair::{Item, Reference},
 };
@@ -41,9 +44,20 @@ use tokio::{
 
 pub const MAX_PENDING: usize = 32;
 const MAX_OUTBOX: usize = 128;
+pub(super) const MAX_EVENTS: usize = 64;
 const RETRANSMIT: Duration = Duration::from_millis(250);
+const MAX_EARLY_EXECUTION_BYTES: usize = 4 * peer::MAX_PAYLOAD;
 
 pub trait Application: Send + Sync + 'static {
+    fn read(
+        &self,
+        _prior: &[u8],
+        _request: &crate::authority_read::Request,
+        _at: u64,
+        _expires: u64,
+    ) -> Result<(Vec<u8>, u64)> {
+        anyhow::bail!("application does not support fresh reads")
+    }
     fn command_inputs(&self, _ordered: &[u8]) -> Result<Vec<InputReference>> {
         Ok(vec![])
     }
@@ -88,6 +102,26 @@ pub(super) enum Event {
         queued: Instant,
     },
 }
+#[derive(PartialEq, Eq)]
+enum EvidenceStatement {
+    Vote(Vote),
+    Wish(u64),
+    NewView(u64),
+}
+impl EvidenceStatement {
+    fn number(&self) -> u64 {
+        match self {
+            Self::Wish(_) => 0,
+            Self::NewView(_) => 1,
+            Self::Vote(_) => 3,
+        }
+    }
+}
+enum EvidenceOutput {
+    Vote(Option<Vec<u8>>),
+    Synchronizer(Outputs),
+    Report,
+}
 struct ShareSet {
     command: Digest,
     height: u64,
@@ -95,6 +129,11 @@ struct ShareSet {
     payload: Vec<u8>,
     result: Vec<u8>,
     signatures: BTreeMap<Key, [u8; 64]>,
+}
+struct EarlyExecution {
+    node: Digest,
+    bytes: usize,
+    claims: BTreeMap<Key, Box<[u8]>>,
 }
 struct Driver {
     config: Config,
@@ -110,6 +149,8 @@ struct Driver {
     query_times: BTreeMap<Digest, Instant>,
     diagnostics: diagnostics::Diagnostics,
     shares: BTreeMap<Digest, ShareSet>,
+    reads: BTreeMap<Digest, read_driver::Collection>,
+    early_execution: Option<EarlyExecution>,
     repairs: BTreeMap<Key, repair_driver::Repair>,
     pending_votes: BTreeMap<(u64, u64, Key), SignedVote>,
     checkpoint_votes: BTreeMap<Digest, BTreeMap<Key, [u8; 64]>>,
@@ -155,7 +196,7 @@ pub async fn serve(
     )?;
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let (socket, _socket_guard) = ingress::local_socket(&config.control_socket)?;
-    let (events, mut receiver) = mpsc::channel(64);
+    let (events, mut receiver) = mpsc::channel(MAX_EVENTS);
     let (diagnostics, monitor) = diagnostics::Diagnostics::new();
     let mut tasks = tokio::task::JoinSet::new();
     tasks.spawn(monitor.run());
@@ -203,6 +244,8 @@ pub async fn serve(
         query_times: BTreeMap::new(),
         diagnostics: diagnostics.clone(),
         shares: BTreeMap::new(),
+        reads: BTreeMap::new(),
+        early_execution: None,
         repairs: BTreeMap::new(),
         pending_votes: BTreeMap::new(),
         checkpoint_votes: BTreeMap::new(),
@@ -224,42 +267,279 @@ pub async fn serve(
     }
     let mut interval = tokio::time::interval(RETRANSMIT);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut pending = None;
     let result = loop {
-        tokio::select! {
-            change = shutdown.changed() => {
-                if change.is_err() || *shutdown.borrow() {
-                    diagnostics.emit(diagnostics::Code::ShutdownObserved, diagnostics::Stage::Shutdown, Duration::ZERO, driver.engine.view());
-                    break Ok(());
-                }
-            }
-            ended = tasks.join_next() => { break Err(anyhow::anyhow!("Replica transport task stopped: {}", ended.is_some())); }
-            event = receiver.recv() => {
-                let Some(event) = event else { break Err(anyhow::anyhow!("Replica event channel closed")); };
-                if let Err(error) = driver.event(event) {
-                    break Err(error);
-                }
-            }
-            _ = tokio::task::yield_now(), if driver.application_ready => {
-                {
-                    let _turn = diagnostics.begin(diagnostics::Stage::Apply, driver.engine.view(), None);
-                    if let Err(error) = driver.apply() { break Err(error); }
-                }
-                if let Err(error) = driver.drain_turn() { break Err(error); }
-            }
-            _ = interval.tick() => {
-                {
-                    let _turn = diagnostics.begin(diagnostics::Stage::Tick, driver.engine.view(), None);
-                    if let Err(error) = driver.tick() { break Err(error); }
-                }
-                if let Err(error) = driver.drain_turn() { break Err(error); }
-            }
+        match driver
+            .turn(
+                &mut receiver,
+                &mut pending,
+                &mut shutdown,
+                &mut tasks,
+                &mut interval,
+            )
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => break Ok(()),
+            Err(error) => break Err(error),
         }
     };
+    if result.is_ok() {
+        diagnostics.finish(driver.engine.view());
+    }
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
     result
 }
 impl Driver {
+    fn certificate_timing(&self, bytes: &[u8]) {
+        let Ok(qc) = Certificate::parse(self.config(), bytes) else {
+            return;
+        };
+        let Ok(node) = self.engine.known_node(&qc.node) else {
+            return;
+        };
+        let (phase, next_vote) = match qc.phase {
+            Phase::Prepare => (
+                diagnostics::Phase::PrepareQc,
+                Some((Phase::PreCommit, diagnostics::Phase::PreCommitVote)),
+            ),
+            Phase::PreCommit => (
+                diagnostics::Phase::PreCommitQc,
+                Some((Phase::Commit, diagnostics::Phase::CommitVote)),
+            ),
+            Phase::Commit => (diagnostics::Phase::CommitQc, None),
+        };
+        self.diagnostics.phase(&node, phase);
+        if let Some((vote, phase)) = next_vote {
+            let index = super::vote_id(qc.view, vote, &self.engine.signer());
+            if self
+                .engine
+                .snapshot
+                .own_votes
+                .get(&index)
+                .and_then(|bytes| SignedVote::parse(self.config(), bytes).ok())
+                .is_some_and(|signed| signed.vote.node == qc.node)
+            {
+                self.diagnostics.phase(&node, phase);
+            }
+        }
+        if qc.phase == Phase::Commit && self.engine.snapshot.committed == qc.node {
+            self.diagnostics.phase(&node, diagnostics::Phase::Committed);
+        }
+    }
+    async fn turn(
+        &mut self,
+        receiver: &mut mpsc::Receiver<Event>,
+        pending: &mut Option<Event>,
+        shutdown: &mut watch::Receiver<bool>,
+        tasks: &mut tokio::task::JoinSet<Result<()>>,
+        interval: &mut tokio::time::Interval,
+    ) -> Result<bool> {
+        tokio::select! {
+            change = shutdown.changed() => {
+                if change.is_err() || *shutdown.borrow() {
+                    self.diagnostics.emit(diagnostics::Code::ShutdownObserved, diagnostics::Stage::Shutdown, Duration::ZERO, self.engine.view());
+                    return Ok(false);
+                }
+            }
+            ended = tasks.join_next() => {
+                anyhow::bail!("Replica transport task stopped: {}", ended.is_some());
+            }
+            event = async {
+                if let Some(event) = pending.take() { Some(event) } else { receiver.recv().await }
+            } => {
+                let event = event.context("Replica event channel closed")?;
+                *pending = self.queued_event(event, receiver)?;
+            }
+            _ = async {}, if self.application_ready => {
+                {
+                    let _turn = self.diagnostics.begin(diagnostics::Stage::Apply, self.engine.view(), None);
+                    self.apply()?;
+                }
+                self.drain_turn()?;
+                // Yield after the selected bounded turn. A yield used as a
+                // readiness condition can be cancelled by continuously ready ingress.
+                tokio::task::yield_now().await;
+            }
+            _ = interval.tick() => {
+                {
+                    let _turn = self.diagnostics.begin(diagnostics::Stage::Tick, self.engine.view(), None);
+                    self.tick()?;
+                }
+                self.drain_turn()?;
+            }
+        }
+        Ok(true)
+    }
+    fn queued_evidence(&self, event: &Event) -> Option<(EvidenceStatement, Vec<u8>)> {
+        let Event::Peer { sender, body, .. } = event else {
+            return None;
+        };
+        // Classification authenticates queued proofs before event processing.
+        // Its separate synchronous boundary also covers deferred and unbatched inputs.
+        let _turn =
+            self.diagnostics
+                .begin(diagnostics::Stage::Classification, self.engine.view(), None);
+        self.engine.voting().ok()?;
+        match peer::decode(self.config(), *sender, body).ok()? {
+            Message::Vote(input) => {
+                let signed = self.engine.received_vote(&input).ok()?;
+                if signed.vote.view < self.engine.view().saturating_sub(1) {
+                    return None;
+                }
+                let entry = super::vote_id(signed.vote.view, signed.vote.phase, &signed.signer);
+                if self
+                    .engine
+                    .snapshot
+                    .votes
+                    .get(&entry)
+                    .is_some_and(|old| old != &input)
+                {
+                    return None;
+                }
+                Some((EvidenceStatement::Vote(signed.vote), input))
+            }
+            Message::Wish(input) => {
+                let (_, target) = super::synchronizer::verify(self.config(), &input).ok()?;
+                Some((EvidenceStatement::Wish(target), input))
+            }
+            Message::NewView(input, _) => {
+                // Decode authenticates the attached QC. Batching requires its
+                // exact dependency closure already available; repair and input
+                // waiting retain their ordinary event path.
+                let report = self
+                    .engine
+                    .checked_new_view(&self.engine.snapshot, &input)
+                    .ok()?;
+                let entry = super::report_id(report.view, &report.signer);
+                if self
+                    .engine
+                    .snapshot
+                    .reports
+                    .get(&entry)
+                    .is_some_and(|old| old != &input)
+                {
+                    return None;
+                }
+                let references = self
+                    .engine
+                    .certificate_input_references(report.prepare)
+                    .ok()?;
+                self.engine.input_reader().ok()?.verify(&references).ok()?;
+                Some((EvidenceStatement::NewView(report.view), input))
+            }
+            _ => None,
+        }
+    }
+    fn acknowledge_peer(&self, body: &[u8], answer: oneshot::Sender<Vec<u8>>, disposition: u64) {
+        // Outbound HTTP responses have no reply receiver. Incoming requests
+        // receive a signed transport-only acknowledgement after publication.
+        if !answer.is_closed()
+            && let Ok(reply) = self
+                .engine
+                .sign_peer(&Message::Ack(wire::digest(body), disposition))
+        {
+            let _ = answer.send(reply);
+        }
+    }
+    fn queued_event(
+        &mut self,
+        first: Event,
+        receiver: &mut mpsc::Receiver<Event>,
+    ) -> Result<Option<Event>> {
+        if receiver.is_empty() {
+            self.event(first)?;
+            return Ok(None);
+        }
+        let Some((statement, input)) = self.queued_evidence(&first) else {
+            self.event(first)?;
+            return Ok(None);
+        };
+        let mut batch = vec![(first, input)];
+        let mut deferred = None;
+        // Take only the queue prefix already present, bounded by the existing
+        // ingress capacity. Never wait for a quorum or cross another event.
+        for _ in 0..receiver.len().min(MAX_EVENTS - 1) {
+            let Ok(event) = receiver.try_recv() else {
+                break;
+            };
+            match self.queued_evidence(&event) {
+                Some((next, input)) if next == statement => batch.push((event, input)),
+                _ => {
+                    deferred = Some(event);
+                    break;
+                }
+            }
+        }
+        if batch.len() == 1 {
+            self.event(batch.pop().unwrap().0)?;
+            return Ok(deferred);
+        }
+        let Event::Peer { queued, .. } = &batch[0].0 else {
+            unreachable!()
+        };
+        let mut turn =
+            self.diagnostics
+                .begin(diagnostics::Stage::Peer, self.engine.view(), Some(*queued));
+        let kind = statement.number();
+        turn.message_kind(kind);
+        let inputs: Vec<_> = batch.iter().map(|(_, input)| input.clone()).collect();
+        let outputs: Vec<_> = match statement {
+            EvidenceStatement::Vote(_) => self
+                .engine
+                .receive_votes(&inputs)?
+                .into_iter()
+                .map(EvidenceOutput::Vote)
+                .collect(),
+            EvidenceStatement::Wish(_) => self
+                .engine
+                .receive_wishes(&inputs)?
+                .into_iter()
+                .map(EvidenceOutput::Synchronizer)
+                .collect(),
+            EvidenceStatement::NewView(_) => (0..self.engine.receive_new_views(&inputs)?)
+                .map(|_| EvidenceOutput::Report)
+                .collect(),
+        };
+        let remaining = batch.split_off(outputs.len());
+        let accepted = !batch.is_empty();
+        for ((event, _), output) in batch.into_iter().zip(outputs) {
+            let emitted = match output {
+                EvidenceOutput::Vote(Some(qc)) => {
+                    self.certificate_timing(&qc);
+                    self.broadcast(Message::Certificate(qc))
+                }
+                EvidenceOutput::Synchronizer(output) => self.outputs(output),
+                EvidenceOutput::Vote(None) | EvidenceOutput::Report => Ok(()),
+            };
+            let disposition = match emitted {
+                Ok(_) => 0,
+                Err(error) => {
+                    diagnostic("protocol", self.engine.view(), kind, &error);
+                    2
+                }
+            };
+            let Event::Peer { body, answer, .. } = event else {
+                unreachable!()
+            };
+            self.acknowledge_peer(&body, answer, disposition);
+        }
+        if accepted {
+            self.prune_queues()?;
+            self.try_propose()?;
+        }
+        drop(turn);
+        if accepted {
+            self.drain_turn()?;
+        }
+        // A validation/capacity rejection leaves the accepted prefix durable.
+        // Its event and every following event retain ordinary FIFO handling.
+        for (event, _) in remaining {
+            self.event(event)?;
+        }
+        Ok(deferred)
+    }
     fn event(&mut self, event: Event) -> Result<()> {
         let acknowledgement = match event {
             Event::Peer {
@@ -273,7 +553,6 @@ impl Driver {
                     self.engine.view(),
                     Some(queued),
                 );
-                let digest = wire::digest(&body);
                 let mut acknowledgement = false;
                 let disposition = match peer::decode(self.engine.configuration(), sender, &body) {
                     Ok(Message::Ack(..)) => {
@@ -297,13 +576,7 @@ impl Driver {
                         2
                     }
                 };
-                // Outbound HTTP responses have no reply receiver. Incoming
-                // requests still receive a signed transport-only acknowledgement.
-                if !answer.is_closed()
-                    && let Ok(reply) = self.engine.sign_peer(&Message::Ack(digest, disposition))
-                {
-                    let _ = answer.send(reply);
-                }
+                self.acknowledge_peer(&body, answer, disposition);
                 acknowledgement
             }
             Event::Local {
@@ -342,6 +615,7 @@ impl Driver {
     fn send(&self, recipient: Key, message: &Message) -> Result<()> {
         if let Some(sender) = self.senders.get(&recipient) {
             let class = match message {
+                Message::ReadProbe(..) | Message::ReadShare(..) => queue::Class::Fresh,
                 Message::Submit(command, _) => queue::Class::Submission(wire::digest(command)),
                 Message::RepairRequest(..)
                 | Message::StateRequest(..)
@@ -436,6 +710,7 @@ impl Driver {
         self.prune_queues()
     }
     fn prune_queues(&mut self) -> Result<()> {
+        self.prune_early_execution()?;
         if !self.requests.is_empty() && self.engine.committed()?.height > self.last_commit {
             // apply advances last_commit only after this purge. Later arrivals
             // are checked by submit, so unchanged suffixes need no rescan here.
@@ -490,6 +765,7 @@ impl Driver {
         Ok(())
     }
     fn tick(&mut self) -> Result<()> {
+        self.expire_reads();
         self.expire_queries(Instant::now());
         self.prune_queues()?;
         if self.engine.can_vote() {
@@ -566,6 +842,7 @@ impl Driver {
         );
         self.requests.insert(digest, submission);
         self.request_order.push_back(digest);
+        self.diagnostics.accepted(digest);
         Ok(digest)
     }
     fn remove_request(&mut self, digest: &Digest) {
@@ -685,6 +962,7 @@ impl Driver {
     fn broadcast_proposal(&mut self, proposal: Vec<u8>) -> Result<()> {
         let (body, _) = wire::envelope(&proposal, 1)?;
         let node = Node::parse(self.config(), &body)?;
+        self.diagnostics.proposed(&node, diagnostics::Stamp::now());
         let command = self
             .engine
             .repair_export(&[reference(
@@ -745,6 +1023,7 @@ impl Driver {
                 }
             }
             Message::Proposal(proposal, command, qc, sidecar) => {
+                let observed = diagnostics::Stamp::now();
                 let (payload, _) = wire::envelope(&proposal, 1)?;
                 let node = Node::parse(self.config(), &payload)?;
                 ensure!(
@@ -806,6 +1085,9 @@ impl Driver {
                         return Err(error);
                     }
                 };
+                self.diagnostics.proposed(&node, observed);
+                self.diagnostics
+                    .phase(&node, diagnostics::Phase::PrepareVote);
                 self.broadcast(Message::Vote(vote))?;
             }
             Message::Vote(vote) => {
@@ -842,6 +1124,7 @@ impl Driver {
                     return Ok(());
                 }
                 if let Some(qc) = self.engine.receive_vote(&vote)? {
+                    self.certificate_timing(&qc);
                     self.broadcast(Message::Certificate(qc))?;
                 }
             }
@@ -851,19 +1134,26 @@ impl Driver {
                     qc.view <= self.engine.view().saturating_add(1),
                     "Certificate is beyond repair window"
                 );
-                if !self.dependencies(
+                if self.engine.known_node(&qc.node).is_ok() {
+                    self.engine.receive_certificate(&bytes)?;
+                } else if !self.dependencies(
                     sender,
                     message,
                     vec![item(self.config(), 12, bytes.clone())?],
                 )? {
                     return Ok(());
                 }
+                self.certificate_timing(&bytes);
                 if qc.phase == Phase::Commit {
                     self.engine.decide(&bytes)?;
+                    self.certificate_timing(&bytes);
                     self.apply()?;
                 } else if qc.view == self.engine.view() {
                     match self.engine.advance_phase(&bytes) {
-                        Ok(vote) => self.broadcast(Message::Vote(vote))?,
+                        Ok(vote) => {
+                            self.certificate_timing(&bytes);
+                            self.broadcast(Message::Vote(vote))?;
+                        }
                         Err(error) => {
                             if let Some(missing) =
                                 error.downcast_ref::<input_objects::Unavailable>()
@@ -894,8 +1184,8 @@ impl Driver {
             }
             Message::RepairResponse(id, items) => self.repair_response(sender, id, items)?,
             Message::Execution(node, attestation, result) => {
-                // Result shares are collected only against locally committed
-                // execution. Their unsigned node bodies cannot initiate repair.
+                // Early claims remain untrusted until exact local execution is
+                // durable. Their unsigned node bodies cannot initiate repair.
                 self.collect_share(node, attestation, result)?;
             }
             Message::Submit(command, sidecar) => {
@@ -922,6 +1212,12 @@ impl Driver {
                         &Message::Execution(node.encode()?, record.attestation, record.result),
                     )?;
                 }
+            }
+            Message::ReadProbe(request, challenge, statement) => {
+                self.read_probe(sender, request, challenge, statement)?
+            }
+            Message::ReadShare(id, node, share, result) => {
+                self.read_share(sender, id, node, share, result)?
             }
             Message::Ack(..) => {}
             checkpoint @ (Message::CheckpointShare(_)
@@ -986,8 +1282,13 @@ impl Driver {
             self.blocked_application = None;
         }
         if let super::application::Turn::Result(node, record) = progress {
+            self.diagnostics.phase(&node, diagnostics::Phase::Executed);
+            self.reconcile_early_execution(&node, &record)?;
             let command = node.command.context("Applied result command missing")?;
             self.remove_request(&command);
+            // Earlier replies may have arrived before this exact execution was
+            // durable. New progress permits one prompt recovery query.
+            self.query_times.remove(&command);
             self.broadcast(Message::Execution(
                 node.encode()?,
                 record.attestation,
@@ -1022,9 +1323,19 @@ impl Driver {
         let command = node.command.context("Execution command missing")?;
         let digest = node.digest()?;
         let (payload, signatures) = wire::envelope(&envelope, 1)?;
+        ensure!(
+            signatures.len() == 1,
+            "Execution share has more than one signer"
+        );
         self.config().member(&signatures[0].0)?;
         let Some(local) = self.engine.execution(digest)? else {
-            return Ok(());
+            return self.retain_early_execution(
+                node_bytes,
+                envelope,
+                result,
+                digest,
+                signatures[0].0,
+            );
         };
         let (own_payload, own_signatures) = wire::envelope(&local.attestation, 1)?;
         ensure!(
@@ -1059,11 +1370,110 @@ impl Driver {
             .signatures
             .insert(own_signatures[0].0, own_signatures[0].1);
         shares.signatures.insert(signatures[0].0, signatures[0].1);
+        if shares.signatures.len() >= 3 {
+            self.diagnostics.phase(&node, diagnostics::Phase::Quorum);
+        }
+        Ok(())
+    }
+    fn prune_early_execution(&mut self) -> Result<()> {
+        if let Some(early) = &self.early_execution
+            && (self.engine.committed()?.digest()? != early.node
+                || self.engine.applied()?.digest()? == early.node)
+        {
+            self.early_execution = None;
+        }
+        Ok(())
+    }
+    fn retain_early_execution(
+        &mut self,
+        node: Vec<u8>,
+        attestation: Vec<u8>,
+        result: Vec<u8>,
+        digest: Digest,
+        signer: Key,
+    ) -> Result<()> {
+        self.prune_early_execution()?;
+        if self.engine.committed()?.digest()? != digest
+            || self.engine.applied()?.digest()? == digest
+        {
+            return Ok(());
+        }
+        // Use the normal message validation even for direct local callers. One
+        // encoded, bounded claim per committee signer owns all retained bytes.
+        let message = Message::Execution(node, attestation, result);
+        let bytes = message.payload()?;
+        Message::parse(self.config(), message.number(), &bytes)?;
+        let early = self.early_execution.get_or_insert(EarlyExecution {
+            node: digest,
+            bytes: 0,
+            claims: BTreeMap::new(),
+        });
+        if early.claims.contains_key(&signer) {
+            return Ok(());
+        }
+        let total = early
+            .bytes
+            .checked_add(bytes.len())
+            .context("Early execution size overflow")?;
+        ensure!(
+            early.claims.len() < 4 && total <= MAX_EARLY_EXECUTION_BYTES,
+            "Early execution claims exceed the committee bound"
+        );
+        early.claims.insert(signer, bytes.into_boxed_slice());
+        early.bytes = total;
+        Ok(())
+    }
+    fn reconcile_early_execution(
+        &mut self,
+        node: &Node,
+        local: &super::ExecutionRecord,
+    ) -> Result<()> {
+        let digest = node.digest()?;
+        if self
+            .early_execution
+            .as_ref()
+            .is_none_or(|early| early.node != digest)
+        {
+            return Ok(());
+        }
+        let early = self.early_execution.take().unwrap();
+        let (own_payload, _) = wire::envelope(&local.attestation, 1)?;
+        for bytes in early.claims.into_values() {
+            let Message::Execution(node, attestation, result) =
+                Message::parse(self.config(), 7, &bytes)?
+            else {
+                unreachable!("Only validated Execution claims are retained");
+            };
+            let (payload, _) = wire::envelope(&attestation, 1)?;
+            // A signed but incorrect claim cannot select the canonical result
+            // or stop other signers from completing the locally executed proof.
+            if payload == own_payload && result == local.result {
+                self.collect_share(node, attestation, result)?;
+            }
+        }
         Ok(())
     }
     fn local_request(&mut self, bytes: &[u8]) -> Vec<u8> {
-        self.local_checked(bytes)
-            .unwrap_or_else(|_| self.reply(2, 2, None, None).unwrap_or_default())
+        self.local_checked(bytes).unwrap_or_else(|_| {
+            let fresh = (|| -> Result<Digest> {
+                let value = wire::decode(bytes)?;
+                let fields = super::records::record(&value, 41, 5)?;
+                match fields[3].uint()? {
+                    6 => {
+                        let payload = wire::decode(fields[4].bytes()?)?;
+                        let pair = payload.array(2)?;
+                        crate::authority_read::read_id(pair[0].bytes()?, pair[1].bytes()?)
+                    }
+                    7 => Ok(fields[4].bytes()?.try_into()?),
+                    _ => anyhow::bail!("not a fresh operation"),
+                }
+            })();
+            if let Ok(id) = fresh {
+                self.read_reply(3, 3, id, None).unwrap_or_default()
+            } else {
+                self.reply(2, 2, None, None).unwrap_or_default()
+            }
+        })
     }
     fn local_checked(&mut self, bytes: &[u8]) -> Result<Vec<u8>> {
         let value = wire::decode(bytes)?;
@@ -1147,6 +1557,8 @@ impl Driver {
                     reply => reply,
                 }
             }
+            6 => self.read_start(a[4].bytes()?),
+            7 => self.read_poll(a[4].bytes()?.try_into()?),
             5 => {
                 wire::decode(a[4].bytes()?)?.array(0)?;
                 // Local diagnostics do not send peer traffic or attest quorum readiness.
@@ -1177,13 +1589,20 @@ impl Driver {
         if let Some((node, record)) = self.engine.executed_request(digest)? {
             self.collect_share(node.encode()?, record.attestation, record.result)?;
         }
-        if let Some((_, shares)) = self
+        if let Some((node, shares)) = self
             .shares
             .iter()
             .filter(|(_, s)| s.command == digest && s.signatures.len() >= 3)
             .max_by_key(|(node, s)| (s.height, **node))
         {
             return match self.reply(1, 0, Some(digest), Some(shares)) {
+                Ok(reply) => {
+                    if let Ok(node) = self.engine.known_node(node) {
+                        self.diagnostics
+                            .phase(&node, diagnostics::Phase::ReplyReady);
+                    }
+                    Ok(reply)
+                }
                 Err(error)
                     if error
                         .downcast_ref::<crate::authority_objects::Unavailable>()

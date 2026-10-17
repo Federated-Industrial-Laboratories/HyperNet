@@ -794,3 +794,85 @@ fn certified_routes_bind_bootstrap_identifiers_and_exact_admitted_transport() {
         assert!(RegisteredProfile::parse(&signed, N, I).is_err());
     }
 }
+
+#[test]
+fn fresh_route_reads_match_ordered_checks_without_consuming_voucher() {
+    let mut f = Fixture::new();
+    f.register();
+    let voucher = f.issue(2, 2 * CHARGE);
+    let cases = [
+        (
+            Command::Lookup {
+                service: DESTINATION,
+            },
+            5,
+            Some(f.reader.clone()),
+        ),
+        (
+            Command::VoucherContext {
+                voucher: voucher.clone(),
+            },
+            160,
+            None,
+        ),
+    ];
+    for (command, signer, grant) in cases {
+        let (intent, op, ordered) = f.request(command, signer, grant);
+        assert_eq!(ordered.code, 0);
+        let before = wire::encode(&f.state.value()).unwrap();
+        let fresh = crate::authority_read::evaluate_domain(
+            &op,
+            &f.state,
+            &f.records,
+            &f.reserved,
+            intent.requester,
+            5000,
+        )
+        .unwrap();
+        assert_eq!(
+            (fresh.code, &fresh.value, &fresh.versions, fresh.expires_ms),
+            (
+                ordered.code,
+                &ordered.value,
+                &ordered.versions,
+                ordered.expires_ms
+            )
+        );
+        assert!(fresh.state.is_none());
+        assert_eq!(wire::encode(&f.state.value()).unwrap(), before);
+        assert!(!f.state.records.contains_key(&(167, voucher.id)));
+    }
+    let (_, op, _) = f.request(Fixture::permit(&voucher, 181), 160, None);
+    assert!(
+        crate::authority_read::evaluate_domain(
+            &op,
+            &f.state,
+            &f.records,
+            &f.reserved,
+            public(160),
+            5000
+        )
+        .is_err()
+    );
+    let (_, op, _) = f.request(
+        Command::VoucherContext {
+            voucher: voucher.clone(),
+        },
+        160,
+        None,
+    );
+    f.withdraw_deployment();
+    assert_eq!(
+        crate::authority_read::evaluate_domain(
+            &op,
+            &f.state,
+            &f.records,
+            &f.reserved,
+            public(160),
+            5000
+        )
+        .unwrap()
+        .code,
+        3
+    );
+}

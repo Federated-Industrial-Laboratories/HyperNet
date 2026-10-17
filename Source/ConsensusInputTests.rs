@@ -133,6 +133,71 @@ fn apply_inputs(engine: &mut Engine, app: &dyn Application) {
     panic!("application failed to progress");
 }
 #[test]
+fn learned_quorum_remains_durable_while_missing_inputs_defer_its_vote() {
+    let (configuration, keys) = fixture();
+    let (directories, mut engines) = fixtures::engines(&configuration, &keys);
+    fixtures::enter(&configuration, &keys, &mut engines, 1);
+    let inputs = objects();
+    let refs = inputs.references();
+    let command = fixtures::request(&configuration, 75);
+    commit_inputs(&configuration, &mut engines[..3], &command, &inputs);
+    let source = &engines[0];
+    let prepare = source
+        .known_certificate(&source.snapshot.highest_prepare)
+        .unwrap();
+    let precommit = source.known_certificate(&source.snapshot.locked).unwrap();
+    let required: Vec<_> = [
+        (12, prepare.digest()),
+        (14, prepare.node),
+        (22, wire::digest(&command)),
+    ]
+    .into_iter()
+    .map(|(kind, digest)| repair::Reference {
+        kind,
+        digest,
+        signer: None,
+    })
+    .collect();
+    let items = source.repair_export(&required).unwrap();
+    let mut target = engines.pop().unwrap();
+    target
+        .repair_import_with_inputs(&required, &items, |_| Ok(refs.clone()))
+        .unwrap();
+    let lock = target.snapshot.locked;
+    let generation = target.generation();
+    target.receive_certificate(&precommit.bytes).unwrap();
+    assert_eq!(target.generation(), generation + 1);
+    assert_eq!(target.snapshot.locked, lock);
+    assert!(target.snapshot.own_votes.is_empty());
+    let error = target.advance_phase(&precommit.bytes).unwrap_err();
+    assert!(error.downcast_ref::<Unavailable>().is_some());
+    assert_eq!(target.generation(), generation + 1);
+    drop(target);
+    let mut target = Engine::open(
+        &directories[3].0,
+        configuration,
+        keys[3].clone(),
+        generation + 1,
+    )
+    .unwrap();
+    assert_eq!(target.snapshot.highest_prepare, prepare.digest());
+    assert_eq!(
+        target.known_certificate(&precommit.digest()).unwrap().bytes,
+        precommit.bytes
+    );
+    for object in inputs.objects() {
+        target
+            .import_certificate_input(precommit.digest(), object)
+            .unwrap();
+    }
+    let generation = target.generation();
+    target.receive_certificate(&precommit.bytes).unwrap();
+    assert_eq!(target.generation(), generation + 1);
+    assert_eq!(target.snapshot.locked, precommit.digest());
+    target.advance_phase(&precommit.bytes).unwrap();
+    assert_eq!(target.generation(), generation + 1);
+}
+#[test]
 fn local_output_requires_quorum_and_exact_available_object_closure() {
     let (configuration, keys) = fixture();
     let (directories, mut engines) = fixtures::engines(&configuration, &keys);

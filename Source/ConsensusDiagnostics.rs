@@ -2,6 +2,7 @@
 //! Fixed diagnostic categories expose delays without publishing request contents.
 use super::super::timing;
 use std::{
+    collections::BTreeMap,
     io::Write,
     sync::{Arc, Mutex},
     time::Duration,
@@ -12,6 +13,166 @@ const RATE: Duration = Duration::from_secs(5);
 const SLOW: Duration = Duration::from_millis(250);
 const STALLED: Duration = Duration::from_secs(1);
 const COUNT: usize = 12;
+
+#[derive(Clone, Copy)]
+pub(super) struct Stamp {
+    at: Instant,
+    boot_ms: Option<u64>,
+}
+impl Stamp {
+    pub(super) fn now() -> Self {
+        Self {
+            at: Instant::now(),
+            boot_ms: crate::authority_challenge::boot_time_ms().ok(),
+        }
+    }
+}
+#[derive(Clone, Copy)]
+pub(super) enum Phase {
+    Proposed,
+    PrepareVote,
+    PrepareQc,
+    PreCommitVote,
+    PreCommitQc,
+    CommitVote,
+    CommitQc,
+    Committed,
+    Executed,
+    Quorum,
+    ReplyReady,
+}
+const PHASE_NAMES: [&str; 11] = [
+    "proposed",
+    "prepareVote",
+    "prepareQc",
+    "preCommitVote",
+    "preCommitQc",
+    "commitVote",
+    "commitQc",
+    "committed",
+    "executed",
+    "quorum",
+    "replyReady",
+];
+struct ViewTiming {
+    height: u64,
+    // Correlation stays in memory; only explicit numeric fields are serialized.
+    command: super::Digest,
+    accepted: Option<Stamp>,
+    start: Stamp,
+    phases: [Option<Instant>; PHASE_NAMES.len()],
+    last: Instant,
+    reported: bool,
+}
+#[derive(Default)]
+struct Phases {
+    accepted: BTreeMap<super::Digest, Stamp>,
+    views: BTreeMap<u64, ViewTiming>,
+    retired: u64,
+    overflow: u64,
+}
+impl Phases {
+    fn accepted(&mut self, command: super::Digest, stamp: Stamp) {
+        if self.accepted.contains_key(&command) {
+            return;
+        }
+        if self.accepted.len() == super::MAX_PENDING {
+            if let Some(old) = self
+                .accepted
+                .iter()
+                .min_by_key(|(_, stamp)| stamp.at)
+                .map(|(id, _)| *id)
+            {
+                self.accepted.remove(&old);
+            }
+            self.overflow = self.overflow.saturating_add(1);
+        }
+        self.accepted.insert(command, stamp);
+    }
+    fn proposed(&mut self, node: &super::Node, stamp: Stamp) {
+        let Some(command) = node.command else { return };
+        if self.views.contains_key(&node.view) || node.view <= self.retired {
+            return;
+        }
+        if self.views.len() == super::MAX_PENDING {
+            if let Some(view) = self
+                .views
+                .iter()
+                .find(|(_, record)| record.reported)
+                .map(|(view, _)| *view)
+            {
+                self.views.remove(&view);
+                self.retired = self.retired.max(view);
+            } else {
+                // Saturation loses diagnostics only; it cannot delay authority work.
+                self.retired = self.retired.max(node.view);
+                self.overflow = self.overflow.saturating_add(1);
+                return;
+            }
+        }
+        let accepted = self.accepted.remove(&command);
+        let mut phases = [None; PHASE_NAMES.len()];
+        phases[Phase::Proposed as usize] = Some(stamp.at);
+        self.views.insert(
+            node.view,
+            ViewTiming {
+                height: node.height,
+                command,
+                accepted,
+                start: accepted.unwrap_or(stamp),
+                phases,
+                last: stamp.at,
+                reported: false,
+            },
+        );
+    }
+    fn mark(&mut self, node: &super::Node, phase: Phase, now: Instant) {
+        let Some(record) = self.views.get_mut(&node.view) else {
+            return;
+        };
+        if record.reported || record.height != node.height || Some(record.command) != node.command {
+            return;
+        }
+        let slot = &mut record.phases[phase as usize];
+        if slot.is_none() {
+            *slot = Some(now);
+            record.last = now;
+        }
+    }
+    fn records(&mut self, now: Instant, final_flush: bool) -> (Vec<serde_json::Value>, u64) {
+        let mut records = Vec::new();
+        for (view, record) in &mut self.views {
+            let replied = record.phases[Phase::ReplyReady as usize].is_some();
+            if record.reported
+                || (!replied && !final_flush && now.saturating_duration_since(record.last) < RATE)
+            {
+                continue;
+            }
+            let phases: serde_json::Map<_, _> = PHASE_NAMES
+                .iter()
+                .zip(record.phases)
+                .map(|(name, at)| {
+                    (
+                        (*name).to_owned(),
+                        serde_json::json!(
+                            at.map(|at| nanos(at.saturating_duration_since(record.start.at)))
+                        ),
+                    )
+                })
+                .collect();
+            records.push(serde_json::json!({
+                "view": view, "height": record.height,
+                "startedBootMs": record.start.boot_ms,
+                "acceptedNs": record.accepted.map(|_| 0u64),
+                "elapsedNs": phases,
+                "incomplete": !replied,
+                "reason": if replied { "ReplyReady" } else if final_flush { "Shutdown" } else { "Inactive" },
+            }));
+            record.reported = true;
+        }
+        (records, std::mem::take(&mut self.overflow))
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum Code {
@@ -48,6 +209,7 @@ impl Code {
 }
 #[derive(Clone, Copy)]
 pub(super) enum Stage {
+    Classification,
     LocalIngress,
     Restore,
     Peer,
@@ -60,6 +222,7 @@ pub(super) enum Stage {
 impl Stage {
     fn name(self) -> &'static str {
         match self {
+            Self::Classification => "Classification",
             Self::LocalIngress => "LocalIngress",
             Self::Restore => "Restore",
             Self::Peer => "Peer",
@@ -154,6 +317,26 @@ impl Activity {
             .storage
             .certificate_cache_hits
             .saturating_add(storage.certificate_cache_hits);
+        self.storage.envelope_signature_calls = self
+            .storage
+            .envelope_signature_calls
+            .saturating_add(storage.envelope_signature_calls);
+        self.storage.envelope_signature_ns = self
+            .storage
+            .envelope_signature_ns
+            .saturating_add(storage.envelope_signature_ns);
+        self.storage.envelope_cache_lookups = self
+            .storage
+            .envelope_cache_lookups
+            .saturating_add(storage.envelope_cache_lookups);
+        self.storage.envelope_cache_hits = self
+            .storage
+            .envelope_cache_hits
+            .saturating_add(storage.envelope_cache_hits);
+        self.storage.envelope_cache_evictions = self
+            .storage
+            .envelope_cache_evictions
+            .saturating_add(storage.envelope_cache_evictions);
         self.storage.state_parse_calls = self
             .storage
             .state_parse_calls
@@ -186,8 +369,13 @@ impl Activity {
         if interval < RATE {
             return None;
         }
+        Some(self.finish(now, view))
+    }
+    fn finish(&mut self, now: Instant, view: u64) -> serde_json::Value {
+        let interval = now.saturating_duration_since(self.start);
         let record = serde_json::json!({
             "status": "ReplicaDiagnostic", "code": "ActivitySummary",
+            "bootMs": crate::authority_challenge::boot_time_ms().ok(),
             "firstView": self.first_view, "view": view,
             "intervalNs": nanos(interval), "turns": self.turns,
             "busyElapsedNs": self.busy_ns,
@@ -200,6 +388,11 @@ impl Activity {
             "certificateSignatureCalls": self.storage.certificate_signature_calls,
             "certificateSignatureNs": self.storage.certificate_signature_ns,
             "certificateCacheHits": self.storage.certificate_cache_hits,
+            "envelopeSignatureCalls": self.storage.envelope_signature_calls,
+            "envelopeSignatureNs": self.storage.envelope_signature_ns,
+            "envelopeCacheLookups": self.storage.envelope_cache_lookups,
+            "envelopeCacheHits": self.storage.envelope_cache_hits,
+            "envelopeCacheEvictions": self.storage.envelope_cache_evictions,
             "stateParseCalls": self.storage.state_parse_calls,
             "stateParseNs": self.storage.state_parse_ns,
             "stateCacheHits": self.storage.state_cache_hits,
@@ -209,7 +402,7 @@ impl Activity {
             "expiredChallengeAgeMaxMs": self.storage.expired_challenge_age_max_ms,
         });
         *self = Self::new(now);
-        Some(record)
+        record
     }
 }
 fn nanos(duration: Duration) -> u64 {
@@ -219,6 +412,7 @@ fn nanos(duration: Duration) -> u64 {
 pub(super) struct Diagnostics {
     budget: Arc<Mutex<Budget>>,
     activity: Arc<Mutex<Activity>>,
+    phases: Arc<Mutex<Phases>>,
     work: watch::Sender<Option<Work>>,
 }
 pub(super) struct Monitor {
@@ -236,6 +430,7 @@ impl Diagnostics {
         let diagnostics = Self {
             budget: Arc::new(Mutex::new(Budget::default())),
             activity: Arc::new(Mutex::new(Activity::new(Instant::now()))),
+            phases: Arc::new(Mutex::new(Phases::default())),
             work,
         };
         (
@@ -245,6 +440,53 @@ impl Diagnostics {
                 receiver,
             },
         )
+    }
+    pub(super) fn accepted(&self, command: super::Digest) {
+        if let Ok(mut phases) = self.phases.lock() {
+            phases.accepted(command, Stamp::now());
+        }
+    }
+    pub(super) fn proposed(&self, node: &super::Node, stamp: Stamp) {
+        if let Ok(mut phases) = self.phases.lock() {
+            phases.proposed(node, stamp);
+        }
+    }
+    pub(super) fn phase(&self, node: &super::Node, phase: Phase) {
+        if let Ok(mut phases) = self.phases.lock() {
+            phases.mark(node, phase, Instant::now());
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn signature_lookups(&self) -> u64 {
+        self.activity.lock().unwrap().storage.envelope_cache_lookups
+    }
+    #[cfg(test)]
+    pub(super) fn has_phase(&self, node: &super::Node, phase: Phase) -> bool {
+        self.phases
+            .lock()
+            .unwrap()
+            .views
+            .get(&node.view)
+            .is_some_and(|record| record.phases[phase as usize].is_some())
+    }
+    fn write_activity(&self, mut summary: serde_json::Value, final_flush: bool) {
+        if let Ok(mut phases) = self.phases.lock() {
+            let (records, overflow) = phases.records(Instant::now(), final_flush);
+            summary["viewTimings"] = records.into();
+            summary["viewTimingOverflow"] = overflow.into();
+        }
+        summary["final"] = final_flush.into();
+        let _ = writeln!(std::io::stderr().lock(), "{summary}");
+    }
+    pub(super) fn finish(&self, view: u64) {
+        let summary = self
+            .activity
+            .lock()
+            .ok()
+            .map(|mut activity| activity.finish(Instant::now(), view));
+        if let Some(summary) = summary {
+            self.write_activity(summary, true);
+        }
     }
     pub(super) fn emit(&self, code: Code, stage: Stage, elapsed: Duration, view: u64) {
         self.emit_detail(code, stage, elapsed, view, None, None);
@@ -284,6 +526,11 @@ impl Diagnostics {
                 record["certificateSignatureCalls"] = storage.certificate_signature_calls.into();
                 record["certificateSignatureNs"] = storage.certificate_signature_ns.into();
                 record["certificateCacheHits"] = storage.certificate_cache_hits.into();
+                record["envelopeSignatureCalls"] = storage.envelope_signature_calls.into();
+                record["envelopeSignatureNs"] = storage.envelope_signature_ns.into();
+                record["envelopeCacheLookups"] = storage.envelope_cache_lookups.into();
+                record["envelopeCacheHits"] = storage.envelope_cache_hits.into();
+                record["envelopeCacheEvictions"] = storage.envelope_cache_evictions.into();
                 record["stateParseCalls"] = storage.state_parse_calls.into();
                 record["stateParseNs"] = storage.state_parse_ns.into();
                 record["stateCacheHits"] = storage.state_cache_hits.into();
@@ -356,7 +603,7 @@ impl Drop for Turn {
                 activity.add(Instant::now(), self.work.view, elapsed, storage)
             });
         if let Some(summary) = summary {
-            let _ = writeln!(std::io::stderr().lock(), "{summary}");
+            self.diagnostics.write_activity(summary, false);
         }
         if elapsed >= SLOW {
             self.diagnostics.emit_detail(
@@ -400,6 +647,108 @@ impl Monitor {
 mod tests {
     use super::*;
     #[test]
+    fn view_timing_keeps_first_phases_and_serializes_only_numeric_progress() {
+        let (configuration, _) = crate::consensus::records::tests::fixture();
+        let mut node = configuration.genesis();
+        node.view = 7;
+        node.height = 1;
+        node.command = Some([93; 32]);
+        let now = Instant::now();
+        let stamp = |ms| Stamp {
+            at: now + Duration::from_millis(ms),
+            boot_ms: Some(1000 + ms),
+        };
+        let mut phases = Phases::default();
+        phases.accepted(node.command.unwrap(), stamp(0));
+        phases.accepted(node.command.unwrap(), stamp(5));
+        phases.proposed(&node, stamp(10));
+        phases.proposed(&node, stamp(20));
+        phases.mark(&node, Phase::PrepareVote, stamp(30).at);
+        phases.mark(&node, Phase::PrepareVote, stamp(40).at);
+        phases.mark(&node, Phase::Executed, stamp(100).at);
+        phases.mark(&node, Phase::Quorum, stamp(110).at);
+        phases.mark(&node, Phase::ReplyReady, stamp(120).at);
+        let (records, overflow) = phases.records(stamp(130).at, false);
+        assert_eq!(overflow, 0);
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        let keys: std::collections::BTreeSet<_> = record
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            std::collections::BTreeSet::from([
+                "acceptedNs",
+                "elapsedNs",
+                "height",
+                "incomplete",
+                "reason",
+                "startedBootMs",
+                "view"
+            ])
+        );
+        assert_eq!(record["startedBootMs"], 1000);
+        assert_eq!(record["acceptedNs"], 0);
+        assert_eq!(record["elapsedNs"]["proposed"], 10_000_000);
+        assert_eq!(record["elapsedNs"]["prepareVote"], 30_000_000);
+        assert_eq!(record["elapsedNs"]["replyReady"], 120_000_000);
+        assert!(record["elapsedNs"]["prepareQc"].is_null());
+        assert_eq!(
+            record["elapsedNs"].as_object().unwrap().len(),
+            PHASE_NAMES.len()
+        );
+        assert_eq!(record["incomplete"], false);
+        assert_eq!(record["reason"], "ReplyReady");
+        phases.proposed(&node, stamp(200));
+        phases.mark(&node, Phase::PrepareQc, stamp(210).at);
+        assert!(phases.records(stamp(220).at, true).0.is_empty());
+    }
+    #[test]
+    fn view_timing_bounds_stalled_views_reports_loss_and_flushes_incomplete_progress() {
+        let (configuration, _) = crate::consensus::records::tests::fixture();
+        let mut node = configuration.genesis();
+        node.height = 1;
+        node.command = Some([94; 32]);
+        let now = Instant::now();
+        let stamp = Stamp {
+            at: now,
+            boot_ms: None,
+        };
+        let mut phases = Phases::default();
+        for view in 1..=super::super::MAX_PENDING as u64 + 1 {
+            node.view = view;
+            phases.proposed(&node, stamp);
+        }
+        assert_eq!(phases.views.len(), super::super::MAX_PENDING);
+        let (records, overflow) = phases.records(now + RATE, false);
+        assert_eq!(overflow, 1);
+        assert_eq!(records.len(), super::super::MAX_PENDING);
+        assert!(records.iter().all(|record| record["incomplete"] == true
+            && record["reason"] == "Inactive"
+            && record["acceptedNs"].is_null()
+            && record["startedBootMs"].is_null()
+            && record["elapsedNs"]["executed"].is_null()));
+        node.view += 1;
+        phases.proposed(&node, stamp);
+        assert_eq!(phases.views.len(), super::super::MAX_PENDING);
+        let (records, overflow) = phases.records(now, true);
+        assert_eq!(overflow, 0);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["reason"], "Shutdown");
+        assert_eq!(records[0]["view"], node.view);
+        node.view = 1;
+        phases.proposed(&node, stamp);
+        assert!(phases.records(now, true).0.is_empty());
+        for byte in 0..=super::super::MAX_PENDING as u8 {
+            phases.accepted([byte; 32], stamp);
+        }
+        assert_eq!(phases.accepted.len(), super::super::MAX_PENDING);
+        assert_eq!(phases.records(now, true).1, 1);
+    }
+    #[test]
     fn activity_includes_short_turns_without_losing_suppressed_interval_work() {
         let start = Instant::now();
         let mut activity = Activity::new(start);
@@ -413,6 +762,11 @@ mod tests {
             certificate_signature_calls: 3,
             certificate_signature_ns: 30,
             certificate_cache_hits: 4,
+            envelope_signature_calls: 1,
+            envelope_signature_ns: 2,
+            envelope_cache_lookups: 3,
+            envelope_cache_hits: 4,
+            envelope_cache_evictions: 5,
             state_parse_calls: 1,
             state_parse_ns: 2,
             state_cache_hits: 3,
@@ -445,6 +799,11 @@ mod tests {
         assert_eq!(record["certificateSignatureCalls"], 300);
         assert_eq!(record["certificateSignatureNs"], 3000);
         assert_eq!(record["certificateCacheHits"], 400);
+        assert_eq!(record["envelopeSignatureCalls"], 100);
+        assert_eq!(record["envelopeSignatureNs"], 200);
+        assert_eq!(record["envelopeCacheLookups"], 300);
+        assert_eq!(record["envelopeCacheHits"], 400);
+        assert_eq!(record["envelopeCacheEvictions"], 500);
         assert_eq!(record["stateParseCalls"], 100);
         assert_eq!(record["stateParseNs"], 200);
         assert_eq!(record["stateCacheHits"], 300);
@@ -465,6 +824,11 @@ mod tests {
         assert_eq!(next["journalCommits"], 0);
         assert_eq!(next["storageElapsedNs"], 0);
         assert_eq!(next["certificateSignatureCalls"], 0);
+        assert_eq!(next["envelopeSignatureCalls"], 0);
+        assert_eq!(next["envelopeSignatureNs"], 0);
+        assert_eq!(next["envelopeCacheLookups"], 0);
+        assert_eq!(next["envelopeCacheHits"], 0);
+        assert_eq!(next["envelopeCacheEvictions"], 0);
         assert_eq!(next["certificateSignatureNs"], 0);
         assert_eq!(next["certificateCacheHits"], 0);
         assert_eq!(next["stateParseCalls"], 0);

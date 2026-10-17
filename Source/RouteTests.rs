@@ -61,63 +61,152 @@ fn typed_voucher(
 
 #[test]
 fn private_route_refresh_schedule_predicts_full_action_cost() {
-    let mut schedule = AdmissionSchedule::default();
+    let schedule = AdmissionSchedule::default();
     let reader = Some(([31; 32], false));
-    assert_eq!(refresh_at(7600, 1800), 5700);
-    assert_eq!(schedule.choose(5600, Some(7600), 1800, None), Work::Wait);
-    assert_eq!(schedule.choose(5700, Some(7600), 1800, None), Work::Refresh);
-    // A fresh job must not occupy the single requester across the latest renewal start.
-    assert_eq!(schedule.choose(3800, Some(7600), 1800, reader), Work::Admit);
+    assert_eq!(refresh_at(7600, 1800, None), 5700);
     assert_eq!(
-        schedule.choose(3900, Some(7600), 1800, reader),
+        schedule.choose(5600, Some((7600, 0)), 1800, 1800, None),
+        Work::Wait
+    );
+    assert_eq!(
+        schedule.choose(5700, Some((7600, 0)), 1800, 1800, None),
         Work::Refresh
     );
-    // A larger observed action cost immediately advances the next decision, even without a job.
-    assert_eq!(schedule.choose(5100, Some(7600), 2500, None), Work::Refresh);
-    assert_eq!(refresh_at(7600, 2500), 5000);
-    assert_eq!(refresh_at(100, u64::MAX), 0);
+    // A fresh job must not occupy the single requester across the latest renewal start.
+    assert_eq!(
+        schedule.choose(3800, Some((7600, 0)), 1800, 1800, reader),
+        Work::Admit
+    );
+    assert_eq!(
+        schedule.choose(3900, Some((7600, 0)), 1800, 1800, reader),
+        Work::Refresh
+    );
+    // A slow admission reserves time only when admission work is actually queued.
+    assert_eq!(
+        schedule.choose(5100, Some((7600, 0)), 1800, 4500, None),
+        Work::Wait
+    );
+    assert_eq!(
+        schedule.choose(5100, Some((7600, 0)), 1800, 4500, reader),
+        Work::Refresh
+    );
+    assert_eq!(refresh_at(100, u64::MAX, None), 0);
 }
 
 #[test]
-fn private_route_reader_fairness_is_one_stage_and_exact_connection() {
+fn private_route_reader_arriving_during_renewal_receives_one_admission_turn() {
     let mut schedule = AdmissionSchedule::default();
-    let first = Some(([31; 32], false));
-    let second = Some(([32; 32], false));
+    let reader = Some(([31; 32], false));
+    let replacement = Some(([32; 32], false));
     let attachment = Some(([33; 32], true));
     assert_eq!(
-        schedule.choose(5000, Some(7500), 1800, first),
+        schedule.choose(6000, Some((7500, 0)), 1800, 1800, None),
         Work::Refresh
     );
-    schedule.refreshed(first);
-    // Insufficient serial capacity cannot starve every admission; the Gate still enforces expiry.
-    assert_eq!(schedule.choose(6800, Some(9300), 1800, first), Work::Admit);
-    schedule.admitted();
+    schedule.refreshed();
     assert_eq!(
-        schedule.choose(8600, Some(9300), 1800, first),
-        Work::Refresh
+        schedule.choose(6800, Some((9300, 0)), 1800, 1800, None),
+        Work::Wait
     );
-    schedule.refreshed(first);
+    // A background attachment cannot spend the next reader's scheduling turn.
+    schedule.admitted(attachment);
     assert_eq!(
-        schedule.choose(8600, Some(11100), 1800, second),
+        schedule.choose(6800, Some((9300, 0)), 1800, 1800, reader),
+        Work::Admit
+    );
+    schedule.admitted(reader);
+    assert_eq!(
+        schedule.choose(6800, Some((9300, 0)), 1800, 1800, reader),
+        Work::Refresh
+    );
+    schedule.refreshed();
+    // A replacement required by a waiting reader is classified as eligible work.
+    assert_eq!(
+        schedule.choose(6800, Some((9300, 0)), 1800, 1800, replacement),
+        Work::Admit
+    );
+    schedule.admitted(replacement);
+    assert_eq!(
+        schedule.choose(6800, Some((9300, 0)), 1800, 1800, replacement),
+        Work::Refresh
+    );
+    schedule.refreshed();
+    assert_eq!(
+        schedule.choose(8600, Some((11100, 0)), 1800, 1800, attachment),
+        Work::Wait
+    );
+}
+
+#[test]
+fn private_route_background_attachments_cannot_delay_active_readers() {
+    let mut schedule = AdmissionSchedule::default();
+    let background = Some(([31; 32], true));
+    let required = Some(([31; 32], false));
+    let live = Some((10000, 3000));
+    // Even an expensive pending attachment neither runs nor brings the renewal forward.
+    assert_eq!(
+        schedule.choose(4000, live, 1000, 9000, background),
+        Work::Wait
+    );
+    assert_eq!(
+        schedule.choose(8800, live, 1000, 9000, background),
+        Work::Wait
+    );
+    assert_eq!(
+        schedule.choose(8900, live, 1000, 9000, background),
+        Work::Refresh
+    );
+    schedule.refreshed();
+    let renewed = Some((12500, 10000));
+    assert_eq!(
+        schedule.choose(11400, renewed, 1000, 9000, background),
+        Work::Refresh
+    );
+    // The same attachment becomes necessary when an admitted reader waits for its target.
+    // Its fair turn remains available; neither its queue deadline nor a Gate expiry is reset.
+    assert_eq!(
+        schedule.choose(11400, renewed, 1000, 9000, required),
+        Work::Admit
+    );
+    schedule.admitted(required);
+    assert_eq!(
+        schedule.choose(11400, renewed, 1000, 9000, required),
+        Work::Refresh
+    );
+    // Once forwarding finishes, ordinary pool replenishment is eligible again.
+    assert_eq!(
+        schedule.choose(11400, None, 1000, 9000, background),
+        Work::Admit
+    );
+}
+
+#[test]
+fn private_route_fresh_permission_has_useful_time_without_extending_its_expiry() {
+    let schedule = AdmissionSchedule::default();
+    let reader = Some(([31; 32], false));
+    let expires = 10000;
+    let accepted_at = 8000;
+    // Even a successful but slow renewal cannot immediately order another renewal.
+    assert_eq!(
+        schedule.choose(8000, Some((expires, accepted_at)), 4000, 4000, None),
+        Work::Wait
+    );
+    assert_eq!(
+        schedule.choose(8000, Some((expires, accepted_at)), 4000, 4000, reader),
+        Work::Admit
+    );
+    assert_eq!(
+        schedule.choose(9000, Some((expires, accepted_at)), 4000, 4000, None),
         Work::Refresh
     );
     assert_eq!(
-        schedule.choose(8600, Some(11100), 1800, first),
+        schedule.choose(expires, Some((expires, accepted_at)), 4000, 4000, None),
         Work::Refresh
     );
-    schedule.refreshed(first);
-    // Expiry/cancellation removes the selected job; its turn cannot survive for later reuse.
-    assert_eq!(schedule.choose(8600, Some(11100), 1800, None), Work::Wait);
-    assert_eq!(
-        schedule.choose(8600, Some(11100), 1800, first),
-        Work::Refresh
-    );
-    schedule.refreshed(attachment);
-    assert_eq!(
-        schedule.choose(8600, Some(11100), 1800, attachment),
-        Work::Refresh
-    );
-    assert_eq!(schedule.choose(8600, None, 1800, attachment), Work::Admit);
+    // Keep a viable early renewal instead of delaying every proof until its midpoint.
+    assert_eq!(refresh_at(10500, 2000, Some(8000)), 8400);
+    assert!(useful_until(8000, expires) < expires);
+    assert_eq!(refresh_at(expires, u64::MAX, Some(u64::MAX)), expires);
 }
 
 #[tokio::test]
@@ -153,8 +242,11 @@ async fn private_route_cold_admission_yields_with_original_binding_and_slot() {
     let job = Some((connection, false));
     let mut state = State::empty([1; 32], [2; 32]);
     let mut schedule = AdmissionSchedule::default();
-    assert_eq!(schedule.choose(3000, Some(8000), 1700, job), Work::Admit);
-    schedule.admitted();
+    assert_eq!(
+        schedule.choose(3000, Some((8000, 0)), 1700, 1700, job),
+        Work::Admit
+    );
+    schedule.admitted(job);
     assert!(
         retained_voucher(&state, &reference, &queued.request, possession)
             .unwrap()
@@ -162,11 +254,17 @@ async fn private_route_cold_admission_yields_with_original_binding_and_slot() {
     );
     // Only the certified Context result is retained; no usage record or forwarding permission exists.
     state.records.insert((166, reference.id), record);
-    assert_eq!(schedule.choose(4700, Some(8000), 1700, job), Work::Refresh);
+    assert_eq!(
+        schedule.choose(4700, Some((8000, 0)), 1700, 1700, job),
+        Work::Refresh
+    );
     assert_eq!(slots.available_permits(), 0);
-    schedule.refreshed(job);
-    assert_eq!(schedule.choose(6400, Some(8900), 1700, job), Work::Admit);
-    schedule.admitted();
+    schedule.refreshed();
+    assert_eq!(
+        schedule.choose(6400, Some((8900, 0)), 1700, 1700, job),
+        Work::Admit
+    );
+    schedule.admitted(job);
     assert!(
         retained_voucher(&state, &reference, &queued.request, possession)
             .unwrap()
@@ -190,12 +288,6 @@ async fn private_route_cold_admission_yields_with_original_binding_and_slot() {
     waiting.retain(|job| job.deadline > 12000);
     assert!(waiting.is_empty());
     assert_eq!(slots.available_permits(), 1);
-    schedule.refreshed(job);
-    assert_eq!(schedule.choose(12000, Some(14500), 1700, None), Work::Wait);
-    assert_eq!(
-        schedule.choose(12000, Some(14500), 1700, job),
-        Work::Refresh
-    );
 }
 
 fn certificates() -> (Certificate, Certificate) {
@@ -392,9 +484,10 @@ async fn private_route_endpoint_prepares_near_expiry_permission_before_ready_and
     let budget = 1800;
     gate.renew(old_expiry).unwrap();
     // The proof is current, but an application action would cross the renewal's latest start.
-    assert!(now < refresh_at(old_expiry, budget));
+    assert!(now < refresh_at(old_expiry, budget, None));
     let mut permission = EndpointPermission {
         gate: gate.clone(),
+        accepted_at: None,
         renewals: 0,
     };
     let fresh_expiry = now + 5000;
@@ -410,7 +503,7 @@ async fn private_route_endpoint_prepares_near_expiry_permission_before_ready_and
     assert!(renewed);
     assert_eq!(gate.expiry().unwrap(), fresh_expiry);
     permission
-        .prepare(deadline, budget, |_| {
+        .prepare(deadline, 10000, |_| {
             anyhow::bail!("fresh permission must be reused")
         })
         .unwrap();
@@ -447,6 +540,8 @@ async fn private_route_endpoint_prepares_near_expiry_permission_before_ready_and
     assert_eq!(request.session.deadline, deadline);
     assert_eq!(permission.renewals, 1);
     drop(request);
+    // This models a later point in the same proof after its useful interval has elapsed.
+    permission.accepted_at = None;
     gate.renew(crate::authority_challenge::boot_time_ms().unwrap() + 1000)
         .unwrap();
     assert!(
@@ -457,6 +552,16 @@ async fn private_route_endpoint_prepares_near_expiry_permission_before_ready_and
             .is_err()
     );
     assert_eq!(permission.renewals, 2);
+    let retained_expiry = gate.expiry().unwrap();
+    assert!(
+        permission
+            .renew(deadline, |_| Ok(
+                crate::authority_challenge::boot_time_ms().unwrap()
+            ))
+            .is_err()
+    );
+    assert_eq!(gate.expiry().unwrap(), retained_expiry);
+    assert_eq!(permission.renewals, 3);
     assert!(
         permission
             .prepare(
@@ -466,7 +571,7 @@ async fn private_route_endpoint_prepares_near_expiry_permission_before_ready_and
             )
             .is_err()
     );
-    assert_eq!(permission.renewals, 2);
+    assert_eq!(permission.renewals, 3);
 }
 #[tokio::test]
 async fn private_route_endpoint_readiness_retains_original_deadline() {
@@ -615,6 +720,245 @@ async fn private_route_plain_session_progresses_while_authority_maintenance_is_d
     assert_eq!(slots.available_permits(), 1);
     fs::remove_dir_all(root).unwrap();
 }
+#[tokio::test]
+async fn private_route_application_demand_renews_pending_work_and_ends_before_idle() {
+    use crate::trust_wire::Value as V;
+    use std::os::{fd::AsRawFd, unix::fs::PermissionsExt};
+    let root = std::env::temp_dir().join(format!(
+        "HyperNetRouteDemand{}",
+        hex::encode(protocol::random().unwrap())
+    ));
+    files::create_directory(&root).unwrap();
+    let path = root.join("Control.sock");
+    let directory = files::private_directory(&root).unwrap();
+    let application = tokio::net::UnixListener::bind(
+        Path::new("/proc/self/fd")
+            .join(directory.as_raw_fd().to_string())
+            .join("Control.sock"),
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let packet = wire::encode(&V::Array(vec![
+        V::Uint(41),
+        V::Uint(1),
+        crate::authority_proof::Scope {
+            network: [1; 32],
+            incarnation: [2; 32],
+            configuration: [3; 32],
+            epoch: 1,
+        }
+        .value(),
+        V::Uint(2),
+        V::Bytes(wire::encode(&V::Array(vec![])).unwrap()),
+    ]))
+    .unwrap();
+    let expected = packet.clone();
+    let (arrived, mut arrivals) = mpsc::channel(2);
+    let (release, mut releases) = mpsc::channel(2);
+    let application = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (mut stream, _) = application.accept().await.unwrap();
+            assert_eq!(
+                route_io::receive(&mut stream, wire::MAXIMUM).await.unwrap(),
+                expected
+            );
+            arrived.send(()).await.unwrap();
+            releases.recv().await.unwrap();
+            route_io::send(&mut stream, b"Current local response")
+                .await
+                .unwrap();
+        }
+    });
+    let (mut peer, session, gate, ready) = readiness_fixture(10000);
+    let now = crate::authority_challenge::boot_time_ms().unwrap();
+    let expires = now + 1000;
+    gate.renew(expires).unwrap();
+    let permission = EndpointPermission {
+        gate: gate.clone(),
+        accepted_at: Some(now),
+        renewals: 0,
+    };
+    let possession = ed25519_dalek::SigningKey::from_bytes(&[33; 32])
+        .verifying_key()
+        .to_bytes();
+    let voucher = typed_voucher([31; 32], [32; 32], possession);
+    let live = BTreeMap::from([(
+        [34; 32],
+        Live {
+            renewal: Renewal::fixture(voucher.reference, vec![], u64::MAX),
+            gate: gate.clone(),
+            accepted_at: now,
+            deadline: session.deadline,
+            timing: Timing::begin(now, false),
+            renewals: 0,
+        },
+    )]);
+    let driver_gate = gate.clone();
+    let driver = tokio::spawn(async move {
+        let request = ready_session(session, ready, driver_gate.clone()).await?;
+        ordinary_requests(request, (1, [1; 32], [2; 32]), driver_gate, &path).await
+    });
+    route_io::receive(&mut peer, 256).await.unwrap();
+    tokio::task::yield_now().await;
+    assert!(!permission.refresh_due(expires, 0).unwrap());
+    assert!(live_renewal(&live).unwrap().is_none());
+    route_io::send(&mut peer, &packet).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), arrivals.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        gate.demanded(),
+        "waiting for the local application remains active"
+    );
+    tokio::time::sleep(Duration::from_millis(
+        expires.saturating_sub(crate::authority_challenge::boot_time_ms().unwrap()) + 1,
+    ))
+    .await;
+    assert!(
+        permission
+            .refresh_due(crate::authority_challenge::boot_time_ms().unwrap(), 0)
+            .unwrap()
+    );
+    assert!(live_renewal(&live).unwrap().is_some());
+    gate.renew(crate::authority_challenge::boot_time_ms().unwrap() + 3000)
+        .unwrap();
+    release.send(()).await.unwrap();
+    assert_eq!(
+        route_io::receive(&mut peer, 256).await.unwrap(),
+        b"Current local response"
+    );
+    tokio::task::yield_now().await;
+    assert!(
+        !gate.demanded(),
+        "waiting for the next frame must release application activity"
+    );
+    assert!(!permission.refresh_due(gate.expiry().unwrap(), 0).unwrap());
+    assert!(live_renewal(&live).unwrap().is_none());
+    route_io::send(&mut peer, &packet).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), arrivals.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(gate.demanded());
+    driver.abort();
+    assert!(matches!(driver.await, Err(error) if error.is_cancelled()));
+    assert!(
+        !gate.demanded(),
+        "cancellation must release pending application activity"
+    );
+    application.abort();
+    assert!(application.await.unwrap_err().is_cancelled());
+    fs::remove_dir_all(root).unwrap();
+}
+#[tokio::test]
+async fn private_authority_pending_poll_retains_demand_until_terminal_reply_or_disconnect() {
+    use crate::trust_wire::Value as V;
+    use std::os::{fd::AsRawFd, unix::fs::PermissionsExt};
+    let root = std::env::temp_dir().join(format!(
+        "HyperNetPending{}",
+        hex::encode(protocol::random().unwrap())
+    ));
+    files::create_directory(&root).unwrap();
+    let path = root.join("Control.sock");
+    let directory = files::private_directory(&root).unwrap();
+    let application = tokio::net::UnixListener::bind(
+        Path::new("/proc/self/fd")
+            .join(directory.as_raw_fd().to_string())
+            .join("Control.sock"),
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let scope = crate::authority_proof::Scope {
+        network: [1; 32],
+        incarnation: [2; 32],
+        configuration: [3; 32],
+        epoch: 1,
+    }
+    .value();
+    let digest = [7; 32];
+    let packet = wire::encode(&V::Array(vec![
+        V::Uint(41),
+        V::Uint(1),
+        scope.clone(),
+        V::Uint(1),
+        V::Bytes(digest.to_vec()),
+    ]))
+    .unwrap();
+    let reply = |status| {
+        wire::encode(&V::Array(vec![
+            V::Uint(42),
+            V::Uint(1),
+            scope.clone(),
+            V::Uint(status),
+            V::Uint(0),
+            V::Bytes(digest.to_vec()),
+            V::Null,
+            V::Null,
+            V::Null,
+            V::Array(vec![]),
+        ]))
+        .unwrap()
+    };
+    let replies = [reply(0), reply(2), reply(0)];
+    let expected = packet.clone();
+    let server_replies = replies.clone();
+    let application = tokio::spawn(async move {
+        for reply in server_replies {
+            let (mut stream, _) = application.accept().await.unwrap();
+            assert_eq!(
+                route_io::receive(&mut stream, wire::MAXIMUM).await.unwrap(),
+                expected
+            );
+            route_io::send(&mut stream, &reply).await.unwrap();
+        }
+    });
+    let (mut peer, session, gate, ready) = readiness_fixture(10000);
+    let permission = EndpointPermission {
+        gate: gate.clone(),
+        accepted_at: None,
+        renewals: 0,
+    };
+    gate.renew(crate::authority_challenge::boot_time_ms().unwrap() + 5000)
+        .unwrap();
+    let driver_gate = gate.clone();
+    let driver = tokio::spawn(async move {
+        let request = ready_session(session, ready, driver_gate.clone()).await?;
+        ordinary_requests(request, (1, [1; 32], [2; 32]), driver_gate, &path).await
+    });
+    route_io::receive(&mut peer, 256).await.unwrap();
+    for (index, reply) in replies.iter().enumerate() {
+        route_io::send(&mut peer, &packet).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), route_io::receive(&mut peer, 1024))
+                .await
+                .unwrap()
+                .unwrap(),
+            *reply
+        );
+        tokio::task::yield_now().await;
+        let pending = index != 1;
+        assert_eq!(gate.demanded(), pending);
+        assert_eq!(
+            permission.refresh_due(gate.expiry().unwrap(), 0).unwrap(),
+            pending
+        );
+    }
+    // A pending exchange may renew while the relay delays its next poll, but
+    // the existing bounded read still owns cancellation and idle expiry.
+    drop(peer);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), driver)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    assert!(!gate.demanded());
+    application.await.unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[derive(Default)]
 struct BlockWrites {
     blocked: std::sync::atomic::AtomicBool,
@@ -693,7 +1037,7 @@ async fn private_route_tls_read_error_cannot_flush_ciphertext_after_permission_e
     let mut client = client.unwrap();
     let expires = crate::authority_challenge::boot_time_ms().unwrap() + 100;
     let permission = route_io::Gate::new(expires);
-    boundary.arm(permission, deadline).unwrap();
+    boundary.arm(permission.clone(), deadline).unwrap();
     state.blocked.store(true, Ordering::Release);
     server
         .write_all(b"Queued private application ciphertext")
@@ -720,6 +1064,15 @@ async fn private_route_tls_read_error_cannot_flush_ciphertext_after_permission_e
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert_eq!(state.written.load(Ordering::Acquire), before);
     assert!(server.get_ref().1.wants_write());
+    assert!(
+        permission.demanded(),
+        "TLS reads that try to emit ciphertext must request renewal"
+    );
+    permission.renew(deadline).unwrap();
+    assert!(
+        !permission.demanded(),
+        "the failed TLS read must not retain an activity lease"
+    );
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn private_route_nested_tls_checks_final_identity_before_application_credentials() {
@@ -1337,6 +1690,7 @@ async fn private_route_rendezvous_replaces_expired_attachment_without_second_res
         live: Live {
             renewal: Renewal::fixture(voucher.reference, target.clone(), 11000),
             gate: route_io::Gate::new(boot),
+            accepted_at: 0,
             deadline,
             timing: Timing::begin(boot, false),
             renewals: 0,
@@ -1521,6 +1875,7 @@ async fn private_route_rendezvous_refusal_and_setup_expiry_release_original_slot
             live: Live {
                 renewal: Renewal::fixture(voucher.reference, b"Exact target".to_vec(), 11000),
                 gate: gate.clone(),
+                accepted_at: 0,
                 deadline: now + 10000,
                 timing: Timing::begin(now, false),
                 renewals: 0,

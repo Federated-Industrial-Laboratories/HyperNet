@@ -196,6 +196,141 @@ fn immutable_objects_recover_unpublished_suffix_and_refuse_committed_corruption(
 }
 
 #[test]
+fn state_roots_refuse_corruption_invalid_descriptors_and_old_format_on_reopen() {
+    for fault in ["Missing", "Corrupt", "Identity", "Kind", "Format"] {
+        let (config, keys) = fixture();
+        let directory = Directory::new();
+        let mut engine =
+            Engine::create(&directory.0, config.clone(), keys[0].clone(), initial()).unwrap();
+        let object = engine.snapshot.application.object.clone();
+        assert!(
+            engine
+                .repair_export(&[repair::Reference {
+                    kind: storage::APPLICATION_STATE as u64,
+                    digest: object.identity,
+                    signer: None
+                }])
+                .is_err()
+        );
+        let path = directory.0.join("Objects").join(object.key());
+        match fault {
+            "Missing" => fs::remove_file(path).unwrap(),
+            "Corrupt" => {
+                let mut bytes = fs::read(&path).unwrap();
+                *bytes.last_mut().unwrap() ^= 1;
+                fs::write(path, bytes).unwrap();
+            }
+            "Identity" => {
+                let store = engine.snapshot.objects.as_ref().unwrap();
+                let different = store
+                    .staged(storage::APPLICATION_STATE, [91; 32], engine.application())
+                    .unwrap();
+                store.publish(&different).unwrap();
+                store.sync().unwrap();
+                engine.snapshot.application.object = different;
+                engine.journal.commit(&engine.snapshot).unwrap();
+            }
+            "Kind" => {
+                engine.snapshot.application.object.kind = storage::EXECUTION;
+                engine.journal.commit(&engine.snapshot).unwrap();
+            }
+            "Format" => {
+                engine.snapshot.version = 2;
+                engine.journal.commit(&engine.snapshot).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let generation = engine.generation();
+        drop(engine);
+        assert!(
+            Engine::open(&directory.0, config, keys[0].clone(), generation).is_err(),
+            "{fault}"
+        );
+    }
+}
+
+#[test]
+fn failed_state_or_journal_publication_reopens_old_application_before_retry() {
+    for fault in ["State", "Journal"] {
+        let (config, keys, directories, mut replicas, votes) = transaction_tests::prepared();
+        let mut qc = Certificate::collect(&config, &votes[..3]).unwrap();
+        for _ in 0..2 {
+            let votes: Vec<_> = replicas
+                .iter_mut()
+                .map(|replica| {
+                    SignedVote::parse(&config, &replica.advance_phase(&qc.bytes).unwrap()).unwrap()
+                })
+                .collect();
+            qc = Certificate::collect(&config, &votes[..3]).unwrap();
+        }
+        let mut target = replicas.pop().unwrap();
+        target.decide(&qc.bytes).unwrap();
+        assert!(target.snapshot.apply_cursor.is_some());
+        target.validate_application_cursor().unwrap();
+        let before = target.application().to_vec();
+        let old_path = directories[3]
+            .0
+            .join("Objects")
+            .join(target.snapshot.application.object.key());
+        let state =
+            wire::encode_state(&V::Array(vec![V::Uint(1), V::Bytes(vec![173; 128 * 1024])]))
+                .unwrap();
+        let store = target.snapshot.objects.as_ref().unwrap().clone();
+        let staged = storage::StateObject::staged(&store, state.clone()).unwrap();
+        let state_path = directories[3].0.join("Objects").join(staged.object.key());
+        let obstruction = if fault == "State" {
+            std::os::unix::fs::symlink(old_path.file_name().unwrap(), &state_path).unwrap();
+            state_path.clone()
+        } else {
+            let path = directories[3].0.join("SignerPending.bin");
+            std::os::unix::fs::symlink("Signer.bin", &path).unwrap();
+            path
+        };
+        let execution = |_: &[u8], position: &Committed| -> Result<Execution> {
+            let mut execution = fixtures::execution(&config, position);
+            execution.state = state.clone();
+            if let ExecutionOutput::Result { attestation, .. } = &mut execution.output {
+                let mut fields = wire::decode(attestation)?.array(23)?.to_vec();
+                fields[16] = V::Bytes(wire::digest(&state).to_vec());
+                *attestation = wire::encode(&V::Array(fields))?;
+            }
+            Ok(execution)
+        };
+        let generation = target.generation();
+        assert!(target.apply_turn(execution).is_err());
+        assert_eq!(target.generation(), generation);
+        assert_eq!(target.application(), before);
+        assert!(target.execution(qc.node).unwrap().is_none());
+        fs::remove_file(obstruction).unwrap();
+        assert!(
+            target
+                .apply_turn(|_, _| anyhow::bail!("Poisoned signer executed"))
+                .is_err()
+        );
+        drop(target);
+        let mut target = Engine::open(
+            &directories[3].0,
+            config.clone(),
+            keys[3].clone(),
+            generation,
+        )
+        .unwrap();
+        assert_eq!(target.application(), before);
+        assert!(target.archive.leaves().is_empty());
+        assert!(!state_path.exists());
+        assert!(old_path.exists());
+        assert!(matches!(
+            target.apply_turn(execution).unwrap(),
+            application::Turn::Result(..)
+        ));
+        assert_eq!(target.application(), state);
+        assert_eq!(target.archive.leaves(), &[qc.node]);
+        assert!(state_path.exists());
+        assert!(!old_path.exists());
+    }
+}
+
+#[test]
 fn object_directory_flushes_follow_creations_and_removals() {
     let (config, keys) = fixture();
     let directory = Directory::new();

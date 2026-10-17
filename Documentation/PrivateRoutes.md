@@ -70,6 +70,20 @@ replace current permission; it cannot extend an old proof or the connection's
 original duration, idle or byte limits. The endpoint revalidates its deployment
 permission separately. Application access still requires its own current proof.
 
+An idle admitted channel does not renew either transit or endpoint permission.
+Buffered forwarding writes request renewal; bare reads do not. The endpoint also
+keeps permission current while an application exchange is executing, including
+the wait for its local reply. An exact matching authority Pending reply retains
+activity through the next bounded poll read, allowing endpoint renewal while
+the relay obtains its own current permission. Terminal replies end activity
+before waiting for new work. Failure, cancellation and the original read deadline
+release activity; pending replies do not extend any connection limit.
+An expired raw write, flush or shutdown requests a fresh proof below TLS and
+remains blocked. The same rule covers ciphertext emitted by a TLS read. This
+request is consumed by one renewal, so a cancelled TLS future cannot cause an
+idle renewal loop. New demand wakes the authority dispatcher; existing permission,
+consent and original connection bounds still decide whether any bytes can pass.
+
 `RouteReady` reports remaining total transport time after relay admission. The
 client applies that duration from receipt while retaining its original connection
 limit. Inside final-service TLS, `EndpointReady` confirms the exact network,
@@ -85,7 +99,8 @@ Every frame is checked against the endpoint's selected protocol. An I/O failure
 closes the channel; an unresolved operation cannot silently reconnect or replay.
 
 For protocols 1 through 5, one bounded task handles the session's validated
-frames while the authority requester refreshes its shared endpoint permission.
+frames while the authority requester refreshes its shared endpoint permission
+only for active exchanges or pending writes.
 Ordinary requests do not wait for maintenance dispatch while that permission
 remains current. Protocol 6 also requires a fresh reader authority check for each
 request. Neither path extends the application's own permission or deadline.
@@ -104,14 +119,31 @@ defer acceptance by one dispatch interval. Existing streams and shutdown remain
 active; the listener does not spin, enlarge a pool or reset a connection deadline.
 Acceptance resumes when resources become available. Fatal listener errors still
 stop the service.
-Renewal is scheduled before the current proof expires,
-using the longest measured successful authority operation and the dispatch
-interval. Due renewals take priority between authority jobs. Cold reader
+Renewal scheduling uses the latest successful measurement of the corresponding
+renewal operation and the dispatch interval. Unrelated authority operations do
+not permanently increase that estimate. Queued admission separately reserves
+the latest measured action cost. Due renewals take priority between authority jobs. Cold reader
 admission separates voucher context from the final Permit so renewal can run
 between them. A retained exact voucher can supply context, but it never replaces
 the current Permit required before forwarding. One waiting reader admission step
-can follow renewal to prevent indefinite starvation. The forwarding guard still
-enforces its certified expiry while that step runs.
+can follow renewal, including a reader that arrived during the renewal. An
+unrelated background attachment cannot consume that turn. Speculative attachment
+replenishment waits while admitted reader channels remain open, including idle
+channels, and reserves no renewal time. A
+replacement required by a waiting reader remains eligible. The forwarding guard
+still enforces its certified expiry while that step runs.
+
+If a measured cost would require renewing a newly accepted proof immediately,
+the scheduler leaves the first half of that proof's actual remaining lifetime
+for useful work. A viable earlier renewal start remains unchanged. This changes
+dispatch timing only: insufficient authority capacity still pauses or refuses
+I/O at expiry. It never extends a proof or a connection deadline.
+
+Route metadata that is byte-identical to successfully persisted state does not
+require another disk replacement. Changed metadata and every new spent connection
+still require durable publication. A failed replacement cannot count as a saved
+copy or suppress the next write.
+
 Queue time counts against the original admission deadline; excess connections
 close. Fixed-category, bounded diagnostics distinguish capacity refusal, TLS or
 request rejection, authority admission, admitted permission expiry, unavailable

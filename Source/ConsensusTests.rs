@@ -223,14 +223,9 @@ fn durable_votes_locks_and_results_survive_lost_replies() {
     resumed.decide(&commit.bytes).unwrap();
     assert_eq!(resumed.committed().unwrap().height, 1);
     assert_eq!(resumed.applied().unwrap().height, 0);
-    let discovery_generation = resumed.generation();
-    assert!(matches!(
-        resumed
-            .apply_turn(|_, _| panic!("Discovery executed before durable publication"))
-            .unwrap(),
-        application::Turn::Progress
-    ));
-    assert_eq!(resumed.generation(), discovery_generation + 1);
+    let commit_generation = resumed.generation();
+    assert!(resumed.snapshot.apply_cursor.is_some());
+    resumed.validate_application_cursor().unwrap();
     assert_eq!(resumed.applied().unwrap().height, 0);
     assert!(resumed.execution(commit.node).unwrap().is_none());
     drop(resumed);
@@ -238,7 +233,7 @@ fn durable_votes_locks_and_results_survive_lost_replies() {
         &directories[0].0,
         config.clone(),
         keys[0].clone(),
-        discovery_generation + 1,
+        commit_generation,
     )
     .unwrap();
     assert!(

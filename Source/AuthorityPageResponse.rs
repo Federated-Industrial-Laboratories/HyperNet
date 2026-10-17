@@ -88,7 +88,7 @@ pub fn response_inputs(intent: &Intent, value: &V) -> Result<Vec<Reference>> {
                 "Page inspection source differs"
             );
         }
-        Command::Read { page } => {
+        Command::Read { page } | Command::View { page } => {
             published(&ledger(page)?)?;
         }
         Command::Sync {

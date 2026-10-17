@@ -79,6 +79,8 @@ pub enum Message {
     CheckpointSuperseded(Digest, Digest, Vec<u8>),
     InputRequest(Digest, InputAnchor, InputReference),
     InputResponse(Digest, InputAnchor, InputReference, Option<Vec<u8>>),
+    ReadProbe(Vec<u8>, Vec<u8>, Vec<u8>),
+    ReadShare(Digest, Vec<u8>, Vec<u8>, Vec<u8>),
 }
 impl Message {
     pub fn number(&self) -> u64 {
@@ -103,6 +105,8 @@ impl Message {
             Self::CheckpointSuperseded(..) => 17,
             Self::InputRequest(..) => 18,
             Self::InputResponse(..) => 19,
+            Self::ReadProbe(..) => 20,
+            Self::ReadShare(..) => 21,
         }
     }
     pub fn payload(&self) -> Result<Vec<u8>> {
@@ -113,6 +117,12 @@ impl Message {
             | Self::Certificate(v)
             | Self::CheckpointShare(v)
             | Self::CheckpointProof(v) => Ok(v.clone()),
+            Self::ReadProbe(request, challenge, statement) => {
+                wire::encode(&V::Array(vec![b(request), b(challenge), b(statement)]))
+            }
+            Self::ReadShare(id, node, share, result) => {
+                wire::encode(&V::Array(vec![b(id), b(node), b(share), b(result)]))
+            }
             Self::NewView(report, qc) => wire::encode(&V::Array(vec![b(report), b(qc)])),
             Self::Execution(node, command, qc) => {
                 wire::encode(&V::Array(vec![b(node), b(command), b(qc)]))
@@ -408,6 +418,47 @@ impl Message {
                     InputAnchor::parse(&fields[1])?,
                     reference,
                     bytes,
+                )
+            }
+            20 => {
+                let a = value.array(3)?;
+                let request = crate::authority_read::Request::from_signed(a[0].bytes()?)?;
+                let challenge = crate::authority_proof::Challenge::from_signed(a[1].bytes()?)?;
+                request.validate_challenge(&challenge)?;
+                let statement = crate::authority_read::Statement::parse(a[2].bytes()?)?;
+                ensure!(
+                    request.scope == *config.descriptor().scope()
+                        && statement.scope == request.scope
+                        && statement.request == request.digest
+                        && statement.challenge == challenge.digest,
+                    "fresh probe context differs"
+                );
+                Self::ReadProbe(
+                    a[0].bytes()?.to_vec(),
+                    a[1].bytes()?.to_vec(),
+                    a[2].bytes()?.to_vec(),
+                )
+            }
+            21 => {
+                let a = value.array(4)?;
+                let (payload, signatures) = wire::envelope(a[2].bytes()?, 1)?;
+                let statement = crate::authority_read::Statement::parse(&payload)?;
+                let node = Node::parse(config, a[1].bytes()?)?;
+                ensure!(
+                    signatures.len() == 1
+                        && config.voters.contains(&signatures[0].0)
+                        && statement.scope == *config.descriptor().scope()
+                        && statement.node == node.digest()?
+                        && statement.height == node.height
+                        && statement.result == wire::digest(a[3].bytes()?),
+                    "fresh share context differs"
+                );
+                crate::authority_proof::OperationResult::parse(a[3].bytes()?)?;
+                Self::ReadShare(
+                    records::nonzero(&a[0])?,
+                    a[1].bytes()?.to_vec(),
+                    a[2].bytes()?.to_vec(),
+                    a[3].bytes()?.to_vec(),
                 )
             }
             _ => anyhow::bail!("Unknown peer message type"),

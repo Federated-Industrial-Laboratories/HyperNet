@@ -13,6 +13,13 @@ permitted current publications. Their catalogue metadata and pagination use the
 same current authorisation as the individual objects. A withdrawal, changed
 policy, unavailable source authority or changed corpus invalidates continuation.
 
+Native PageSearchList includes a complete certified PageView closure for every
+returned Page, in addition to its current search capability and application
+checks. Unusable or inaccessible items roll back their entire selected closure;
+they disclose neither partial metadata nor a count. Complete closures consume
+the existing record and encoded-result bounds, and continuation follows the last
+included Page. No result limit is enlarged for this combined operation.
+
 ## Host-readable sources
 
 A native host explicitly enables the final `search` boolean in its signed

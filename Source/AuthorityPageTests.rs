@@ -1988,3 +1988,6 @@ mod search_tests;
 
 #[path = "AuthorityBackupPageTests.rs"]
 mod backup_tests;
+
+#[path = "AuthorityPageViewTests.rs"]
+mod view_tests;

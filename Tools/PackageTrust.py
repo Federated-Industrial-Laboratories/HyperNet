@@ -14,7 +14,7 @@ import time
 
 MAX_POLICY = 16384
 MAX_INTEGER = (1 << 63) - 1
-CONTRACTS = {'HyperNet': 'HyperNet080Authority1', 'HyperNetSuite': 'HyperNet080Client1'}
+CONTRACTS = {'HyperNet': 'HyperNet080Authority2', 'HyperNetSuite': 'HyperNet080Client1'}
 TARGET_FIELDS = {'format', 'product', 'architecture', 'version', 'versionFloor',
                  'stateContract', 'rootGeneration', 'rootPin', 'sequence',
                  'notBefore', 'expires', 'archiveSha256', 'archiveBytes', 'manifestSha256'}

@@ -34,6 +34,36 @@ pub enum Turn {
     Result(Node, ExecutionRecord),
 }
 impl Engine {
+    pub(super) fn stage_direct_application(
+        &self,
+        next: &mut Snapshot,
+        qc: &Certificate,
+    ) -> Result<()> {
+        if next.apply_cursor.is_some() {
+            return Ok(());
+        }
+        let target = node(&self.configuration, next, &qc.node)?;
+        if target.parent != Some(next.applied) {
+            return Ok(());
+        }
+        let base = node(&self.configuration, next, &next.applied)?;
+        ensure!(
+            qc.phase == Phase::Commit && base.height.checked_add(1) == Some(target.height),
+            "Direct application cursor lacks its exact deciding child"
+        );
+        // This verified suffix reaches disk in the same publication as its
+        // deciding CommitQC. Execution still starts only from the durable cursor.
+        next.apply_cursor = Some(Cursor {
+            target: qc.node,
+            certificate: qc.digest(),
+            base: next.applied,
+            state: wire::digest(&next.application),
+            scan: next.applied,
+            reverse: vec![qc.node],
+            verified: true,
+        });
+        Ok(())
+    }
     #[cfg(test)]
     pub fn apply_turn(
         &mut self,
@@ -146,16 +176,22 @@ impl Engine {
         if !inert && self.snapshot.executed.len() >= storage::MAX_RESULTS {
             return Ok(Turn::Blocked("Retained result capacity exhausted"));
         }
-        // Reserve both possible state copies before executing: the current
-        // application and, at a periodic boundary, its durable candidate.
+        // A candidate aliases this exact new application object. Reserve its
+        // complete allocation while every old root remains durable.
+        if !Self::state_reservation(&self.snapshot)? {
+            return Ok(Turn::Blocked("Application state allocation exhausted"));
+        }
+        if !inert && !Self::result_reservation(&self.snapshot)? {
+            return Ok(Turn::Blocked("Retained result allocation exhausted"));
+        }
+        // Retain the conservative metadata admission allowance as well as the
+        // separate state-object reservation; descriptor storage does not raise
+        // the existing journal or execution limits.
         let copies = if n.height.is_multiple_of(checkpoint::INTERVAL) {
             2
         } else {
             1
         };
-        if !inert && !Self::result_reservation(&self.snapshot)? {
-            return Ok(Turn::Blocked("Retained result allocation exhausted"));
-        }
         let current_metadata = serde_json::to_vec(&self.snapshot)?.len();
         if current_metadata
             .checked_add(checkpoint::MAX_STATE * 4 * copies + 4096)
@@ -183,7 +219,7 @@ impl Engine {
         validate_execution(&self.configuration, &position, &execution)?;
         let mut next = self.snapshot.clone();
         next.applied = digest;
-        next.application = execution.state;
+        next.application = storage::StateObject::staged(objects(&next)?, execution.state)?;
         next.inputs.set_application(&retained)?;
         next.archive_size = next
             .archive_size

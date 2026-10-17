@@ -399,7 +399,44 @@ fn expanded_state_crosses_wire_bound_through_journal_checkpoint_and_restart() {
     .unwrap();
     assert!(wire::decode(&state).is_err());
     step_with_state(&mut engine, &keys, 32, Some(&state));
+    let root = engine.snapshot.application.object.key();
+    let state_path = directory.0.join("Objects").join(&root);
+    let candidate = &engine.snapshot.candidates[&32].state;
+    assert_eq!(candidate.object.key(), root);
+    assert_eq!(candidate.as_ptr(), engine.application().as_ptr());
+    assert_eq!(
+        Engine::all_objects(&engine.snapshot)
+            .filter(|o| o.kind == storage::APPLICATION_STATE)
+            .count(),
+        1
+    );
+    let metadata = serde_json::to_vec(&engine.snapshot).unwrap();
+    assert!(
+        metadata.len() < state.len() / 2,
+        "Repeated journal metadata still contains state bodies"
+    );
+    let store = engine.snapshot.objects.as_ref().unwrap().clone();
+    let syncs = store.sync_counts();
+    engine.advance_view().unwrap();
+    assert_eq!(
+        store.sync_counts(),
+        syncs,
+        "Unchanged state was republished"
+    );
+    assert!(serde_json::to_vec(&engine.snapshot).unwrap().len() < state.len() / 2);
     let proof = certify(&mut engine, &keys);
+    assert_eq!(
+        engine
+            .snapshot
+            .checkpoint
+            .as_ref()
+            .unwrap()
+            .state
+            .object
+            .key(),
+        root
+    );
+    assert!(state_path.exists());
     let leaves = engine.archive.leaves().to_vec();
     let verified = verified(&config, &proof).unwrap();
     let mut chunks = Vec::new();
@@ -418,8 +455,13 @@ fn expanded_state_crosses_wire_bound_through_journal_checkpoint_and_restart() {
     assert_eq!(chunks, state);
     let generation = engine.generation();
     drop(engine);
-    let resumed = Engine::open(&directory.0, config.clone(), keys[0].clone(), generation).unwrap();
-    assert_eq!(resumed.snapshot.application, state);
+    let mut resumed =
+        Engine::open(&directory.0, config.clone(), keys[0].clone(), generation).unwrap();
+    assert_eq!(resumed.application(), state);
+    assert_eq!(
+        resumed.snapshot.checkpoint.as_ref().unwrap().state.as_ptr(),
+        resumed.application().as_ptr()
+    );
     let target = Directory::new();
     let mut lag = Engine::create(&target.0, config.clone(), keys[1].clone(), initial()).unwrap();
     lag.install_checkpoint(
@@ -436,9 +478,34 @@ fn expanded_state_crosses_wire_bound_through_journal_checkpoint_and_restart() {
         Some(20000),
     )
     .unwrap();
-    assert_eq!(lag.snapshot.application, state);
+    assert_eq!(lag.application(), state);
     let floor = lag.generation();
     drop(lag);
-    let restored = Engine::open(&target.0, config, keys[1].clone(), floor).unwrap();
-    assert_eq!(restored.snapshot.application, state);
+    let restored = Engine::open(&target.0, config.clone(), keys[1].clone(), floor).unwrap();
+    assert_eq!(restored.application(), state);
+    assert_eq!(
+        Engine::all_objects(&restored.snapshot)
+            .filter(|o| o.kind == storage::APPLICATION_STATE)
+            .count(),
+        1
+    );
+
+    // A later application no longer owns this body, but its checkpoint does.
+    // Only the certified replacement can release that last durable root.
+    for height in 33..=64 {
+        step(&mut resumed, &keys, height);
+        assert!(state_path.exists());
+    }
+    let candidate = resumed.snapshot.candidates[&64].state.object.key();
+    assert_ne!(candidate, root);
+    assert_eq!(candidate, resumed.snapshot.application.object.key());
+    let generation = resumed.generation();
+    drop(resumed);
+    let mut resumed =
+        Engine::open(&directory.0, config.clone(), keys[0].clone(), generation).unwrap();
+    assert_eq!(resumed.checkpoint_state(*verified.digest()).unwrap(), state);
+    assert!(state_path.exists());
+    certify(&mut resumed, &keys);
+    assert!(!state_path.exists());
+    assert!(directory.0.join("Objects").join(candidate).exists());
 }

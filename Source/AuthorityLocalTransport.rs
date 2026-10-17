@@ -276,6 +276,16 @@ impl HistoryEvidence {
             None => Ok(result),
         }
     }
+    pub fn attach_read(
+        &self,
+        store: &crate::authority_floor::Store,
+        result: crate::authority_read::VerifiedRead,
+    ) -> Result<crate::authority_read::VerifiedRead> {
+        match &self.history {
+            Some((checkpoint, history)) => store.attach_read_history(result, checkpoint, history),
+            None => Ok(result),
+        }
+    }
     pub fn attach_recipient(
         &self,
         store: &crate::authority_recipient::Store,
@@ -729,4 +739,80 @@ mod tests {
         drop(client);
         sender.join().unwrap();
     }
+}
+
+#[derive(Debug)]
+pub struct FreshReadUnavailable;
+impl std::fmt::Display for FreshReadUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("fresh authority quorum is unavailable within the original challenge")
+    }
+}
+impl std::error::Error for FreshReadUnavailable {}
+#[allow(clippy::too_many_arguments)]
+pub fn exchange_read(
+    descriptor: &TrustDescriptor,
+    request: &[u8],
+    challenge: &[u8],
+    deadline: u64,
+    path: &Path,
+    retained: &Prefix,
+    head: Option<&TreeHead>,
+    clock: &mut impl FnMut() -> Result<ClockHealth>,
+) -> Result<(CertifiedReply, HistoryEvidence)> {
+    let id = crate::authority_read::read_id(request, challenge)?;
+    let control = LocalControl::open(path)?;
+    let query = |operation, payload: &[u8]| {
+        wire::encode(&a(vec![
+            V::Uint(41),
+            V::Uint(1),
+            descriptor.scope().value(),
+            V::Uint(operation),
+            b(payload),
+        ]))
+    };
+    let payload = wire::encode(&a(vec![b(request), b(challenge)]))?;
+    let mut bytes = control.exchange(&query(6, &payload)?, deadline)?;
+    let reply = loop {
+        let value = wire::decode(&bytes)?;
+        let f = record(&value, 62, 10)?;
+        ensure!(
+            proof::Scope::parse(&f[2])? == *descriptor.scope() && f[5].fixed::<32>()? == id,
+            "fresh local reply scope or identity differs"
+        );
+        f[9].array(0)?;
+        match f[3].uint()? {
+            0 => {
+                ensure!(f[4].uint()? == 0, "fresh pending code differs");
+                f[6].null()?;
+                f[7].null()?;
+                f[8].null()?;
+            }
+            1 => {
+                ensure!(f[4].uint()? == 0, "fresh completion code differs");
+                break CertifiedReply {
+                    node: f[6].bytes()?.to_vec(),
+                    certificate: f[7].bytes()?.to_vec(),
+                    result: f[8].bytes()?.to_vec(),
+                };
+            }
+            2 => {
+                ensure!(
+                    (1..=2).contains(&f[4].uint()?),
+                    "fresh unavailable code differs"
+                );
+                f[6].null()?;
+                f[7].null()?;
+                f[8].null()?;
+                return Err(FreshReadUnavailable.into());
+            }
+            _ => anyhow::bail!("fresh local request invalid"),
+        }
+        clock()?.observe()?;
+        std::thread::sleep(Duration::from_millis(remaining(deadline)?.min(25)));
+        bytes = control.exchange(&query(7, &id)?, deadline)?;
+    };
+    let history = HistoryEvidence::fetch(&control, retained, head, &reply.node, deadline)?;
+    remaining(deadline)?;
+    Ok((reply, history))
 }

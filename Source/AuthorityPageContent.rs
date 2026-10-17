@@ -485,6 +485,98 @@ fn owner_scope(
     };
     c.capability(grant, requester, &[2], (2, resource), Some(&p.namespace), 0)
 }
+// Shared by metadata lookup and the single-state certified Page view.
+pub(crate) fn get(
+    c: &mut Evaluation<'_>,
+    operation: &Operation,
+    placement: &VersionRef,
+    requester: Key,
+) -> Result<()> {
+    use super::evaluation::grant;
+    let record = c.exact(placement)?;
+    let p = Placement::parse(&record.payload)?;
+    let withdrawn = c
+        .state
+        .records
+        .contains_key(&(TOMBSTONE_KIND, placement.id));
+    if withdrawn {
+        c.select(TOMBSTONE_KIND, placement.id)?;
+    } else {
+        live(c, placement)?;
+    }
+    if operation.grant.is_none() {
+        let host = p
+            .hosts
+            .iter()
+            .find(|h| h.id == requester)
+            .context("content query is outside host consent")?;
+        c.host(host, Some(&p.namespace), true)?;
+    } else if withdrawn {
+        ensure!(
+            requester == p.owner,
+            "withdrawn content metadata requires its owner"
+        );
+        owner_scope(c, &p, requester, grant(operation)?)?;
+    } else if p.opaque {
+        let (outer, state, _) = sealed::live(c, &p.revision)?;
+        let effect = if state.status == 0 {
+            Effect::Inspect
+        } else if requester == outer.reviewer {
+            Effect::Repair
+        } else {
+            Effect::Read
+        };
+        sealed::content_access(c, &p, effect, requester, grant(operation)?)?;
+    } else {
+        let body = c.revision(&p.revision, true)?;
+        let (_, ledger) = c.ledger(body.author.raw_page)?;
+        let owner_access = p.owner == requester
+            && c.optional(|c| {
+                c.principal(
+                    requester,
+                    grant(operation)?,
+                    body.author.application.as_ref(),
+                    "PagesSubmit",
+                    &p.namespace,
+                    Some(body.author.raw_page),
+                    0,
+                )
+            })
+            .is_some();
+        let action = if owner_access {
+            "PagesSubmit"
+        } else if ledger
+            .published
+            .as_ref()
+            .is_some_and(|r| r.id == p.revision.id)
+        {
+            c.publication(body.author.raw_page)?;
+            "PagesRead"
+        } else {
+            "ReviewInspect"
+        };
+        c.principal(
+            requester,
+            grant(operation)?,
+            None,
+            action,
+            &p.namespace,
+            Some(body.author.raw_page),
+            0,
+        )?;
+    }
+    for host in &p.hosts {
+        let current = c.select(147, host.id)?;
+        // Metadata discovery retains inactive consent; a selected byte effect
+        // separately requires the exact live host and its capability closure.
+        c.host(&current.reference, Some(&p.namespace), false)?;
+        let _ = c.optional(|c| c.host(&current.reference, Some(&p.namespace), true));
+    }
+    if c.state.records.contains_key(&(COPIES_KIND, placement.id)) {
+        c.select(COPIES_KIND, placement.id)?;
+    }
+    Ok(())
+}
 pub(crate) fn evaluate(
     c: &mut Evaluation<'_>,
     operation: &Operation,
@@ -602,90 +694,7 @@ pub(crate) fn evaluate(
                 add(next, changed, PLACEMENT_KIND, id, placement.value())?;
             }
         }
-        Command::Get { placement } => {
-            let record = c.exact(placement)?;
-            let p = Placement::parse(&record.payload)?;
-            let withdrawn = c
-                .state
-                .records
-                .contains_key(&(TOMBSTONE_KIND, placement.id));
-            if withdrawn {
-                c.select(TOMBSTONE_KIND, placement.id)?;
-            } else {
-                live(c, placement)?;
-            }
-            if operation.grant.is_none() {
-                let host = p
-                    .hosts
-                    .iter()
-                    .find(|h| h.id == intent.requester)
-                    .context("content query is outside host consent")?;
-                c.host(host, Some(&p.namespace), true)?;
-            } else if withdrawn {
-                ensure!(
-                    intent.requester == p.owner,
-                    "withdrawn content metadata requires its owner"
-                );
-                owner_scope(c, &p, intent.requester, grant(operation)?)?;
-            } else if p.opaque {
-                let (outer, state, _) = sealed::live(c, &p.revision)?;
-                let effect = if state.status == 0 {
-                    Effect::Inspect
-                } else if intent.requester == outer.reviewer {
-                    Effect::Repair
-                } else {
-                    Effect::Read
-                };
-                sealed::content_access(c, &p, effect, intent.requester, grant(operation)?)?;
-            } else {
-                let body = c.revision(&p.revision, true)?;
-                let (_, ledger) = c.ledger(body.author.raw_page)?;
-                let owner_access = p.owner == intent.requester
-                    && c.optional(|c| {
-                        c.principal(
-                            intent.requester,
-                            grant(operation)?,
-                            body.author.application.as_ref(),
-                            "PagesSubmit",
-                            &p.namespace,
-                            Some(body.author.raw_page),
-                            0,
-                        )
-                    })
-                    .is_some();
-                let action = if owner_access {
-                    "PagesSubmit"
-                } else if ledger
-                    .published
-                    .as_ref()
-                    .is_some_and(|r| r.id == p.revision.id)
-                {
-                    c.publication(body.author.raw_page)?;
-                    "PagesRead"
-                } else {
-                    "ReviewInspect"
-                };
-                c.principal(
-                    intent.requester,
-                    grant(operation)?,
-                    None,
-                    action,
-                    &p.namespace,
-                    Some(body.author.raw_page),
-                    0,
-                )?;
-            }
-            for host in &p.hosts {
-                let current = c.select(147, host.id)?;
-                // Metadata discovery retains inactive consent; a selected byte effect
-                // separately requires the exact live host and its capability closure.
-                c.host(&current.reference, Some(&p.namespace), false)?;
-                let _ = c.optional(|c| c.host(&current.reference, Some(&p.namespace), true));
-            }
-            if c.state.records.contains_key(&(COPIES_KIND, placement.id)) {
-                c.select(COPIES_KIND, placement.id)?;
-            }
-        }
+        Command::Get { placement } => get(c, operation, placement, intent.requester)?,
         Command::Receipt { receipt } => {
             let p = live(c, &receipt.placement)?;
             ensure!(

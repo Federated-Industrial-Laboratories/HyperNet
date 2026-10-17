@@ -19,6 +19,71 @@ struct Context<'a> {
     selected: BTreeMap<(u64, Digest), Record>,
 }
 impl Context<'_> {
+    fn lookup(&mut self, operation: &Operation, requester: Key, service: Digest) -> Result<()> {
+        let (_, target) = self.service(service, true)?;
+        if target.profile.service != requester && target.profile.operator != requester {
+            if let Some(g) = &operation.grant {
+                let value = wire::decode(self.governance.record_bytes(102, g.id)?)?;
+                let f = value.array(17)?;
+                let actions = f[10].list(32)?;
+                let scopes = f[11].list(32)?;
+                let mut permitted = false;
+                for action in actions {
+                    let action = action.uint()?;
+                    if !matches!(action, 0 | 1 | 10 | 15 | 16 | 18 | 19) {
+                        continue;
+                    }
+                    for scope in scopes {
+                        let s = scope.array(2)?;
+                        if self
+                            .capability(g, requester, action, (s[0].uint()?, id(&s[1])?))
+                            .is_ok()
+                        {
+                            permitted = true;
+                            break;
+                        }
+                    }
+                    if permitted {
+                        break;
+                    }
+                }
+                ensure!(
+                    permitted,
+                    "route lookup requires current membership capability"
+                );
+            } else {
+                let attached = self
+                    .state
+                    .records
+                    .values()
+                    .filter(|r| r.reference.kind == 165)
+                    .find_map(|r| {
+                        Service::parse(&r.payload, self.state.network, self.state.incarnation)
+                            .ok()
+                            .filter(|s| {
+                                s.profile.mode == 3
+                                    && s.profile.service == requester
+                                    && s.profile.relay == Some(service)
+                            })
+                            .map(|_| r.reference.id)
+                    });
+                if let Some(id) = attached {
+                    self.service(id, true)?;
+                    ensure!(target.profile.mode == 1, "attachment target is not a relay");
+                } else {
+                    let (_, relay) = self.relay_caller(requester)?;
+                    ensure!(
+                        target
+                            .profile
+                            .relay
+                            .is_none_or(|r| r == relay.profile.identity.service),
+                        "attachment belongs to another relay"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
     fn select(&mut self, kind: u64, id: Digest) -> Result<Record> {
         let r = self.state.record(kind, id)?.clone();
         self.dependencies.push(r.reference.clone());
@@ -370,75 +435,7 @@ pub fn evaluate(
                     )?);
                 }
             }
-            Command::Lookup { service } => {
-                let (_, target) = c.service(*service, true)?;
-                if target.profile.service != intent.requester
-                    && target.profile.operator != intent.requester
-                {
-                    if let Some(g) = &operation.grant {
-                        let value = wire::decode(c.governance.record_bytes(102, g.id)?)?;
-                        let f = value.array(17)?;
-                        let actions = f[10].list(32)?;
-                        let scopes = f[11].list(32)?;
-                        let mut permitted = false;
-                        for action in actions {
-                            let action = action.uint()?;
-                            if !matches!(action, 0 | 1 | 10 | 15 | 16 | 18 | 19) {
-                                continue;
-                            }
-                            for scope in scopes {
-                                let s = scope.array(2)?;
-                                if c.capability(
-                                    g,
-                                    intent.requester,
-                                    action,
-                                    (s[0].uint()?, id(&s[1])?),
-                                )
-                                .is_ok()
-                                {
-                                    permitted = true;
-                                    break;
-                                }
-                            }
-                            if permitted {
-                                break;
-                            }
-                        }
-                        ensure!(
-                            permitted,
-                            "route lookup requires current membership capability"
-                        );
-                    } else {
-                        let attached = state
-                            .records
-                            .values()
-                            .filter(|r| r.reference.kind == 165)
-                            .find_map(|r| {
-                                Service::parse(&r.payload, state.network, state.incarnation)
-                                    .ok()
-                                    .filter(|s| {
-                                        s.profile.mode == 3
-                                            && s.profile.service == intent.requester
-                                            && s.profile.relay == Some(*service)
-                                    })
-                                    .map(|_| r.reference.id)
-                            });
-                        if let Some(id) = attached {
-                            c.service(id, true)?;
-                            ensure!(target.profile.mode == 1, "attachment target is not a relay");
-                        } else {
-                            let (_, relay) = c.relay_caller(intent.requester)?;
-                            ensure!(
-                                target
-                                    .profile
-                                    .relay
-                                    .is_none_or(|r| r == relay.profile.identity.service),
-                                "attachment belongs to another relay"
-                            );
-                        }
-                    }
-                }
-            }
+            Command::Lookup { service } => c.lookup(operation, intent.requester, *service)?,
             Command::Withdraw {
                 service,
                 generation,
@@ -811,6 +808,94 @@ pub fn evaluate(
         value,
         versions,
         dependencies,
+        code: 0,
+        expires_ms: c.expires,
+    })
+}
+
+/// Read-only route validation never consumes connection or byte reservations.
+pub(crate) fn evaluate_read(
+    operation: &Operation,
+    state: &State,
+    records: &[Vec<u8>],
+    reserved: &Reservations,
+    requester: Key,
+    at: u64,
+) -> Result<Decision> {
+    let super::super::Command::Route(command) = &operation.command else {
+        anyhow::bail!("fresh route command differs")
+    };
+    let mut c = Context {
+        state,
+        governance: Governance::parse(state.network, state.incarnation, records)?,
+        index: Index::parse(records, reserved, state.network, state.incarnation)?,
+        reserved,
+        at,
+        dependencies: vec![],
+        expires: u64::MAX,
+        selected: BTreeMap::new(),
+    };
+    let evaluated = (|| -> Result<()> {
+        match command {
+            Command::Lookup { service } => c.lookup(operation, requester, *service),
+            Command::VoucherContext { voucher } => {
+                ensure!(
+                    operation.grant.is_none(),
+                    "relay read uses intrinsic authority"
+                );
+                c.voucher(voucher, requester)?;
+                if state.records.contains_key(&(167, voucher.id)) {
+                    c.select(167, voucher.id)?;
+                }
+                Ok(())
+            }
+            _ => anyhow::bail!("operation is not a fresh route read"),
+        }
+    })();
+    if evaluated.is_err() {
+        return Ok(Decision::refused(3));
+    }
+    sorted(&mut c.dependencies)?;
+    if operation
+        .snapshot
+        .references
+        .iter()
+        .any(|r| !c.dependencies.contains(r))
+    {
+        return Ok(Decision::refused(12));
+    }
+    let mut versions: BTreeMap<_, _> = c
+        .dependencies
+        .iter()
+        .map(|r| (r.index(), r.clone()))
+        .collect();
+    for r in c.selected.values() {
+        versions.insert(r.reference.index(), r.reference.clone());
+    }
+    let versions = versions.into_values().collect::<Vec<_>>();
+    validate_versions(&versions, 64)?;
+    let governance = versions
+        .iter()
+        .filter(|r| r.kind < 132)
+        .map(|r| Ok(b(c.governance.record_bytes(r.kind, r.id)?)))
+        .collect::<Result<Vec<_>>>()?;
+    let value = a(vec![
+        V::Uint(201),
+        V::Uint(1),
+        V::Text("AuthorityDomain".into()),
+        a(versions.iter().map(reference).collect()),
+        a(vec![
+            V::Text(command.name().into()),
+            a(c.selected.values().map(|r| b(&r.bytes)).collect()),
+            a(governance),
+            V::Null,
+        ]),
+    ]);
+    Ok(Decision {
+        state: None,
+        value,
+        versions,
+        dependencies: c.dependencies,
         code: 0,
         expires_ms: c.expires,
     })

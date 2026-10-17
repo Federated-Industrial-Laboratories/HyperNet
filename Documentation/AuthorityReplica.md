@@ -12,6 +12,15 @@ container lifecycle. [Committee replacement](AuthorityEpochs.md) preserves the
 network's authority state through an explicit terminal transition and successor
 activation.
 
+Read-only policy discovery, Page views and route revalidation use three matching
+fresh read signatures over the same current applied state. These reads do not
+advance the ordered log or consume requester sequences. A replica with unapplied
+commitment, a lock ahead of applied state or unavailable voting authority refuses
+to sign. Read results retain the same finite clock and consumer history checks;
+connection admission and host content effects remain ordered. See the
+[wire contract](WireContract.md#fresh-quorum-reads) for the exact query whitelist,
+proof and failure behavior.
+
 ## Inputs and independent trust
 
 Prepare a complete accepted bootstrap with `HyperNetSuite network` and verify the
@@ -193,7 +202,19 @@ proposal candidates while application catches up; speculative requests and new
 challenges remain eligible, and consensus view progression remains independent.
 Outstanding safety obligations or unavailable expiry evidence can defer reclamation.
 
-`Objects/` holds immutable node, command, certificate and executed-result bodies.
+Execution claims for the current committed but unapplied node may remain in one
+transient bucket, with one claim per committee signer and at most four complete
+196608-byte peer payloads in total. These claims cannot install dependencies or
+trigger repair. Only an exact match to the locally durable execution contributes
+to a result quorum; a conflicting signer cannot select the result or suppress
+other matching claims. A changed target discards the old bucket. Restart or
+eviction uses the existing bounded result-query recovery.
+
+`Objects/` holds immutable node, command, certificate, executed-result and
+application-state bodies. Current application, checkpoint and candidate roots
+name their exact state digest. Identical roots share one stored object and one
+allocation charge. Resolved state bytes remain shared in memory; journal
+transactions do not repeat those bodies.
 The journal contains their exact identities, hashes, lengths and allocation charges.
 The pending profile permits 4096 nodes, 20480 objects and 256 MiB; ordinary
 requests use at most 3584 nodes, 17920 objects and 224 MiB. The remaining capacity
@@ -206,7 +227,11 @@ must produce a finite capacity refusal. An inert command produces no reply bundl
 A128MiB maintenance allowance bounds reply bundles, archive transfers and
 staging. Journal storage is separate: each journal has at most224MiB encoded
 metadata and225MiB allocated bytes, plus its atomic replacement. Application
-states and checkpoint candidates are at most8MiB each. Allocation charges round up the object header and body to
+states and checkpoint candidates are at most8MiB each. Their unique objects use
+the existing pending object and byte limits. Before application execution, one
+complete maximum-size state allocation is reserved while old roots remain
+durable. A new checkpoint candidate aliases that same state object.
+Allocation charges round up the object header and body to
 at least 4096 bytes using the filesystem fragment size (at most 65536), plus a
 256-byte index charge. Unsupported allocation units or excess actual file blocks
 refuse publication. These are this storage profile's allocation limits, not a
@@ -221,6 +246,13 @@ a vote or application result until authenticated repair restores them. Pending
 checkpoint transfers pin their exact input closure; expiry releases those pins
 and durably collects unreferenced partial inputs. Preserve the complete
 journal directory, including `Objects/`, when retaining signer state.
+
+Signer snapshot format3 accepts only descriptor-backed state bodies. Inline-state
+snapshots from earlier internal formats are incompatible; no in-place conversion
+is provided. Never initialise over an existing signer directory or discard it to
+resolve this incompatibility. Package state compatibility must be established
+before activation. The private state-object kind is not a peer repair object;
+authorised checkpoint transfer retains its existing proof and chunk protocol.
 
 Use persistent storage that honors file and directory synchronization. Proposal
 persistence, scheduling and delivery must fit the one-second proposal admission
@@ -267,12 +299,36 @@ resource pressure. Each category emits at most once per five seconds, with the
 next record counting suppressed observations. Completed slow turns include
 storage sync count, total and maximum sync time, file and directory counts, and
 successful journal commits. Decoded peer turns include the numeric message kind.
+Activity summaries include the suspend-aware boot time when available, allowing
+local request timings to be compared with the reported storage interval.
+Each summary also includes up to 32 view-timing records. These record first
+accepted-command/proposal observation, durable votes and QCs, committed position,
+durable execution, matching execution quorum and first local result selection.
+Acceptance is successful driver admission, not arrival at the control socket.
+`replyReady` means the result has been constructed for the local caller; it does
+not attest delivery through the control socket. Each phase is cumulative elapsed
+nanoseconds from the first accepted command, or the proposal when acceptance was
+not observed. The original starting boot time permits external correlation;
+unobserved phases and unavailable boot time are null. Repeated messages do not
+restart observations. Completed local selections are reported at the next
+summary; other views are reported as incomplete after five seconds without new
+phases. Controlled shutdown flushes remaining records. At most 32 acceptance
+timestamps and 32 view records remain in memory; saturation counts lost timing
+observations without delaying authority work. No command digest is logged.
 A proposal rejected by the existing one-second clock-age bound reports
 `ProposalClockAge` and its measured age. Records contain fixed categories,
 durations and view numbers, without request contents, keys or private errors.
 Shutdown and final journal-reopen markers distinguish protocol shutdown from
 validation of the stopped journal. These observations do not alter deadlines,
 proof requirements or admission limits.
+
+Envelope signature counters in numeric activity diagnostics describe strict
+verification attempts, verification time, cache lookups, hits and evictions.
+They cover the synchronous turn's thread and contain no payloads or identifiers.
+Queued-proof classification has its own non-overlapping synchronous turn, including
+inputs that are deferred or do not form a batch.
+These timings can overlap application-state parsing; they must not be added to
+other overlapping timings as independent costs.
 
 Before a checkpoint is available, requested repair can walk a longer certified
 branch by importing smaller complete QC-rooted subclosures. It keeps the original

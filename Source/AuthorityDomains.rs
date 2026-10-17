@@ -607,10 +607,35 @@ impl Operation {
             Self::handles(&intent.action),
             "unsupported domain operation"
         );
-        let value = wire::decode(&intent.parameters)?;
+        let Self {
+            grant,
+            command,
+            snapshot,
+        } = Self::from_parameters(&intent.parameters, intent.network, intent.incarnation)?;
+        ensure!(
+            intent.resource == command.resource()
+                && intent.profile_generation == 0
+                && intent.revision == u64::from(command.mutation())
+                && intent.expected == snapshot.references
+                && intent.minimum_policy_epoch == snapshot.epoch
+                && intent.minimum_policy_height == snapshot.height,
+            "domain request differs from its signed snapshot"
+        );
+        Ok(Self {
+            grant,
+            command,
+            snapshot,
+        })
+    }
+    pub(crate) fn from_parameters(
+        parameters: &[u8],
+        network: Digest,
+        incarnation: Digest,
+    ) -> Result<Self> {
+        let value = wire::decode(parameters)?;
         let f = value.array(6)?;
         ensure!(
-            f[0].uint()? == 200 && f[1].uint()? == 1 && f[2].text()? == intent.action,
+            f[0].uint()? == 200 && f[1].uint()? == 1 && f[2].text()? == "AuthorityDomain",
             "domain parameters differ from signed action"
         );
         let grant = if f[3] == V::Null {
@@ -622,17 +647,8 @@ impl Operation {
             grant.as_ref().is_none_or(|g| g.kind == 102),
             "invalid domain grant kind"
         );
-        let command = Command::parse(&f[4], intent.network, intent.incarnation)?;
+        let command = Command::parse(&f[4], network, incarnation)?;
         let snapshot = snapshot(&f[5])?;
-        ensure!(
-            intent.resource == command.resource()
-                && intent.profile_generation == 0
-                && intent.revision == u64::from(command.mutation())
-                && intent.expected == snapshot.references
-                && intent.minimum_policy_epoch == snapshot.epoch
-                && intent.minimum_policy_height == snapshot.height,
-            "domain request differs from its signed snapshot"
-        );
         Ok(Self {
             grant,
             command,

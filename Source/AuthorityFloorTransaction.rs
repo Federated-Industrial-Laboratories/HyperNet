@@ -20,6 +20,9 @@ pub(super) enum Transition {
     Learn {
         learning: tracker::Learning,
     },
+    LearnRead {
+        result: String,
+    },
     RetainMediaContext {
         scope: String,
         certificate: String,
@@ -183,6 +186,9 @@ fn shape(next: &Stored, transition: &Transition) -> Result<()> {
                 );
             }
         }
+        Transition::LearnRead { result } => {
+            OperationResult::parse(&hex::decode(result)?)?;
+        }
         Transition::RetainMediaContext { .. } => {
             ensure!(
                 next.tracker
@@ -279,7 +285,7 @@ fn delta(
             resolved.descriptor.scope(),
             &resolved.previous_scopes,
         )?,
-        Transition::RetainMediaContext { .. } => old.tracker.clone(),
+        Transition::LearnRead { .. } | Transition::RetainMediaContext { .. } => old.tracker.clone(),
         Transition::SaveBody { request, result } => old.tracker.body_saved(*request, *result)?,
         Transition::Claim { request } => old.tracker.effect(*request, true)?,
         Transition::Complete { request } => old.tracker.effect(*request, false)?,
@@ -288,7 +294,10 @@ fn delta(
         expected == next.tracker,
         "pending tracker transition is not the exact typed successor"
     );
-    if !matches!(transition, Transition::Learn { .. }) {
+    if !matches!(
+        transition,
+        Transition::Learn { .. } | Transition::LearnRead { .. }
+    ) {
         ensure!(
             old.certificate == next.certificate
                 && old.node == next.node
@@ -297,6 +306,21 @@ fn delta(
                     || old.generations == next.generations)
                 && old.wall_floor_ms == next.wall_floor_ms,
             "local tracker transition changed authority"
+        );
+    }
+    if let Transition::LearnRead { result } = transition {
+        let result = OperationResult::parse(&hex::decode(result)?)?;
+        let mut exact: BTreeMap<_, _> = old
+            .generations
+            .iter()
+            .map(|r| (r.index(), r.clone()))
+            .collect();
+        for version in crate::authority_read::result_versions(&result)? {
+            exact.insert(version.index(), version);
+        }
+        ensure!(
+            next.generations == exact.into_values().collect::<Vec<_>>(),
+            "fresh read added uncertified generations"
         );
     }
     if let Transition::RetainMediaContext {
@@ -381,6 +405,27 @@ fn learning_certificate(
 ) -> Result<()> {
     let resolved = next.resolve(descriptor)?;
     let descriptor = &resolved.descriptor;
+    if let Transition::LearnRead { result } = transition {
+        let certificate = hex::decode(
+            next.certificate
+                .as_ref()
+                .context("fresh read certificate missing")?,
+        )?;
+        let statement = crate::authority_read::Statement::parse(&descriptor.quorum(&certificate)?)?;
+        let bytes = hex::decode(result)?;
+        let result = OperationResult::parse(&bytes)?;
+        ensure!(
+            statement.requester == next.requester()?
+                && statement.recipient == next.requester()?
+                && statement.result == wire::digest(&bytes),
+            "fresh read result differs from certified context"
+        );
+        let versions = crate::authority_read::result_versions(&result)?;
+        ensure!(
+            versions.iter().all(|v| next.generations.contains(v)),
+            "fresh read versions missing from floor"
+        );
+    }
     if let Transition::Learn { learning } = transition {
         let bytes = hex::decode(
             next.certificate
