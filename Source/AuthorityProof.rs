@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Canonical executed-result evidence binds one exact request to a certified prefix.
 use crate::trust_wire::{self as wire, Value as V};
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 
 pub type Digest = [u8; 32];
 pub type Key = [u8; 32];
@@ -221,7 +221,7 @@ pub(crate) fn validate_stream_response(
 }
 
 #[path = "AuthorityContinuity.rs"]
-mod continuity;
+pub(crate) mod continuity;
 pub use continuity::{ContinuityEvidence, validate_continuity};
 
 #[derive(Clone, Debug)]
@@ -231,6 +231,7 @@ pub struct Challenge {
     pub recipient: Key,
     pub boot_id: Digest,
     pub nonce: Digest,
+    pub client_nonce: Digest,
     pub intent: Digest,
     pub created_at_ms: u64,
     pub expires_at_ms: u64,
@@ -300,6 +301,7 @@ impl Challenge {
             recipient,
             boot_id: id(&v[5])?,
             nonce: id(&v[6])?,
+            client_nonce: id(&v[8])?,
             intent: v[7].fixed()?,
             created_at_ms: v[9].uint()?,
             expires_at_ms: v[10].uint()?,
@@ -466,6 +468,9 @@ pub(crate) struct Node {
     evaluated_at_ms: u64,
 }
 impl Node {
+    pub(crate) fn canonical(&self) -> &[u8] {
+        &self.canonical
+    }
     pub(crate) fn scope(&self) -> &Scope {
         &self.scope
     }
@@ -493,15 +498,27 @@ impl Node {
             scope: Scope::parse(&v[2])?,
             view: v[3].uint()?,
             height: v[4].uint()?,
-            parent: v[5].fixed()?,
-            command: v[6].fixed()?,
+            parent: if v[4].uint()? == 0 {
+                v[5].null()?;
+                [0; 32]
+            } else {
+                v[5].fixed()?
+            },
+            command: if v[4].uint()? == 0 {
+                v[6].null()?;
+                [0; 32]
+            } else {
+                v[6].fixed()?
+            },
             evaluated_at_ms: v[7].uint()?,
         };
-        v[8].fixed::<32>()?;
-        ensure!(
-            n.height > 0 && n.view > 0,
-            "non-genesis node requires positive position"
-        );
+        if n.height == 0 {
+            v[8].null()?;
+            ensure!(n.view == 0, "genesis node has a view");
+        } else {
+            v[8].fixed::<32>()?;
+            ensure!(n.view > 0, "non-genesis node requires positive position");
+        }
         Ok(n)
     }
 }
@@ -518,23 +535,55 @@ impl CertifiedPoint {
         certificate: &[u8],
         node: &[u8],
     ) -> Result<Self> {
-        let result = ExecutedResult::parse(&descriptor.quorum(certificate)?)?;
+        let payload = descriptor.quorum(certificate)?;
         let node = Node::parse(node)?;
-        ensure!(
-            result.scope == *descriptor.scope()
-                && node.scope == result.scope
-                && result.height == node.height
-                && result.committed_node == node.digest
-                && result.ordered_request == node.command
-                && result.evaluated_at_ms == node.evaluated_at_ms,
-            "certificate does not bind this committed node"
-        );
+        let value = wire::decode(&payload)?;
+        let policy_state = if value
+            .list(25)?
+            .first()
+            .context("empty certificate")?
+            .uint()?
+            == 61
+        {
+            let read = crate::authority_read::Statement::parse(&payload)?;
+            ensure!(
+                read.scope == *descriptor.scope()
+                    && node.scope == read.scope
+                    && read.height == node.height
+                    && read.node == node.digest
+                    && read.evaluated_at_ms >= node.evaluated_at_ms,
+                "fresh certificate does not bind its applied node"
+            );
+            if read.height == 0 {
+                let genesis = descriptor.genesis()?;
+                ensure!(
+                    read.node == *genesis.node()
+                        && read.state == *genesis.policy_state()
+                        && node.evaluated_at_ms == genesis.evaluated_at_ms(),
+                    "fresh genesis anchor differs from descriptor"
+                );
+            }
+            read.state
+        } else {
+            let result = ExecutedResult::parse(&payload)?;
+            ensure!(
+                node.height > 0
+                    && result.scope == *descriptor.scope()
+                    && node.scope == result.scope
+                    && result.height == node.height
+                    && result.committed_node == node.digest
+                    && result.ordered_request == node.command
+                    && result.evaluated_at_ms == node.evaluated_at_ms,
+                "certificate does not bind this committed node"
+            );
+            result.policy_state
+        };
         Ok(Self {
             prefix: Prefix {
                 scope: node.scope.clone(),
                 height: node.height,
                 node: node.digest,
-                policy_state: result.policy_state,
+                policy_state,
                 view: node.view,
                 evaluated_at_ms: node.evaluated_at_ms,
             },

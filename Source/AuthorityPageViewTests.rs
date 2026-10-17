@@ -378,12 +378,24 @@ fn page_view_and_search_recheck_application_revocation_after_prior_success() {
         after: None,
     };
     for command in [view.clone(), search.clone()] {
-        assert_eq!(
-            f.evaluate_as(command, vec![], 6000, 150, Some(delegated.clone()))
-                .2
+        let (intent, operation, decision, _) =
+            f.evaluate_as(command.clone(), vec![], 6000, 150, Some(delegated.clone()));
+        assert_eq!(decision.code, 0);
+        if matches!(command, Command::View { .. }) {
+            assert_eq!(
+                crate::authority_read::evaluate_domain(
+                    &operation,
+                    &f.state,
+                    &f.records,
+                    &f.reserved,
+                    intent.requester,
+                    6000
+                )
+                .unwrap()
                 .code,
-            0
-        );
+                0
+            );
+        }
     }
     f.records.push(
         wire::encode(&a(vec![
@@ -401,11 +413,134 @@ fn page_view_and_search_recheck_application_revocation_after_prior_success() {
     );
     crate::authority_membership::sort_records(&mut f.records).unwrap();
     for command in [view, search] {
-        assert_eq!(
-            f.evaluate_as(command, vec![], 6001, 150, Some(delegated.clone()))
-                .2
+        let (intent, operation, decision, _) =
+            f.evaluate_as(command.clone(), vec![], 6001, 150, Some(delegated.clone()));
+        assert_eq!(decision.code, 3);
+        if matches!(command, Command::View { .. }) {
+            assert_eq!(
+                crate::authority_read::evaluate_domain(
+                    &operation,
+                    &f.state,
+                    &f.records,
+                    &f.reserved,
+                    intent.requester,
+                    6001
+                )
+                .unwrap()
                 .code,
-            3
-        );
+                3
+            );
+        }
     }
+}
+
+#[test]
+fn fresh_page_view_matches_ordered_authority_and_refuses_expiry_withdrawal_recipient() {
+    let mut f = fixture();
+    let placement = publish(&mut f, [72; 16], 6500);
+    let (intent, op, ordered, _) = f.evaluate(Command::View { page: [72; 16] }, vec![], 6000);
+    let before = wire::encode(&f.state.value()).unwrap();
+    let fresh = crate::authority_read::evaluate_domain(
+        &op,
+        &f.state,
+        &f.records,
+        &f.reserved,
+        intent.requester,
+        6000,
+    )
+    .unwrap();
+    assert_eq!(
+        (fresh.code, &fresh.value, &fresh.versions, fresh.expires_ms),
+        (
+            ordered.code,
+            &ordered.value,
+            &ordered.versions,
+            ordered.expires_ms
+        )
+    );
+    assert!(fresh.state.is_none());
+    assert_eq!(wire::encode(&f.state.value()).unwrap(), before);
+    assert_eq!(
+        crate::authority_read::evaluate_domain(
+            &op,
+            &f.state,
+            &f.records,
+            &f.reserved,
+            deployment::key(9).verifying_key().to_bytes(),
+            6000
+        )
+        .unwrap()
+        .code,
+        3
+    );
+    assert_eq!(
+        crate::authority_read::evaluate_domain(
+            &op,
+            &f.state,
+            &f.records,
+            &f.reserved,
+            intent.requester,
+            6600
+        )
+        .unwrap()
+        .code,
+        3
+    );
+    let host = f
+        .state
+        .records
+        .values()
+        .find(|r| r.reference.kind == 147)
+        .unwrap()
+        .reference
+        .clone();
+    let authorise = Operation {
+        grant: Some(f.grant.clone()),
+        command: crate::authority_domains::Command::Page(Command::Content(
+            content::Command::Authorise {
+                placement: placement.clone(),
+                host,
+                effect: content::Effect::Read,
+                offset: 0,
+                bytes: 1,
+                digest: None,
+            },
+        )),
+        snapshot: op.snapshot.clone(),
+    };
+    let scope = crate::authority_proof::Scope {
+        network: f.state.network,
+        incarnation: f.state.incarnation,
+        configuration: [88; 32],
+        epoch: op.snapshot.epoch,
+    };
+    assert!(
+        crate::authority_read::Request::sign(
+            &scope,
+            &deployment::key(5),
+            intent.requester,
+            [89; 32],
+            op.snapshot.height,
+            crate::authority_read::Query::Domain(authorise)
+        )
+        .is_err()
+    );
+    f.apply(
+        Command::Content(content::Command::Withdraw { placement }),
+        vec![],
+        6000,
+    );
+    assert_eq!(
+        crate::authority_read::evaluate_domain(
+            &op,
+            &f.state,
+            &f.records,
+            &f.reserved,
+            intent.requester,
+            6000
+        )
+        .unwrap()
+        .code,
+        3
+    );
 }

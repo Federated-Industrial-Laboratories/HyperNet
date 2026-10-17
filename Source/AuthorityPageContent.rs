@@ -490,7 +490,7 @@ pub(crate) fn get(
     c: &mut Evaluation<'_>,
     operation: &Operation,
     placement: &VersionRef,
-    intent: &Intent,
+    requester: Key,
 ) -> Result<()> {
     use super::evaluation::grant;
     let record = c.exact(placement)?;
@@ -508,32 +508,32 @@ pub(crate) fn get(
         let host = p
             .hosts
             .iter()
-            .find(|h| h.id == intent.requester)
+            .find(|h| h.id == requester)
             .context("content query is outside host consent")?;
         c.host(host, Some(&p.namespace), true)?;
     } else if withdrawn {
         ensure!(
-            intent.requester == p.owner,
+            requester == p.owner,
             "withdrawn content metadata requires its owner"
         );
-        owner_scope(c, &p, intent.requester, grant(operation)?)?;
+        owner_scope(c, &p, requester, grant(operation)?)?;
     } else if p.opaque {
         let (outer, state, _) = sealed::live(c, &p.revision)?;
         let effect = if state.status == 0 {
             Effect::Inspect
-        } else if intent.requester == outer.reviewer {
+        } else if requester == outer.reviewer {
             Effect::Repair
         } else {
             Effect::Read
         };
-        sealed::content_access(c, &p, effect, intent.requester, grant(operation)?)?;
+        sealed::content_access(c, &p, effect, requester, grant(operation)?)?;
     } else {
         let body = c.revision(&p.revision, true)?;
         let (_, ledger) = c.ledger(body.author.raw_page)?;
-        let owner_access = p.owner == intent.requester
+        let owner_access = p.owner == requester
             && c.optional(|c| {
                 c.principal(
-                    intent.requester,
+                    requester,
                     grant(operation)?,
                     body.author.application.as_ref(),
                     "PagesSubmit",
@@ -556,7 +556,7 @@ pub(crate) fn get(
             "ReviewInspect"
         };
         c.principal(
-            intent.requester,
+            requester,
             grant(operation)?,
             None,
             action,
@@ -694,7 +694,7 @@ pub(crate) fn evaluate(
                 add(next, changed, PLACEMENT_KIND, id, placement.value())?;
             }
         }
-        Command::Get { placement } => get(c, operation, placement, intent)?,
+        Command::Get { placement } => get(c, operation, placement, intent.requester)?,
         Command::Receipt { receipt } => {
             let p = live(c, &receipt.placement)?;
             ensure!(

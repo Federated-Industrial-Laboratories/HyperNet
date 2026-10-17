@@ -12,6 +12,15 @@ container lifecycle. [Committee replacement](AuthorityEpochs.md) preserves the
 network's authority state through an explicit terminal transition and successor
 activation.
 
+Read-only policy discovery, Page views and route revalidation use three matching
+fresh read signatures over the same current applied state. These reads do not
+advance the ordered log or consume requester sequences. A replica with unapplied
+commitment, a lock ahead of applied state or unavailable voting authority refuses
+to sign. Read results retain the same finite clock and consumer history checks;
+connection admission and host content effects remain ordered. See the
+[wire contract](WireContract.md#fresh-quorum-reads) for the exact query whitelist,
+proof and failure behavior.
+
 ## Inputs and independent trust
 
 Prepare a complete accepted bootstrap with `HyperNetSuite network` and verify the

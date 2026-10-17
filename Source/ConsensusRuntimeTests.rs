@@ -15,6 +15,8 @@ use std::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[path = "ConsensusReadRuntimeTests.rs"]
+mod fresh_reads;
 #[path = "ConsensusHistoryOvertakenTests.rs"]
 mod history_overtaken;
 #[path = "ConsensusHistoryPreparationTests.rs"]
@@ -165,6 +167,7 @@ fn repair_driver(
         query_times: BTreeMap::new(),
         diagnostics: diagnostics::Diagnostics::new().0,
         shares: BTreeMap::new(),
+        reads: BTreeMap::new(),
         early_execution: None,
         repairs: BTreeMap::new(),
         pending_votes: BTreeMap::new(),

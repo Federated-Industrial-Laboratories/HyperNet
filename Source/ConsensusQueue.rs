@@ -33,6 +33,7 @@ pub(super) enum Class {
     Request { family: u8, token: [u8; 32] },
     Response { family: u8 },
     Transient,
+    Fresh,
 }
 impl Class {
     fn lane(self) -> Lane {
@@ -52,7 +53,9 @@ impl Class {
     }
     fn expiry(self, now: Instant) -> Option<Instant> {
         match self {
-            Self::Request { .. } | Self::Response { .. } => now.checked_add(peer::HTTP_TIMEOUT),
+            Self::Request { .. } | Self::Response { .. } | Self::Fresh => {
+                now.checked_add(peer::HTTP_TIMEOUT)
+            }
             _ => None,
         }
     }
@@ -186,7 +189,7 @@ impl Mailbox {
                 Class::Broadcast { .. } => !broadcasts.contains(*id),
                 Class::Submission(digest) => !submissions.contains(&digest),
                 Class::Request { token, .. } => !requests.contains(&token),
-                Class::Response { .. } | Class::Transient => false,
+                Class::Response { .. } | Class::Transient | Class::Fresh => false,
             })
             .map(|(id, _)| *id)
             .collect();

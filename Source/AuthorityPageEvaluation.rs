@@ -98,13 +98,13 @@ fn page_item<T>(
 fn read(
     c: &mut Evaluation<'_>,
     operation: &Operation,
-    intent: &Intent,
+    requester: Key,
     page: [u8; 16],
 ) -> Result<VersionRef> {
     let (_, _, review, revision) = c.publication(page)?;
     c.media_metadata(&review.statement.revision, &revision)?;
     c.principal(
-        intent.requester,
+        requester,
         grant(operation)?,
         None,
         "PagesRead",
@@ -117,10 +117,10 @@ fn read(
 fn view(
     c: &mut Evaluation<'_>,
     operation: &Operation,
-    intent: &Intent,
+    requester: Key,
     page: [u8; 16],
 ) -> Result<()> {
-    let placement = read(c, operation, intent, page)?;
+    let placement = read(c, operation, requester, page)?;
     // Metadata inspection can outlive storage. A view must bind live current content.
     ensure!(
         !c.state
@@ -128,7 +128,7 @@ fn view(
             .contains_key(&(content::TOMBSTONE_KIND, placement.id)),
         "Page view content is withdrawn"
     );
-    content::get(c, operation, &placement, intent)
+    content::get(c, operation, &placement, requester)
 }
 
 pub(super) fn grant(operation: &Operation) -> Result<&VersionRef> {
@@ -843,7 +843,7 @@ pub fn evaluate(
                                 c.select(140, record.reference.id)?;
                                 c.revision(selected.unwrap(), true)?;
                             } else if searching {
-                                view(c, operation, intent, ledger.raw_page)?;
+                                view(c, operation, intent.requester, ledger.raw_page)?;
                                 c.read_capability(
                                     reader_grant,
                                     intent.requester,
@@ -1027,9 +1027,9 @@ pub fn evaluate(
                 }
             }
             Command::Read { page } => {
-                read(&mut c, operation, intent, *page)?;
+                read(&mut c, operation, intent.requester, *page)?;
             }
-            Command::View { page } => view(&mut c, operation, intent, *page)?,
+            Command::View { page } => view(&mut c, operation, intent.requester, *page)?,
             _ => evaluate_serving(
                 &mut c,
                 operation,
@@ -1081,6 +1081,60 @@ pub fn evaluate(
     };
     Ok(Decision {
         state: (!changed.is_empty()).then_some(next),
+        value,
+        versions,
+        dependencies: c.dependencies,
+        code: 0,
+        expires_ms: c.expires,
+    })
+}
+
+/// The fresh view shares the exact publication and ContentGet selection with ordered views.
+pub(crate) fn evaluate_read(
+    operation: &Operation,
+    state: &State,
+    records: &[Vec<u8>],
+    reserved: &Reservations,
+    requester: Key,
+    at: u64,
+) -> Result<Decision> {
+    let super::super::Command::Page(Command::View { page }) = &operation.command else {
+        anyhow::bail!("fresh Page command differs")
+    };
+    let mut c = Evaluation {
+        state,
+        governance: Governance::parse(state.network, state.incarnation, records)?,
+        index: Index::parse(records, reserved, state.network, state.incarnation)?,
+        at,
+        dependencies: vec![],
+        selected: BTreeMap::new(),
+        expires: u64::MAX,
+    };
+    if let Err(error) = view(&mut c, operation, requester, *page) {
+        return Ok(Decision::refused(if error.is::<Capacity>() {
+            2
+        } else {
+            3
+        }));
+    }
+    if sorted(&mut c.dependencies).is_err() {
+        return Ok(Decision::refused(2));
+    }
+    if operation
+        .snapshot
+        .references
+        .iter()
+        .any(|r| !c.dependencies.contains(r))
+    {
+        return Ok(Decision::refused(12));
+    }
+    let (value, versions) = match result_view(&c, &Command::View { page: *page }, None) {
+        Ok(v) => v,
+        Err(e) if e.is::<Capacity>() => return Ok(Decision::refused(2)),
+        Err(e) => return Err(e),
+    };
+    Ok(Decision {
+        state: None,
         value,
         versions,
         dependencies: c.dependencies,

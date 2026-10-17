@@ -220,6 +220,27 @@ impl Session {
             client_nonce != [0; 32] && (1..=maximum_duration_ms(&request)).contains(&duration_ms),
             "invalid client nonce or challenge duration"
         );
+        self.issue_bound(
+            request.network(),
+            request.incarnation(),
+            request.digest(),
+            recipient,
+            client_nonce,
+            duration_ms,
+            health,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn issue_bound(
+        &mut self,
+        network: Digest,
+        incarnation: Digest,
+        request: Digest,
+        recipient: &SigningKey,
+        client_nonce: Digest,
+        duration_ms: u64,
+        health: ClockHealth,
+    ) -> Result<Vec<u8>> {
         let now = self.observation(health)?;
         self.challenges
             .retain(|_, c| now.boot_ms < c.deadline_boot_ms);
@@ -243,12 +264,12 @@ impl Session {
         let payload = wire::encode(&V::Array(vec![
             V::Uint(21),
             V::Uint(1),
-            V::Bytes(request.network().to_vec()),
-            V::Bytes(request.incarnation().to_vec()),
+            V::Bytes(network.to_vec()),
+            V::Bytes(incarnation.to_vec()),
             V::Bytes(recipient.verifying_key().to_bytes().to_vec()),
             V::Bytes(self.boot_id.to_vec()),
             V::Bytes(nonce.to_vec()),
-            V::Bytes(request.digest().to_vec()),
+            V::Bytes(request.to_vec()),
             V::Bytes(client_nonce.to_vec()),
             V::Uint(now.wall_ms),
             V::Uint(expires),
@@ -259,7 +280,7 @@ impl Session {
             nonce,
             Live {
                 digest: wire::digest(&payload),
-                intent: request.digest(),
+                intent: request,
                 issue_boot_ms: now.boot_ms,
                 deadline_boot_ms: deadline,
             },
@@ -331,6 +352,39 @@ impl Session {
             now,
         )?;
         Ok(now)
+    }
+    pub(crate) fn check_read(
+        &mut self,
+        result: &crate::authority_read::VerifiedRead,
+        not_before_ms: u64,
+        health: ClockHealth,
+    ) -> Result<Observation> {
+        let now = self.observation(health)?;
+        self.check_at(
+            &result.challenge,
+            result.statement.expires_at_ms,
+            not_before_ms,
+            now,
+        )?;
+        Ok(now)
+    }
+    pub(crate) fn consume_read(
+        &mut self,
+        result: &crate::authority_read::VerifiedRead,
+        not_before_ms: u64,
+        health: ClockHealth,
+    ) -> Result<Consumption> {
+        self.check_read(result, not_before_ms, health)?;
+        let live = self
+            .challenges
+            .remove(&result.challenge.nonce)
+            .ok_or_else(|| anyhow::anyhow!("fresh challenge already consumed"))?;
+        Ok(Consumption {
+            challenge: result.challenge.clone(),
+            live,
+            expires_at_ms: result.statement.expires_at_ms,
+            not_before_ms,
+        })
     }
     pub(crate) fn consume(
         &mut self,
@@ -425,6 +479,7 @@ mod tests {
     fn challenges_expire_at_original_boot_deadline_and_strict_absolute_boundary() {
         let mut session = Session::new().unwrap();
         let challenge = Challenge {
+            client_nonce: [7; 32],
             network: [1; 32],
             incarnation: [2; 32],
             recipient: [3; 32],

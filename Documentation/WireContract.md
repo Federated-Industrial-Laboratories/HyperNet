@@ -209,11 +209,10 @@ independent operators or absence of collusion.
 
 This is an offline route plan. It carries no invitation, relay voucher, service
 registration, current quorum evidence or membership. Expired route material is
-refused. Preparation produces `OfflinePrepared`, not a live connection. Online
-joining remains unavailable until the mandatory relay connector is implemented.
-The current trusted authority backend cannot serve as a BasicHotStuff network
-merely because such a draft was prepared. Runtime setup and offline trust drafting
-remain separate until the replacement authority and route consumers are integrated.
+refused. Preparation produces `OfflinePrepared`; a live connection requires an
+installed authority quorum and a verified relay route. An offline trust draft does
+not start signers or establish a network. Runtime setup and independently accepted
+trust material remain separate steps.
 
 ## Requests, recipient challenges and executed results
 
@@ -352,6 +351,8 @@ proxy discovery and early data are disabled. TLS identity is not a consensus vot
 | 17 | `[transferId,oldCheckpointDigest,newCheckpointProofBytes]` |
 | 18 | `[requestId,inputAnchor,reference203]` |
 | 19 | `[requestId,inputAnchor,reference203,bodyBytesOrNull]` |
+| 20 | `[signedReadRequest,signedChallenge,proposedReadStatement]` |
+| 21 | `[readId,nodeBytes,signedReadStatement,operationResult]` |
 
 Embedded records use their exact canonical bytes. Transport status is 0 for
 accepted or duplicate and 2 for refusal. It confers no authority. Repair imports
@@ -385,6 +386,8 @@ common maximum. Requests are `[41,1,Scope,operation,payloadBytes]`:
 | 3 | `[floorHeight,floorNodeDigest,targetNodeDigest]` |
 | 4 | `[floorHeight,floorNodeDigest,targetNodeDigest,priorTreeSize,priorTreeRootOrNull]` |
 | 5 | Empty array; local signer status only |
+| 6 | `[signedReadRequest,signedChallenge]` |
+| 7 | Exact 32-byte read ID |
 
 Ordinary replies are
 `[42,1,Scope,status,code,orderedRequestOrNull,nodeOrNull,executedCertificateOrNull,operationResultOrNull,outputSidecar]`.
@@ -394,6 +397,15 @@ kind 23 result over the supplied kind 24 bytes can authorise a consumer effect.
 A Pending acknowledgement, process status or local diagnostic cannot do so.
 An exact request may be queried through another replica after its reply is lost.
 Its original recipient challenge and deadline remain unchanged.
+
+Fresh read replies are
+`[62,1,Scope,status,code,readId,nodeOrNull,readCertificateOrNull,operationResultOrNull,outputSidecar]`.
+Status is Pending=0, Complete=1, Unavailable=2 or Invalid=3. A complete response
+requires three matching kind61 signatures over the supplied result. A local
+Unavailable or Invalid reply is not authenticated permission or a quorum refusal.
+Protocol1 reader endpoints admit operations0-4and6-7, with exact scope and request
+validation; operation5 remains a local diagnostic. Pending replies keep demand
+only when reply family, scope and exact submitted or polled ID all match.
 
 The mandatory output sidecar retains its exact reference/body framing. Native
 and federated Page authority results carry metadata and an empty object sidecar.
@@ -417,6 +429,64 @@ effect. The normal local client reports quorum as `NotProbed`, checks the exact
 scope and signer against its retained deployment, enforces the independent signer
 generation floor, and limits the response to 4096 bytes within one five-second
 deadline. It does not acquire the active signer's exclusive journal lock.
+
+## Fresh quorum reads
+
+Four observational queries use a separate protocol: `AuthorityPolicyContext`,
+`PageView`, `RouteLookup` and `RouteVoucherContext`. Admission, host content effects,
+stream controls and all mutations still require their ordered request and result.
+The whitelist matches complete parsed variants. A non-mutating flag does not
+admit another operation to this protocol.
+
+| Kind | Name | Fields in order |
+| --- | --- | --- |
+| 60 | ReadRequest | scope:Scope, requester:Key, recipient:Key, clientNonce:Id, minimumHeight:U64, query:array |
+| 61 | ReadStatement | scope:Scope, request:Digest, challenge:Digest, requester:Key, recipient:Key, height:U64, node:Digest, policyState:Digest, evaluatedAtMs:U64, expiresAtMs:U64, result:Digest |
+
+`ReadRequest` is signed by its requester. Query `[0]` requests the content-free
+policy and recovery pair. Query `[1,domainParameters]` carries the canonical bytes
+of one whitelisted domain operation, including its grant and snapshot references.
+Its snapshot epoch and height must match the request scope and minimum height.
+The recipient signs a kind21 challenge over the read request's payload digest.
+The request and challenge bind the same recipient, network and incarnation.
+The existing process boot, random nonce, clock health and maximum5000-ms challenge
+rules apply. A read ID is the digest of the canonical array
+`[requestDigest,challengeDigest]`. Neither a request nor a read ID is an ordinary
+stream generation, sequence, acknowledgement or completion.
+
+Each eligible replica independently evaluates its current durable application
+state. It signs only when applied and committed nodes agree and its durable lock
+is that node or a verified ancestor. Missing ancestry, a pending committed state,
+an inactive or retired epoch, quarantine and poisoned storage prevent signing.
+A proposed statement cannot supply application state or select an old snapshot.
+The evaluation instant must be within1000ms of the replica's own healthy clock,
+matching ordinary proposal admission. Conservative expiry includes1250ms of
+admission and clock uncertainty.
+The state digest, node, exact request and challenge, fresh evaluation time,
+original finite expiry and complete result digest must agree across three current
+voters. Shares from different states or evaluation instants cannot be combined.
+An authenticated domain refusal is a quorum result and never grants permission.
+
+The read certificate is distinct from kind23 `ExecutedResult`. Its anchor node
+retains its original commit time; the read statement carries the later evaluation
+time. Consumers independently validate the typed result and its complete current
+dependency closure, verify history from their retained prefix, then durably retain
+increased prefix, generation and time floors before using the result. This
+transaction leaves ordinary and fence trackers unchanged. Restart can retain the
+certified floor and historical provenance, but cannot revive a live challenge.
+A Page view does not replace the host's ordered authorization or exact receipt.
+A route context does not consume a Permit or extend an admitted channel's limits.
+
+Fresh query output sidecars are empty; page bodies remain on their separate host
+exchange. Collection retains at most32active reads and786432aggregate bytes.
+Retransmission preserves each exact candidate and its in-flight shares. State
+movement or expired admission may create a new candidate within the same original
+challenge deadline. Still-valid candidates remain separately bounded by their
+original expiry; shares from different candidates cannot be combined.
+Quorum unavailability is a finite explicit error. There is no automatic ordered
+fallback or deadline extension. Invalid proof, authenticated refusal, unaccepted
+policy and incompatible privacy remain distinct failures. Content-free policy
+discovery still precedes disclosure of a page identifier.
 
 ## Finite operation payloads
 

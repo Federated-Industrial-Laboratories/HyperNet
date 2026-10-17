@@ -16,6 +16,8 @@ pub mod journal;
 mod object_state;
 #[path = "ConsensusPeer.rs"]
 pub mod peer;
+#[path = "ConsensusRead.rs"]
+mod read;
 #[path = "ConsensusWire.rs"]
 pub mod records;
 #[path = "ConsensusRepair.rs"]

@@ -57,6 +57,8 @@ mod authority_page_service;
 mod authority_policies;
 #[path = "AuthorityProof.rs"]
 mod authority_proof;
+#[path = "AuthorityRead.rs"]
+mod authority_read;
 #[path = "AuthorityRecipient.rs"]
 mod authority_recipient;
 #[cfg(test)]

@@ -623,6 +623,85 @@ impl PolicyApplication {
     }
 }
 impl Application for PolicyApplication {
+    fn read(
+        &self,
+        prior: &[u8],
+        request: &crate::authority_read::Request,
+        at: u64,
+        expires: u64,
+    ) -> Result<(Vec<u8>, u64)> {
+        let state = self.verified_state(prior)?;
+        ensure!(
+            state.terminal.is_none()
+                && request.scope.network == self.config.scope.network
+                && request.scope.incarnation == self.config.scope.incarnation
+                && request.scope.epoch == self.config.scope.epoch
+                && request.scope.configuration == self.config.scope.configuration
+                && state.height >= request.minimum_height,
+            "fresh application scope or floor differs"
+        );
+        match &request.query {
+            crate::authority_read::Query::PolicyContext => {
+                let g = crate::authority_governance::Governance::parse(
+                    self.config.scope.network,
+                    self.config.scope.incarnation,
+                    &state.records,
+                )?;
+                let pair = [100, 114]
+                    .into_iter()
+                    .map(|kind| Ok(g.record_bytes(kind, self.config.scope.network)?.to_vec()))
+                    .collect::<Result<Vec<_>>>()?;
+                let refs = crate::authority_governance::Governance::record_versions(
+                    self.config.scope.network,
+                    self.config.scope.incarnation,
+                    &pair,
+                )?;
+                let value = wire::encode(&array(vec![
+                    V::Uint(201),
+                    V::Uint(1),
+                    V::Text("AuthorityPolicyContext".into()),
+                    array(refs.iter().map(reference).collect()),
+                    array(pair.iter().map(|v| b(v)).collect()),
+                ]))?;
+                Ok((result("AuthorityPolicyContext", 0, &value)?, expires))
+            }
+            crate::authority_read::Query::Domain(operation) => {
+                ensure!(
+                    operation
+                        .command
+                        .required_inputs(&state.domains)?
+                        .is_empty(),
+                    "fresh query requires unsupported immutable inputs"
+                );
+                let mut d = crate::authority_read::evaluate_domain(
+                    operation,
+                    &state.domains,
+                    &state.records,
+                    &state.effective_reservations()?,
+                    request.requester,
+                    at,
+                )?;
+                let snapshot = operation.snapshot();
+                if snapshot.epoch != self.config.scope.epoch
+                    || snapshot.height > state.height
+                    || snapshot.height == state.height && snapshot.state != wire::digest(prior)
+                {
+                    d.refuse(12);
+                }
+                ensure!(d.state.is_none(), "fresh query attempted state mutation");
+                let expiry = if d.code == 0 {
+                    expires.min(d.expires_ms)
+                } else {
+                    expires
+                };
+                let value = if d.code == 0 { d.value } else { array(vec![]) };
+                Ok((
+                    result("AuthorityDomain", d.code, &wire::encode(&value)?)?,
+                    expiry,
+                ))
+            }
+        }
+    }
     fn command_inputs(&self, ordered: &[u8]) -> Result<Vec<crate::authority_objects::Reference>> {
         if self.inert(ordered)? {
             return Ok(vec![]);

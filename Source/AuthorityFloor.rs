@@ -16,6 +16,8 @@ use sha2::{Digest as _, Sha256};
 use std::{collections::BTreeMap, ffi::OsStr, fs::File, path::Path};
 #[path = "AuthorityEpochFloor.rs"]
 mod epoch;
+#[path = "AuthorityReadFloor.rs"]
+mod read;
 #[path = "AuthorityTracker.rs"]
 mod tracker;
 #[path = "AuthorityFloorTransaction.rs"]

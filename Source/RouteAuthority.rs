@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// A relay re-evaluates certified route permission through its own persistent authority stream.
+// A relay re-evaluates current certified permission and durably records connection admissions.
 use crate::{
     authority_challenge::{self, Session},
     authority_domains::{self as domains, Command as DomainCommand, Operation, result, routes},
@@ -20,6 +20,8 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use std::path::Path;
+#[path = "RouteAuthorityRead.rs"]
+mod read;
 fn a(v: Vec<V>) -> V {
     V::Array(v)
 }
@@ -399,6 +401,14 @@ impl<'a> Client<'a> {
             self.store.resume_fence()?.is_none(),
             "Route requester has an unresolved explicit fence"
         );
+        if self.store.resume_ordinary()?.is_none()
+            && matches!(
+                command,
+                routes::Command::Lookup { .. } | routes::Command::VoucherContext { .. }
+            )
+        {
+            return self.read_action(command);
+        }
         if self.store.needs_stream_status()? {
             self.status()?;
         }

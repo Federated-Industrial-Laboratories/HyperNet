@@ -11,6 +11,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[path = "AuthorityReadFloorTests.rs"]
+mod read;
+
 fn health() -> ClockHealth {
     ClockHealth::new(
         SystemTime::now()

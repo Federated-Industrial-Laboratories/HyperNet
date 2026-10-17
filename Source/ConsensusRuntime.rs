@@ -10,6 +10,8 @@ mod ingress;
 mod input_driver;
 #[path = "ConsensusQueue.rs"]
 mod queue;
+#[path = "ConsensusDriverRead.rs"]
+mod read_driver;
 #[path = "ConsensusDriverRepair.rs"]
 mod repair_driver;
 use super::{
@@ -47,6 +49,15 @@ const RETRANSMIT: Duration = Duration::from_millis(250);
 const MAX_EARLY_EXECUTION_BYTES: usize = 4 * peer::MAX_PAYLOAD;
 
 pub trait Application: Send + Sync + 'static {
+    fn read(
+        &self,
+        _prior: &[u8],
+        _request: &crate::authority_read::Request,
+        _at: u64,
+        _expires: u64,
+    ) -> Result<(Vec<u8>, u64)> {
+        anyhow::bail!("application does not support fresh reads")
+    }
     fn command_inputs(&self, _ordered: &[u8]) -> Result<Vec<InputReference>> {
         Ok(vec![])
     }
@@ -138,6 +149,7 @@ struct Driver {
     query_times: BTreeMap<Digest, Instant>,
     diagnostics: diagnostics::Diagnostics,
     shares: BTreeMap<Digest, ShareSet>,
+    reads: BTreeMap<Digest, read_driver::Collection>,
     early_execution: Option<EarlyExecution>,
     repairs: BTreeMap<Key, repair_driver::Repair>,
     pending_votes: BTreeMap<(u64, u64, Key), SignedVote>,
@@ -232,6 +244,7 @@ pub async fn serve(
         query_times: BTreeMap::new(),
         diagnostics: diagnostics.clone(),
         shares: BTreeMap::new(),
+        reads: BTreeMap::new(),
         early_execution: None,
         repairs: BTreeMap::new(),
         pending_votes: BTreeMap::new(),
@@ -602,6 +615,7 @@ impl Driver {
     fn send(&self, recipient: Key, message: &Message) -> Result<()> {
         if let Some(sender) = self.senders.get(&recipient) {
             let class = match message {
+                Message::ReadProbe(..) | Message::ReadShare(..) => queue::Class::Fresh,
                 Message::Submit(command, _) => queue::Class::Submission(wire::digest(command)),
                 Message::RepairRequest(..)
                 | Message::StateRequest(..)
@@ -751,6 +765,7 @@ impl Driver {
         Ok(())
     }
     fn tick(&mut self) -> Result<()> {
+        self.expire_reads();
         self.expire_queries(Instant::now());
         self.prune_queues()?;
         if self.engine.can_vote() {
@@ -1198,6 +1213,12 @@ impl Driver {
                     )?;
                 }
             }
+            Message::ReadProbe(request, challenge, statement) => {
+                self.read_probe(sender, request, challenge, statement)?
+            }
+            Message::ReadShare(id, node, share, result) => {
+                self.read_share(sender, id, node, share, result)?
+            }
             Message::Ack(..) => {}
             checkpoint @ (Message::CheckpointShare(_)
             | Message::CheckpointProof(_)
@@ -1433,8 +1454,26 @@ impl Driver {
         Ok(())
     }
     fn local_request(&mut self, bytes: &[u8]) -> Vec<u8> {
-        self.local_checked(bytes)
-            .unwrap_or_else(|_| self.reply(2, 2, None, None).unwrap_or_default())
+        self.local_checked(bytes).unwrap_or_else(|_| {
+            let fresh = (|| -> Result<Digest> {
+                let value = wire::decode(bytes)?;
+                let fields = super::records::record(&value, 41, 5)?;
+                match fields[3].uint()? {
+                    6 => {
+                        let payload = wire::decode(fields[4].bytes()?)?;
+                        let pair = payload.array(2)?;
+                        crate::authority_read::read_id(pair[0].bytes()?, pair[1].bytes()?)
+                    }
+                    7 => Ok(fields[4].bytes()?.try_into()?),
+                    _ => anyhow::bail!("not a fresh operation"),
+                }
+            })();
+            if let Ok(id) = fresh {
+                self.read_reply(3, 3, id, None).unwrap_or_default()
+            } else {
+                self.reply(2, 2, None, None).unwrap_or_default()
+            }
+        })
     }
     fn local_checked(&mut self, bytes: &[u8]) -> Result<Vec<u8>> {
         let value = wire::decode(bytes)?;
@@ -1518,6 +1557,8 @@ impl Driver {
                     reply => reply,
                 }
             }
+            6 => self.read_start(a[4].bytes()?),
+            7 => self.read_poll(a[4].bytes()?.try_into()?),
             5 => {
                 wire::decode(a[4].bytes()?)?.array(0)?;
                 // Local diagnostics do not send peer traffic or attest quorum readiness.
