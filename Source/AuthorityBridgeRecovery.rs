@@ -223,7 +223,11 @@ fn cache_authenticated(
 
 pub fn run(config: &Config, guard: &Guard, expected_bytes: Option<&[u8]>) -> Result<Vec<u8>> {
     ensure!(
-        guard.role == 7 && config.profile.manifest == guard.manifest,
+        guard.role == 7
+            && guard
+                .manifest
+                .permits_definition(&config.profile.manifest)
+                .is_ok(),
         "Bridge requester recovery requires its own consented role"
     );
     guard.check()?;

@@ -11,6 +11,8 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+#[path = "RuntimeTransitionArtifacts.rs"]
+mod artifacts;
 
 #[derive(Clone, ValueEnum)]
 pub enum SessionPolicy {
@@ -388,14 +390,9 @@ fn begin(p: Proposal, operation: String, digest: String) -> Result<Transaction> 
             )?;
         }
         profile.manifest = p.successor.clone();
-        for (relative, replacement) in &replacements {
-            if let Some(name) = relative.strip_prefix("Config/") {
-                profile.artifacts.insert(
-                    name.into(),
-                    crate::trust_bootstrap::hex32(&replacement.digest)?,
-                );
-            }
-        }
+        profile
+            .artifacts
+            .extend(artifacts::configuration(root, &replacements)?);
         profile.validate()?;
         let local = crate::runtime_service_authorization::local_consent(
             &profile.manifest,
@@ -587,11 +584,14 @@ fn publish_launch(root: &Path, relative: &str, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 fn finish(mut t: Transaction, historical: bool) -> Result<Value> {
-    let root = &t.proposal.root;
     ensure!(
-        files::public_read(&root.join("Authorization/Withdrawal.json"), 64)? == b"0",
+        files::public_read(&t.proposal.root.join("Authorization/Withdrawal.json"), 64)? == b"0",
         "Withdrawal is terminal; successor cannot resume"
     );
+    if historical && !t.completed {
+        artifacts::recover(&mut t)?;
+    }
+    let root = &t.proposal.root;
     let image = format!(
         "sha256:{}",
         hex::encode(t.proposal.successor.roles[0].image_digest)

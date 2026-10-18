@@ -224,7 +224,11 @@ fn handle(
 pub async fn run(config: Config, guard: &Guard, active: &mut Active) -> Result<()> {
     active.check(guard)?;
     ensure!(
-        guard.role == 1 && config.profile.manifest == guard.manifest,
+        guard.role == 1
+            && guard
+                .manifest
+                .permits_definition(&config.profile.manifest)
+                .is_ok(),
         "content service differs from activated role"
     );
     let mut disk = disk::Disk::open(

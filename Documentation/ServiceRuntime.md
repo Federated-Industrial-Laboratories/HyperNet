@@ -177,6 +177,12 @@ that generation before restarting. Changing finite host consent does not extend 
 independently shorter domain validity interval or a previously issued effect lease.
 Stop and permanent withdrawal remain available during an interrupted transition.
 
+Historical recovery can repair an interrupted service artifact binding from its
+exact retained staged bytes and signed local consent. Unexpected digests, changed
+staged files or a different operator are refused. The proposal, operation identity
+and content remain unchanged. Historical recovery cannot start the service: a
+fresh reviewed signed software successor and current activation remain required.
+
 Managed boot uses `runtime services managed preview` and `enable`, with the same
 `--clock-monitor` and reviewed digest as authorities, plus
 `--activation-request /Private/ActivationRequest.cbor`. It requires explicit Managed
