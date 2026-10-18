@@ -143,3 +143,143 @@ async fn private_route_clock_suspension_preserves_terminal_checks_and_shutdown()
             .is_err()
     );
 }
+
+#[test]
+fn private_route_fresh_read_retry_requires_typed_read_transport_failure() {
+    use crate::authority_local_transport::{FreshReadUnavailable, HistoryOvertaken};
+    for (error, reason) in [
+        (
+            anyhow::Error::new(FreshReadUnavailable),
+            ReadRetry::FreshQuorumUnavailable,
+        ),
+        (
+            anyhow::Error::new(HistoryOvertaken),
+            ReadRetry::HistoryOvertaken,
+        ),
+    ] {
+        let error = Client::retry_read(error.context("read transport"));
+        assert_eq!(error.downcast_ref::<ReadRetry>(), Some(&reason));
+        let propagated = clock_checked::<()>(Err(error)).unwrap_err();
+        assert!(propagated.is::<ReadRetry>());
+        assert!(propagated.is::<FreshReadUnavailable>() || propagated.is::<HistoryOvertaken>());
+    }
+    // An ordinary effect with the same underlying failure cannot acquire read retry authority.
+    for error in [
+        anyhow::Error::new(FreshReadUnavailable),
+        anyhow::Error::new(HistoryOvertaken),
+    ] {
+        assert!(clock_checked::<()>(Err(error)).unwrap().is_err());
+    }
+    for error in [
+        anyhow::anyhow!("fresh authority quorum is unavailable within the original challenge"),
+        anyhow::anyhow!("malformed authority response"),
+        anyhow::anyhow!("invalid quorum proof"),
+        anyhow::anyhow!("Route maintenance refused with code 1"),
+        std::io::Error::from(std::io::ErrorKind::TimedOut).into(),
+        std::io::Error::from(std::io::ErrorKind::PermissionDenied).into(),
+    ] {
+        let error = Client::retry_read(error);
+        assert!(!error.is::<ReadRetry>());
+        assert!(clock_checked::<()>(Err(error)).unwrap().is_err());
+    }
+}
+
+#[test]
+fn private_route_terminal_diagnostics_exclude_private_error_text() {
+    for (message, expected) in [
+        ("private control read closed", FailureCode::LocalReadClosed),
+        (
+            "private control write closed",
+            FailureCode::LocalWriteClosed,
+        ),
+        (
+            "private control readiness failed or timed out",
+            FailureCode::LocalReadiness,
+        ),
+        (
+            "original inspection deadline expired",
+            FailureCode::InspectionDeadline,
+        ),
+        (
+            "unknown private field: confidential-page",
+            FailureCode::Other,
+        ),
+    ] {
+        let error = anyhow::anyhow!(message).context("obtain fresh Route context and history");
+        assert_eq!(failure_code(&error), expected);
+        assert!(!format!("{:?}", failure_code(&error)).contains(message));
+        assert!(!Client::retry_read(error).is::<ReadRetry>());
+    }
+}
+
+#[tokio::test]
+async fn private_route_fresh_read_backoff_rechecks_consent_and_allows_shutdown() {
+    let delay = Duration::from_millis(20);
+    let started = tokio::time::Instant::now();
+    let mut checks = 0;
+    assert!(
+        wait_for_retry(
+            || {
+                checks += 1;
+                Ok(())
+            },
+            std::future::pending(),
+            delay,
+        )
+        .await
+        .unwrap()
+    );
+    assert!(started.elapsed() >= delay);
+    assert!(checks >= 2);
+    for reason in [
+        "original consent expired",
+        "withdrawn",
+        "generation changed",
+        "activation changed",
+        "configuration changed",
+        "invalid journal",
+    ] {
+        let mut checks = 0;
+        let error = wait_for_retry(
+            || {
+                checks += 1;
+                if checks == 1 {
+                    return Ok(());
+                }
+                anyhow::bail!(reason);
+            },
+            std::future::pending(),
+            Duration::from_millis(READ_RETRY_MS),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(checks, 2);
+        assert_eq!(error.to_string(), reason);
+    }
+    assert!(
+        !wait_for_retry(
+            || Ok(()),
+            std::future::ready(()),
+            Duration::from_millis(READ_RETRY_MS),
+        )
+        .await
+        .unwrap()
+    );
+    let mut checks = 0;
+    assert!(
+        wait_for_retry(
+            || {
+                checks += 1;
+                if checks == 1 {
+                    return Err(ObservationExpired.into());
+                }
+                Ok(())
+            },
+            std::future::pending(),
+            delay,
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(checks, 2);
+}

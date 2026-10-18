@@ -224,7 +224,11 @@ fn handle(
 pub async fn run(config: Config, guard: &Guard, active: &mut Active) -> Result<()> {
     active.check(guard)?;
     ensure!(
-        guard.role == 1 && config.profile.manifest == guard.manifest,
+        guard.role == 1
+            && guard
+                .manifest
+                .permits_definition(&config.profile.manifest)
+                .is_ok(),
         "content service differs from activated role"
     );
     let mut disk = disk::Disk::open(
@@ -233,12 +237,36 @@ pub async fn run(config: Config, guard: &Guard, active: &mut Active) -> Result<(
         guard.health()?.observe()?.wall_ms,
     )?;
     let listener = listener()?;
+    let mut clock = crate::runtime_service_activate::clock::Gate::default();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     loop {
-        tokio::select! {_ = tokio::signal::ctrl_c()=>break,_ = terminate.recv()=>break,_ = tick.tick()=>{active.check(guard)?;match listener.accept(){Ok((mut stream,_))=>{let deadline=authority_challenge::boot_time_ms()?.checked_add(1000).context("content request deadline overflow")?;let result=(||->Result<()>{let bytes=transport::receive_frame(&mut stream,deadline,wire::MAXIMUM)?;active.check(guard)?;let(reply,deadline)=handle(&config,guard,active.recipient_mut(),&mut disk,&bytes)?;active.check(guard)?;transport::send_frame(&mut stream,&reply,deadline,page::MEDIA_RECEIPT_LIMIT)?;Ok(())})();if let Err(error)=result{eprintln!("Local content request refused: {error}");}},Err(e)if e.kind()==std::io::ErrorKind::WouldBlock=>{},Err(e)=>return Err(e.into())}}}
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => break,
+            _ = terminate.recv() => break,
+            _ = tick.tick() => {
+                if !clock.accepting(active, guard, &listener)? { continue; }
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let deadline = authority_challenge::boot_time_ms()?
+                            .checked_add(1000).context("content request deadline overflow")?;
+                        let result = (|| -> Result<()> {
+                            let bytes = transport::receive_frame(&mut stream, deadline, wire::MAXIMUM)?;
+                            active.check(guard)?;
+                            let (reply, deadline) = handle(&config, guard, active.recipient_mut(), &mut disk, &bytes)?;
+                            active.check(guard)?;
+                            transport::send_frame(&mut stream, &reply, deadline, page::MEDIA_RECEIPT_LIMIT)?;
+                            Ok(())
+                        })();
+                        if let Err(error) = result { eprintln!("Local content request refused: {error}"); }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {},
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
     }
-    active.check(guard)?;
+    active.check_local(guard)?;
     Ok(())
 }
 

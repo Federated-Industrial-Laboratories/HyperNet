@@ -11,6 +11,17 @@ namespaces, a read-only pinned image, no capabilities and no-new-privileges.
 Resource limits come from the exact admitted manifest. State admission and
 individual file limits are not a filesystem quota for the host's whole disk.
 
+## Temporary clock unavailability
+
+Page, Media, Mail and Transfer services suspend requests when the trusted local
+clock observation expires. They keep their state and activation, reject queued
+private connections, and resume after a fresh observation and local consent checks.
+Request deadlines and proof validity do not extend during suspension.
+
+Withdrawal, changed configuration or activation, an expired local lifetime, and
+other clock validation failures remain terminal. Resuming does not renew consent
+or retry an uncertain remote effect.
+
 ## Import and consent
 
 Prepare one private configuration directory containing the fixed artifacts:
@@ -165,6 +176,12 @@ new deployment admission through Suite and export a fresh activation request nam
 that generation before restarting. Changing finite host consent does not extend an
 independently shorter domain validity interval or a previously issued effect lease.
 Stop and permanent withdrawal remain available during an interrupted transition.
+
+Historical recovery can repair an interrupted service artifact binding from its
+exact retained staged bytes and signed local consent. Unexpected digests, changed
+staged files or a different operator are refused. The proposal, operation identity
+and content remain unchanged. Historical recovery cannot start the service: a
+fresh reviewed signed software successor and current activation remain required.
 
 Managed boot uses `runtime services managed preview` and `enable`, with the same
 `--clock-monitor` and reviewed digest as authorities, plus

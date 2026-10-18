@@ -4,7 +4,25 @@ use super::*;
 use crate::authority_read::{self as fresh, Query};
 
 impl Client<'_> {
+    pub(crate) fn retry_read(error: anyhow::Error) -> anyhow::Error {
+        use crate::route_runtime::ReadRetry;
+        if error.is::<transport::FreshReadUnavailable>() {
+            error.context(ReadRetry::FreshQuorumUnavailable)
+        } else if error.is::<transport::HistoryOvertaken>() {
+            error.context(ReadRetry::HistoryOvertaken)
+        } else {
+            error
+        }
+    }
+
     pub(super) fn read_action(&mut self, command: routes::Command) -> Result<V> {
+        ensure!(
+            matches!(
+                command,
+                routes::Command::Lookup { .. } | routes::Command::VoucherContext { .. }
+            ),
+            "fresh Route retry requires a read-only context operation"
+        );
         let started = authority_challenge::boot_time_ms()?;
         let command = DomainCommand::Route(command);
         self.permitted(&command)?;
@@ -58,6 +76,7 @@ impl Client<'_> {
                 self.store.tree_head(),
                 &mut || self.guard.health(),
             )
+            .map_err(Self::retry_read)
             .context("obtain fresh Route context and history")?;
             let mut candidate = None;
             let verified = fresh::verify_response(
