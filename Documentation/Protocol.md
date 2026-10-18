@@ -1,5 +1,7 @@
 # Authority and service protocols
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 The current wire representation is bounded canonical CBOR. Signatures cover exact
 purpose-separated bytes, network/incarnation identity and the fields defined by
 [WireContract](WireContract.md). Parsers reject alternate encodings, unknown

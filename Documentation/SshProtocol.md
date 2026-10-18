@@ -1,5 +1,7 @@
 # SSH service protocol
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 SSH management uses the canonical authority request, challenge, ordered command
 and quorum-result envelopes in [WireContract](WireContract.md). It uses the
 `AuthorityDomain` action. Network, incarnation, service, session and native-key
@@ -47,9 +49,9 @@ The signed profile uses the common canonical Ed25519 envelope. Its payload is:
 ```
 
 `deploymentProfileRef` is kind117 and `consentRef` is kind105 for the same
-deployment. The profile's service must be the deployment's exact role8 identity.
+deployment. The profile's service must be the deployment's exact role 8 identity.
 The endpoint must occur in its signed host consent. The operator signs the
-profile. `maximumSeconds` is1..300. The account is the fixed `HyperNetService`;
+profile. `maximumSeconds` is 1..300. The account is the fixed `HyperNetService`;
 profiles cannot select another operating-system account.
 
 ## Commands and authority
@@ -67,12 +69,12 @@ The operation-specific command arrays are:
 | `SshServiceRegister` | signed profile | Current manager26, admitted registrar13, operator profile and exact host consent |
 | `SshServiceWithdraw` | service, expected generation | Its exact operator or service; restrictive, including after expiry |
 | `SshServiceGet` | service | Current member20, or intrinsic operator, service or recorded manager inspection |
-| `SshServices` | network, after key or null | Current network-scoped20; at most16 records per page |
+| `SshServices` | network, after key or null | Current network-scoped20; at most 16 records per page |
 | `SshGrantCreate` | session, service, native user key, proof, purpose, expiry | Current member20 for the exact service and native-key possession |
 | `SshGrantAccept` | session | The exact service or operator; rechecks current member and management authority |
 | `SshGrantRevoke` | session | Session member, exact service or operator; restrictive, including after expiry |
 | `SshGrantGet` | session | Session member, exact service or operator |
-| `SshAuthorise` | service, session | Intrinsic maintenance by that registered role8 service only |
+| `SshAuthorise` | service, session | Intrinsic maintenance by that registered role 8 service only |
 
 Intrinsic maintenance grants no reader or governance capability to a service or
 operator key. `SshAuthorise` requires the accepted current session, member20,

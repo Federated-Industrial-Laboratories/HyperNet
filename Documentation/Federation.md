@@ -1,8 +1,10 @@
 # Federation
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 Federation copies explicitly shared native Pages between two independently
 administered HyperNets. Each network accepts the other's complete bootstrap
-through an independently authenticated channel and admits its own role7 bridge.
+through an independently authenticated channel and admits its own role 7 bridge.
 Both administrators accept the identical treaty. The source author shares one
 exact approved revision; the destination reviews that imported revision before
 local reading. Federation grants no foreign membership, local administration,
@@ -24,7 +26,7 @@ Local operator control does not provide a remote reader route.
    bridge keys, exact namespaces, expiry and media placement consent. Each
    administrator accepts the same canonical bytes with capability22. Each
    bridge remains an intrinsic service identity in its own network.
-3. Admit the dedicated role7 manifest and register its operator-signed bridge
+3. Admit the dedicated role 7 manifest and register its operator-signed bridge
    profile. Registration requires both the current manager capability26 and
    the original deployment admission. Local runtime consent and activation are
    separate requirements.
@@ -38,11 +40,11 @@ Local operator control does not provide a remote reader route.
    source bundle reference and signed metadata in qualified records154/155.
    The body travels directly from its consented source content host through the
    Bridges, outside authority objects. Media is copied through
-   separately consented role2 stores and decoded again there.
+   separately consented role 2 stores and decoded again there.
 6. A destination reviewer inspects the exact imported bundle and any media.
    A saved review decision binds immutable155, reviewer capability, application
    mode and policy. Submitting the decision obtains a new bilateral lease for
-   the same native141. Human review has no five-second reading deadline.
+   the same native 141. Human review has no five-second reading deadline.
 7. Read, listing and media effects obtain fresh bilateral evidence and recheck
    current local rights. An imported bundle or historical approval alone never
    grants current access.
@@ -110,7 +112,7 @@ signed physical storage limits still apply.
 Qualified Page IDs hash `"FederatedPage"` plus agreement, source network,
 source incarnation and Page16 through the canonical domain identity function.
 Imported revision IDs hash `"FederatedRevision"` plus qualified Page ID,
-exact native141 and exact sharing153 references. Immutable155 has generation1.
+exact native 141 and exact sharing153 references. Immutable155 has generation1.
 The original source141 metadata, author statement, approved bundle and asset
 SHA256 remain unchanged. Destination placement is separate local metadata.
 
@@ -156,7 +158,7 @@ command arrays give the exact fields after the string command name:
 |FederationForeignSeal|`trust150,floor157,terminalEvidenceBytes,historyBytes`|
 |FederationForeignActivate|`trust150,floor157,readyBytes`|
 
-SourceContext is metadata-only maintenance by the exact current source role7
+SourceContext is metadata-only maintenance by the exact current source role 7
 bridge. It selects either one Page or an inventory after-cursor and returns the
 current agreement, bridge, accepted trust, foreign floor, native publication,
 author share and all relevant rights and media metadata. It accepts no borrowed
@@ -191,7 +193,7 @@ host consent, required copies and exact inspections.
 A grantless restrictive metadata lookup is
 limited to the exact recorded owner; it does not expose Page bodies or create
 new permission. Bridge maintenance has no member grant and must match its
-current registered role7 and treaty. Broad membership never implies these rights.
+current registered role 7 and treaty. Broad membership never implies these rights.
 
 Admission selects either an exact Page, optionally exact141, or an inventory
 cursor; the two selectors cannot be mixed. Page-specific Admission also selects
@@ -239,9 +241,9 @@ same public key does not establish continuity automatically.
 
 ## Media and persistence
 
-A foreign asset144 refers to immutable155 instead of native141. Its original
+A foreign asset144 refers to immutable155 instead of native 141. Its original
 canonical media descriptor still binds source bytes with raw SHA256. Destination
-host references must come from the exact treaty and current role2 consent.
+host references must come from the exact treaty and current role 2 consent.
 Source fetch requires a fresh exact destination Admission and current source
 share. Destination upload and copy receipts require a fresh source Export and
 current pending155. Local inspection and reading also check their respective
@@ -259,13 +261,13 @@ acknowledging completion.
 Consensus retains signed Page metadata and exact permission/receipt closure;
 PageSource, PageBundle, bitmap/vector bodies and animation frames stay outside it.
 FederationContentAuthorise is a distinct source-only action with effect1 (read)
-and a1..32768-byte extent. It transfers only HostReadable native publications. It requires the exact current native159 placement, selected
-role1 host, current author share/treaty/Bridge consent, and fresh exact destination
-Admission for that native141. Its signed action remains distinct while using the
+and a1..32768-byte extent. It transfers only HostReadable native publications. It requires the exact current native 159 placement, selected
+role 1 host, current author share/treaty/Bridge consent, and fresh exact destination
+Admission for that native 141. Its signed action remains distinct while using the
 existing ContentExchange recipient claim and receipt verifier. The source is at
-most16384bytes and must rebuild the exact approved bundle from signed metadata.
-Treaty media host lists still describe role2 assets; they do not replace the
-author's body placement or infer a route to its role1 hosts.
+most16384 bytes and must rebuild the exact approved bundle from signed metadata.
+Treaty media host lists still describe role 2 assets; they do not replace the
+author's body placement or infer a route to its role 1 hosts.
 
 Bridge storage uses a preallocated two-bank file within its signed physical
 budget. Direct bundle cache entries may expire or be evicted and do not count

@@ -1,5 +1,7 @@
 # Local runtime diagnostics
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 The installed runtime can preview a redacted snapshot of one authority or service
 installation and explicitly export those exact bytes. These commands inspect
 recorded local state only. They do not start Podman, inspect processes, contact a

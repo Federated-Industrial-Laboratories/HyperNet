@@ -1,5 +1,7 @@
 # Transfer protocol
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 Transfer metadata and permissions use the canonical authority protocol. A
 participant signs one ordinary `AuthorityDomain` intent (kind 20). Its selected
 store contributes a fresh recipient challenge (kind 21), submits the ordered

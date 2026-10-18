@@ -1,5 +1,7 @@
 # Encrypted file transfers
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 A transfer is an immutable, expiring offer between two explicitly authorized
 participants. The sender encrypts the file to the recipient's independently
 verified native age X25519 key. The recipient accepts that exact key, ciphertext

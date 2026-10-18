@@ -1,5 +1,7 @@
 # Transfer store operation
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 A transfer store is a separately consented role 4 runtime. Its service key,
 operator key, deployment manager and participants have distinct authority. The
 service is not enrolled as an ordinary member. The operator signs the exact

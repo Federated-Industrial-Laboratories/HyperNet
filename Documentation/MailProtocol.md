@@ -1,5 +1,7 @@
 # Mail protocol
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 Mail is a finite `AuthorityDomain` application over the canonical authority wire
 format. It uses ordinary requester streams, exact committed snapshots and
 independently verified quorum results. It has no separate online authority
@@ -57,7 +59,7 @@ Put names both message and claim with the same identity and includes exact
 ciphertext size/digest. Fetch and Delete name a message. List accepts an optional
 exclusive message cursor. Nonapplicable fields must be null or zero as specified
 by the finite parser. The challenge recipient is the exact current selected
-role3 service, while the signed requester is the authorized device.
+role 3 service, while the signed requester is the authorized device.
 
 ## Local exchange and receipts
 
@@ -86,8 +88,8 @@ effect or lower a retained prefix.
 
 A mailbox has at most eight devices and four explicitly selected stores.
 Inventory discovery pages contain at most eight available packages. Each native
-package is at most4096bytes; ciphertext is at most128KiB. A metadata response has
-at most23 domain records: two mailboxes, eight packages, twelve current or
+package is at most 4096 bytes; ciphertext is at most 128 KiB. A metadata response has
+at most 23 domain records: two mailboxes, eight packages, twelve current or
 historical placement stores and one claim. Governance dependencies and complete
 encoded response bounds still apply; an excessive result is refused atomically.
 

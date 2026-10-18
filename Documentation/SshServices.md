@@ -1,5 +1,7 @@
 # Consented SSH services
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 An SSH service runs one explicitly accepted session in a dedicated rootless
 container. Membership alone gives no shell access. The member, service operator,
 service identity, native client key and native host key remain separate identities.
@@ -22,7 +24,7 @@ native user keys retain their identity class permanently, including after expiry
 
 A member needs explicit capability20 for the service and must prove possession
 of its native Ed25519 key. The service operator separately inspects and accepts
-the requested purpose, key and expiry. Sessions last at most300seconds, with the
+the requested purpose, key and expiry. Sessions last at most 300 seconds, with the
 operator choosing a shorter limit if appropriate. There is at most one accepted
 unexpired session per service. A different session requires explicit acceptance.
 
@@ -43,14 +45,14 @@ bash Tools/SshPackage.sh sha256:BASE_IMAGE_ID OpenSSHBuild ServiceCommand Servic
 
 Verify the official source archive before building. The packager records copied
 library versions, hashes and licence notices; its version comparison is not a
-signature verification. Use the resulting immutable image in the signed role8
+signature verification. Use the resulting immutable image in the signed role 8
 runtime manifest. Rebuild and qualify security updates as a newly consented
 image. Audit the selected program and its input handling before accepting it.
 
 ## Establish the service and session
 
 Admit the exact deployment through the installed deployment workflow, including
-its operator, role8 service, transport and clock identities, endpoints, limits,
+its operator, role 8 service, transport and clock identities, endpoints, limits,
 volumes and signed host consent. A currently admitted administrator or member
 needs explicit deployment-scoped26 to configure the service. Historical
 registrar13 does not replace this permission.
@@ -80,14 +82,14 @@ reader access requires the qualified scope-safe relay workflow.
 
 ## Confined configuration
 
-The installed role8 runtime starts as an inert PID1. Before serving, it validates
+The installed role 8 runtime starts as an inert PID1. Before serving, it validates
 the operator's exact local artifact acceptance and obtains a fresh quorum
 activation under a manager's explicit26. Activation has its own recipient store;
 the SSH service's maintenance requests use its distinct requester store. Ordinary
 startup only opens preinitialized state and refuses missing or conflicting floors.
 
 The read-only `/Config` mount contains `Bootstrap.cbor`, `Manifest.cbor`,
-`Service.key` (raw32-byte service signing seed), `ServiceConfig.json`,
+`Service.key` (raw 32-byte service signing seed), `ServiceConfig.json`,
 `SshProfile.cbor`, `SshdConfig`, `AuthorizedKeys` and `SshHostKey`. Every artifact
 is included in the exact local acceptance. `AuthorizedKeys` contains only
 `restrict ssh-ed25519 BASE64` for the accepted native client key. `SshdConfig`

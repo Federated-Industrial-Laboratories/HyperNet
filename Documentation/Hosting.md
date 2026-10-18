@@ -1,5 +1,7 @@
 # Consenting Linux hosts
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 Use a dedicated rootless operator account with subordinate UID/GID mappings,
 rootless Podman, delegated cgroup v2 CPU/memory/PID controllers, seccomp and
 Landlock ABI6 or newer. The installed profile uses explicit IPv4 addresses.

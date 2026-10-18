@@ -1,5 +1,7 @@
 # Private mail
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 HyperNet certifies mailbox metadata and stores opaque encrypted letters on
 explicitly selected, consenting Mail services. HyperNetSuite implements the
 `HyperNetMailMls1` encryption profile using a fresh MLS group for each letter.
@@ -56,7 +58,7 @@ one remote copy; local archives and other selected copies remain separate.
 
 ## Storage and transport
 
-Mail uses the installed role3 service described in [MailStore](MailStore.md).
+Mail uses the installed role 3 service described in [MailStore](MailStore.md).
 Each service has separate retained requester and recipient journals, a bounded
 preallocated ciphertext file, and a private local control socket. The recipient
 journal retains the exact effect claim before storage changes. Two checksummed
@@ -70,10 +72,13 @@ entries until their claim expiry. Expired storage entries are removed during a
 subsequent authorized storage operation. Placement changes do not migrate old
 letters or promise immediate deletion from a former store.
 
-There is no direct TCP reader route or public Mail proxy. Clients explicitly
-choose an existing private local service socket or the installed service's
-bounded exchange command. An unavailable compatible route fails closed. Network
-relay routing requires a separately qualified implementation.
+The Mail store exposes only a private local socket. Remote clients use the
+separately consented relay and Mail endpoint described in [Private routes](PrivateRoutes.md).
+The endpoint forwards the bounded Mail exchange to that socket; it does not
+receive the reader's decryption keys. Local operator clients can explicitly use
+the private socket or installed service exchange command. Route admission and
+current mailbox permissions remain separate checks. An unavailable compatible
+route fails closed, without a direct connection fallback.
 
 ## Privacy and recovery limits
 
@@ -88,12 +93,14 @@ erase plaintext, keys or ciphertext already retained by that party. Preserve the
 current encrypted vault and its separate age identity. Replacing a live vault or
 service journal with an old backup can roll back consumption or effect history;
 no local check can detect replacement of every local witness and private file.
-Do not resume uncertain backups under an existing live identity. Recovery of a
-lost authority committee follows [AuthorityEpochs](AuthorityEpochs.md), and does
-not automatically transfer confidential keys or trust to a successor network.
+Do not resume uncertain backups under an existing live identity. Healthy committee replacement follows [AuthorityEpochs](AuthorityEpochs.md).
+Total authority loss follows [NetworkRecovery](NetworkRecovery.md), with explicit
+acceptance of a new network identity. Neither transfers confidential keys or
+trust automatically.
 
-See [MailProtocol](MailProtocol.md) for wire contracts and HyperNetSuite's
-`Documentation/PrivateMail.md` for client commands.
+See [MailProtocol](MailProtocol.md) for wire contracts and the Suite's
+[Private Mail guide](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/master/Documentation/PrivateMail.md)
+for client commands.
 
 Serving verification combines the sparse certified governance closure with the
 independently accepted bootstrap records. Returned records must match their exact

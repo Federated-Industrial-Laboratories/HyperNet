@@ -1,14 +1,17 @@
 # Network policy and recovery custody
 
-The authority maintains the current NetworkPolicy record100 and its linked
-RecoveryPolicy record114. The bootstrap supplies their initial values; later
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
+The authority maintains the current NetworkPolicy record 100 and its linked
+RecoveryPolicy record 114. The bootstrap supplies their initial values; later
 changes use the normal ordered authority protocol. A policy change preserves the
 network identity, requester history and existing content. It does not itself
 grant membership, hosting, reviewing, voting or confidential-content access.
 
 The separate HyperNetSuite provides `authority-inspection policy get`, `prepare`,
 `inspect`, `sign`, `assemble`, `apply`, `discover` and `accept`. Its
-`Documentation/NetworkPolicies.md` describes the installed command workflow.
+[network policy guide](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/master/Documentation/NetworkPolicies.md)
+describes the installed command workflow.
 [PolicyContract](PolicyContract.md) defines the canonical fields and constraints.
 
 ## Ordered replacement
@@ -21,7 +24,7 @@ governance must remain valid; changing configuration does not bypass capability
 checks or the mandatory manual-review baseline.
 
 If custody is unchanged, the new policy retains the exact recovery reference.
-If custody changes, record114 also advances by one generation and binds its exact
+If custody changes, record 114 also advances by one generation and binds its exact
 predecessor. Both records commit atomically at the same authority order. Stale
 predecessors, changed dependencies and mismatched snapshots refuse. An interrupted
 request resumes its original signed bytes; it is not silently reconstructed under
@@ -36,7 +39,7 @@ declared identities are verifiable; software cannot establish that different
 people independently control them.
 
 A custody replacement needs the old policy's threshold approval and a separate
-acceptance from the new custody set. Both cohorts sign the exact new record114.
+acceptance from the new custody set. Both cohorts sign the exact new record 114.
 The new signatures must match its declared `acceptedBy` set, whose values are
 SHA256 fingerprints of the public keys, matching bootstrap custody. Duplicate,
 foreign or mixed-payload signatures cannot satisfy the threshold. Current and

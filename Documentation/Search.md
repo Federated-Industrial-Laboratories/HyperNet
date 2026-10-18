@@ -1,5 +1,7 @@
 # Catalogue and search
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 Search selects one explicit network or an explicitly retained local corpus. An
 empty literal-term list requests the permitted catalogue. There is no implicit
 network fallback, combined local/network mode or query fan-out to other networks.

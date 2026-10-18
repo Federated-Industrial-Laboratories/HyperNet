@@ -1,5 +1,7 @@
 # Media store operation
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 A media store is a separately consented role 2 runtime. Its service identity is
 separate from the deployment manager, operator, author and reviewer. The operator
 signs an `AuthorityPageHostProfile` for the exact admitted deployment, volume,

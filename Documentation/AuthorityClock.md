@@ -1,5 +1,7 @@
 # Authority clock observation
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 The local clock monitor measures a bounded system-clock error using a configured
 chrony Unix socket. It sends only `tracking`, `sources`, `authdata` and `ntpdata`.
 It does not adjust the system clock. The trusted chrony configuration must use

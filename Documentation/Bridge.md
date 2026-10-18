@@ -1,13 +1,15 @@
 # Bridge service
 
-A role7 bridge connects its own network's current authority to explicitly
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
+A role 7 bridge connects its own network's current authority to explicitly
 consented counterpart bridges. Install a separate service in each network.
 Never lend one network's member, authority or service key to the other.
 [Federation.md](Federation.md) defines bilateral acceptance, publication and
 canonical proof contracts.
 
 Before each bilateral lease, the source Anchor exchange certifies the selected
-Page or bounded inventory metadata with its own role7 identity. This prepares a
+Page or bounded inventory metadata with its own role 7 identity. This prepares a
 cold cache before destination Admission starts. Source Export then uses that
 prepared authenticated context, with current exact-dependency checks at commit;
 it does not issue another general agreement lookup inside the fresh proof chain.
@@ -31,7 +33,7 @@ for each Page or media extent; it has no single global freshness lease.
 
 ## Prepare the service
 
-Use a dedicated role7 service identity and operator-signed manifest. The manifest
+Use a dedicated role 7 service identity and operator-signed manifest. The manifest
 has one writable state volume, one explicit IPv4 TLS listener and literal
 counterpart endpoint addresses/ports. Each counterpart includes its service key,
 transport public key and exact TLS leaf. Ports are unprivileged. The profile
@@ -58,7 +60,7 @@ ServiceConfig.json
 Transport.key
 ```
 
-`Service.key` is the raw32-byte role7 signing seed. `Bootstrap.cbor` is the
+`Service.key` is the raw 32-byte role 7 signing seed. `Bootstrap.cbor` is the
 independently accepted own-network bootstrap. The other keys are distinct
 according to the manifest's permanent role rules. ServiceConfig.json is:
 
@@ -80,9 +82,9 @@ according to the manifest's permanent role rules. ServiceConfig.json is:
 ```
 
 For body and media transfer, mediaHosts is a sorted list of lowercase32-byte
-local role1 content or role2 media service keys in hexadecimal. Each must have an explicit `--media-service
+local role 1 content or role 2 media service keys in hexadecimal. Each must have an explicit `--media-service
 HOSTKEY=INSTALLED_DIRECTORY` setup argument. Setup checks the exact installed
-role1 or role2 profile and own network/incarnation. The service receives only that
+role 1 or role 2 profile and own network/incarnation. The service receives only that
 store's isolated Control directory at `/Media/HOSTKEY/Control`; it receives no
 store state, member key or authority key. Generated MediaBindings.json binds the
 exact source directories/profile digests to local operator consent. Container
@@ -110,8 +112,8 @@ other finite services.
 
 The rootless container uses a private network with the consented published
 listener, no shared host PID namespace, a read-only root, denied capabilities,
-seccomp and Landlock. Only role7 gets its explicit TCP egress. Its dedicated UID
-is1000, with private requester/recipient journals and fixed state paths. The
+seccomp and Landlock. Only role 7 gets its explicit TCP egress. Its dedicated UID
+is 1000, with private requester/recipient journals and fixed state paths. The
 bridge's own clock, local withdrawal and activation are rechecked throughout
 operation. Storage is physically preallocated; working memory includes the
 old/new bank and encoding budget.
@@ -205,7 +207,7 @@ without current or exact original-Permit authentication block fencing; preserve
 that state. Never delete journals or reset a service identity to bypass an
 uncertain outcome.
 
-These commands require current local consent and an initialised, stopped role7
+These commands require current local consent and an initialised, stopped role 7
 service. Their finite confined helper has no network attachment, media control
 mount, activation or listener. It signs only its own stream controls and checks
 the existing authority proofs, local withdrawal and clock bounds. A successful

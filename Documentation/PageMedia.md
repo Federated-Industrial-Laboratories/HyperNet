@@ -1,5 +1,7 @@
 # Static Page media
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 Page media consists of approved static assets on explicitly consented media
 hosts. A Page binds each asset's profile, dimensions, exact byte length, SHA-256
 digest, selected host identities and required copies. It also binds alternative

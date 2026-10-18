@@ -1,5 +1,7 @@
 # Installed service runtime
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 `HyperNet runtime services` manages one consenting Page, Media, Mail, Transfer, Route, Bridge or SSH service.
 The service has separate requester and recipient journals. The requester makes
 its own authority queries; the recipient retains a manager's activation and
@@ -28,15 +30,15 @@ Prepare one private configuration directory containing the fixed artifacts:
 
 | Role | Input files |
 | --- | --- |
-| SSH, role8 | Bootstrap.cbor, Manifest.cbor, Service.key, ServiceConfig.json, SshProfile.cbor, SshdConfig, AuthorizedKeys, SshHostKey |
-| Transfer, role4 | Bootstrap.cbor, Manifest.cbor, Service.key, ServiceConfig.json, TransferProfile.cbor |
-| Mail, role3 | Bootstrap.cbor, Manifest.cbor, Service.key, ServiceConfig.json, MailProfile.cbor |
-| Page, role1 | Bootstrap.cbor, Manifest.cbor, Service.key, ServiceConfig.json, PageProfile.cbor |
-| Media, role2 | Bootstrap.cbor, Manifest.cbor, Service.key, ServiceConfig.json, MediaProfile.cbor |
-| Route, role5 | Bootstrap.cbor, Manifest.cbor, Service.key, ServiceConfig.json, RouteProfile.cbor, Certificate.pem, CertificateAuthority.pem, Transport.key |
-| Bridge, role7 | Bootstrap.cbor, Manifest.cbor, Service.key, ServiceConfig.json, BridgeProfile.cbor, Certificate.pem, CertificateAuthority.pem, Transport.key |
+| SSH, role 8 | Bootstrap.cbor, Manifest.cbor, Service.key, ServiceConfig.json, SshProfile.cbor, SshdConfig, AuthorizedKeys, SshHostKey |
+| Transfer, role 4 | Bootstrap.cbor, Manifest.cbor, Service.key, ServiceConfig.json, TransferProfile.cbor |
+| Mail, role 3 | Bootstrap.cbor, Manifest.cbor, Service.key, ServiceConfig.json, MailProfile.cbor |
+| Page, role 1 | Bootstrap.cbor, Manifest.cbor, Service.key, ServiceConfig.json, PageProfile.cbor |
+| Media, role 2 | Bootstrap.cbor, Manifest.cbor, Service.key, ServiceConfig.json, MediaProfile.cbor |
+| Route, role 5 | Bootstrap.cbor, Manifest.cbor, Service.key, ServiceConfig.json, RouteProfile.cbor, Certificate.pem, CertificateAuthority.pem, Transport.key |
+| Bridge, role 7 | Bootstrap.cbor, Manifest.cbor, Service.key, ServiceConfig.json, BridgeProfile.cbor, Certificate.pem, CertificateAuthority.pem, Transport.key |
 
-`Service.key` is the dedicated role's raw32-byte signing seed. The operator key
+`Service.key` is the dedicated role's raw 32-byte signing seed. The operator key
 is separate and never mounted into the workload. Setup adds the fixed hardened
 Seccomp.json artifact. The exact file membership and every digest are included
 in the operator's local consent. Consult [SshServices](SshServices.md),

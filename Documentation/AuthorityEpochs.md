@@ -1,5 +1,7 @@
 # Authority committee replacement
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 Committee replacement preserves the network identity, policy, admitted identities,
 revocations, request streams and domain state. It requires an authorised terminal
 command from the old committee and durable installation by the new committee.
