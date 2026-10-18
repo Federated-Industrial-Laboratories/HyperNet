@@ -226,7 +226,7 @@ impl Config {
     }
 }
 fn settings(listen: SocketAddr) -> String {
-    include_str!("../Packaging/SshdConfig")
+    include_str!("../../Packaging/SshdConfig")
         .replace("@Port@", &listen.port().to_string())
         .replace("@Address@", &listen.ip().to_string())
 }

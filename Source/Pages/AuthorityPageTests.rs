@@ -1986,7 +1986,7 @@ fn expired_body_placement_preserves_metadata_but_refuses_serving() {
 #[path = "AuthorityPageSearchTests.rs"]
 mod search_tests;
 
-#[path = "AuthorityBackupPageTests.rs"]
+#[path = "../Backup/AuthorityBackupPageTests.rs"]
 mod backup_tests;
 
 #[path = "AuthorityPageViewTests.rs"]

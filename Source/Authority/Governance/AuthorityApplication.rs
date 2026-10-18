@@ -14,15 +14,15 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use std::sync::{Arc, Mutex};
 
-#[path = "AuthorityEpochEvaluation.rs"]
+#[path = "../Epochs/AuthorityEpochEvaluation.rs"]
 mod epoch_evaluation;
-#[path = "AuthorityMutationEvidence.rs"]
+#[path = "../AuthorityMutationEvidence.rs"]
 mod mutation_evidence;
-#[path = "AuthorityStreams.rs"]
+#[path = "../AuthorityStreams.rs"]
 mod streams;
 #[path = "AuthorityTierEvaluation.rs"]
 mod tier_evaluation;
-#[path = "AuthorityTransactions.rs"]
+#[path = "../AuthorityTransactions.rs"]
 mod transactions;
 
 const MAX_GOVERNANCE_BYTES: usize = crate::authority_capacity::MAX_GOVERNANCE_BYTES;
@@ -960,7 +960,7 @@ fn refusal(action: &str, code: u64) -> Result<Vec<u8>> {
 pub(crate) mod tests;
 
 #[cfg(test)]
-#[path = "AuthorityTransactionTests.rs"]
+#[path = "../AuthorityTransactionTests.rs"]
 mod transaction_tests;
 
 #[cfg(test)]
@@ -980,7 +980,7 @@ mod membership_tests;
 mod applications_tests;
 
 #[cfg(test)]
-#[path = "AuthorityDeploymentApplicationTests.rs"]
+#[path = "../Deployments/AuthorityDeploymentApplicationTests.rs"]
 mod deployment_tests;
 
 /// A terminal flag is meaningful only inside a fully validated authority state.
@@ -1034,11 +1034,11 @@ pub(crate) fn successor_state(
 }
 
 #[cfg(test)]
-#[path = "AuthorityMailApplicationTests.rs"]
+#[path = "../../Mail/AuthorityMailApplicationTests.rs"]
 mod mail_application_tests;
 
 #[cfg(test)]
-#[path = "AuthorityPageApplicationTests.rs"]
+#[path = "../../Pages/AuthorityPageApplicationTests.rs"]
 mod page_application_tests;
 
 #[cfg(test)]

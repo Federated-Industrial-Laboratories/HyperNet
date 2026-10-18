@@ -8,7 +8,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use std::collections::BTreeMap;
 
-#[path = "AuthorityBackup.rs"]
+#[path = "../../Backup/AuthorityBackup.rs"]
 pub mod backup;
 #[path = "AuthorityDomainFederation.rs"]
 pub mod federation;
@@ -16,15 +16,15 @@ pub mod federation;
 pub mod mail;
 #[path = "AuthorityDomainPage.rs"]
 pub mod page;
-#[path = "AuthorityPublicationModes.rs"]
+#[path = "../AuthorityPublicationModes.rs"]
 pub mod publication_modes;
 #[path = "AuthorityDomainResult.rs"]
 pub mod result;
-#[path = "AuthorityRoutes.rs"]
+#[path = "../../Routing/AuthorityRoutes.rs"]
 pub mod routes;
-#[path = "AuthoritySealedIdentity.rs"]
+#[path = "../../Sealed/AuthoritySealedIdentity.rs"]
 pub mod sealed_identity;
-#[path = "AuthoritySealedPublication.rs"]
+#[path = "../../Sealed/AuthoritySealedPublication.rs"]
 pub mod sealed_publication;
 #[path = "AuthorityDomainSsh.rs"]
 pub mod ssh;

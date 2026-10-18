@@ -32,6 +32,7 @@ Set `GNAT_GCC` and `GNATPROVE` when the tools are outside `PATH`. Dependencies a
 locked in `Cargo.lock`. See [Hosting](Documentation/Hosting.md) for supported
 confinement requirements and [Packages](Documentation/Packages.md) for independently
 verified installation. Installation does not start a service or grant authority.
+See [Source layout](Documentation/SourceLayout.md) for module locations.
 
 - [Authority](Documentation/Authority.md): independent trust, explicit capabilities and durable results.
 - [Tier administration](Documentation/Tiers.md): exact policy history and reviewed capability changes.

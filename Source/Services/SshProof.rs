@@ -134,5 +134,5 @@ pub fn proof(network: &str, member: &str, key: &ed25519_dalek::SigningKey) -> St
 }
 
 #[cfg(test)]
-#[path = "../Tests/SshProof.rs"]
+#[path = "../../Tests/SshProof.rs"]
 mod tests;

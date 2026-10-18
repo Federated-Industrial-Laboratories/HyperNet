@@ -310,5 +310,5 @@ fn capacity_refusal_does_not_publish_partial_multi_identity_admission() {
     assert!(state.evidence.value().array(0).is_ok());
 }
 
-#[path = "AuthorityEpochApplicationTests.rs"]
+#[path = "../Epochs/AuthorityEpochApplicationTests.rs"]
 mod epochs;
