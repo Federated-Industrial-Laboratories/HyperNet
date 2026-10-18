@@ -16,6 +16,8 @@ use std::{ffi::OsStr, path::Path};
 
 const RECIPIENT: &str = "/State/Recipient";
 const MARKER: &str = "Activation.cbor";
+#[path = "RuntimeServiceClock.rs"]
+pub(crate) mod clock;
 pub struct Active {
     store: Store,
     marker: Vec<u8>,

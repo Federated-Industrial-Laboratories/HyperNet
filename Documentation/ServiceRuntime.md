@@ -11,6 +11,17 @@ namespaces, a read-only pinned image, no capabilities and no-new-privileges.
 Resource limits come from the exact admitted manifest. State admission and
 individual file limits are not a filesystem quota for the host's whole disk.
 
+## Temporary clock unavailability
+
+Page, Media, Mail and Transfer services suspend requests when the trusted local
+clock observation expires. They keep their state and activation, reject queued
+private connections, and resume after a fresh observation and local consent checks.
+Request deadlines and proof validity do not extend during suspension.
+
+Withdrawal, changed configuration or activation, an expired local lifetime, and
+other clock validation failures remain terminal. Resuming does not renew consent
+or retry an uncertain remote effect.
+
 ## Import and consent
 
 Prepare one private configuration directory containing the fixed artifacts:

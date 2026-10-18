@@ -247,6 +247,7 @@ pub async fn run(config: Config, guard: &Guard, active: &mut Active) -> Result<(
     let mut client = client::Client::open(&config, guard, active)?;
     let mut cursors = vec![None; config.profile.namespaces.len()];
     let mut next = 0usize;
+    let mut clock = crate::runtime_service_activate::clock::Gate::default();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -255,11 +256,13 @@ pub async fn run(config: Config, guard: &Guard, active: &mut Active) -> Result<(
             _=tokio::signal::ctrl_c()=>break,
             _=terminate.recv()=>break,
             _=tick.tick()=> {
-                active.check(guard)?;
-                maintain(&mut client,&config.profile,&config.profile.namespaces[next],&mut cursors[next])?;
-                next=(next+1)%config.profile.namespaces.len();
+                if !clock.ready(active, guard)? { continue; }
+                let result = maintain(&mut client,&config.profile,&config.profile.namespaces[next],&mut cursors[next]);
+                if clock.result(active, guard, result)? {
+                    next=(next+1)%config.profile.namespaces.len();
+                }
             }
         }
     }
-    active.check(guard)
+    active.check_local(guard)
 }
