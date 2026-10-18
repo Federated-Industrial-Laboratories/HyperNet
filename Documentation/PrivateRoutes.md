@@ -1,5 +1,7 @@
 # Private remote routes
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 A reader connects to one approved relay. A fresh TLS 1.3 channel inside that
 connection authenticates the final application service before the reader sends
 application credentials. The relay can observe the source address, selected

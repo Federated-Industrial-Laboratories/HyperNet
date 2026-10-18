@@ -1,5 +1,7 @@
 # Prepare a new network
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 `HyperNet runtime provision` prepares native transport identities, certificate
 requests, certificates, clock configuration and authority replica inputs. These
 commands start no workload and grant no membership or hosting capability. Keep
@@ -35,7 +37,7 @@ HyperNet runtime provision identity --directory /Private/AuthorityIdentity \
 ```
 
 `Identity.json`, `Service.key` and `Transport.key` stay on that host. `Service.key`
-is the native32-byte role identity input for service setup; it requires no manual
+is the native 32-byte role identity input for service setup; it requires no manual
 key conversion. Authority and service roles still require separately generated
 identities and distinct capability assignments. Share only the returned
 `TransportRequest.json`, and authenticate its complete `requestDigest` through
@@ -75,7 +77,7 @@ Use the real local chrony socket. Keep the monitor running and retain its public
 key separately from its private signing directory. A healthy current signed
 observation is required by replica preparation and runtime activation.
 
-Use the Suite's `Documentation/Networks.md` bootstrap ceremony to appoint the four identities
+Use the Suite's [network bootstrap ceremony](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/master/Documentation/Networks.md) to appoint the four identities
 and their exact transport mappings, and to reserve each monitor key. Complete
 the independent acceptance steps. Keep governance and recovery keys separate
 from transport, monitor, operator and service identities. Authenticate the final

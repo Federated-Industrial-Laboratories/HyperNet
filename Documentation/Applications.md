@@ -1,5 +1,7 @@
 # Scoped applications
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 An application uses its own Ed25519 identity and a separately retained authority
 floor. Its owner and the application approve the same exact grant. Neither
 receives the other's private key. Registration establishes an application class;

@@ -1,9 +1,12 @@
 # Cold content archive custody
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 `HyperNet backup destination` provides native initialise, import, list, export and
 purge commands for encrypted Page archives. The independent Suite creates and
 restores archives through the certified authority protocol; see its
-`Documentation/Backups.md` for the complete workflow.
+[backup guide](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/master/Documentation/Backups.md)
+for the complete workflow.
 
 A cold destination is bound to one installed host and volume. The native command
 validates its current signed consent and prepared backing filesystem. It allocates
@@ -32,7 +35,7 @@ sealed Page ciphertext and encrypted assets. They exclude mail/transfer queues,
 identity vaults, authority journals, daemon snapshots and search indexes. Local
 indexes must be rebuilt through the currently authorised search workflow.
 
-Destination consent and archive placement use shared domain records169,170 and171.
+Destination consent and archive placement use shared domain records169, 170 and171.
 A sealed backup requires the named destination in both exact author and approved
 outer placement. The destination must separately consent to opaque content and
 its reviewer. An owning publisher may read or repair its exact published

@@ -1,5 +1,7 @@
 # Pages
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 HyperNetPage/2 is an inert text format. A publication binds the exact source,
 author, reviewer, network and incarnation, namespace, Page identity and revision.
 Changing the source requires a new signed submission and review. The authority
@@ -113,7 +115,7 @@ also apply. There is no separate fixed lifetime Page count per author. Discovery
 uses bounded pages and explicit continuation cursors. Replica tickets have a
 maximum sixty-second reservation and charge current reader and host concurrency
 limits. Individual proofs remain bounded to five seconds; every hop rechecks
-current authority and the ticket's 1,250-millisecond expiry margin. An expired
+current authority and the ticket's 1, 250-millisecond expiry margin. An expired
 slot can advance to a new generation without losing its prior identity.
 A pending replica result contains current authorised metadata without bundle
 bytes. After delivery, the result requires the exact ticket bundle and its

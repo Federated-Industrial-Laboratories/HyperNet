@@ -1,6 +1,8 @@
 # Durable Page content
 
-A role1 Page host can reserve a durable content partition in its signed host
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
+A role 1 Page host can reserve a durable content partition in its signed host
 profile. The partition stores exact source or opaque ciphertext objects on the
 operator's designated volume. Authority replicas retain placement, permission,
 approval and receipt metadata. They do not retain the Page body.
@@ -25,10 +27,10 @@ The optional content policy has these fields, in wire order:
 | reviewerKeys | Exact reviewer keys accepted for opaque objects |
 | search | Explicit permission to search host-readable source on this host |
 
-Metadata has two equal banks and requires at least8192bytes. Data and staging
+Metadata has two equal banks and requires at least 8192 bytes. Data and staging
 must be nonzero; staging and quarantine cannot exceed dataBytes. Staging and
 quarantine are subsets of the data allocation. Admission reserves dataBytes,
-metadataBytes and8192bytes per possible object for file allocation overhead.
+metadataBytes and8192 bytes per possible object for file allocation overhead.
 The remaining Page metadata partition must fit its own two-bank storage.
 The signed maximum object size and retention bound apply separately.
 
@@ -41,7 +43,7 @@ claims, not proof of independent hardware, power, ownership or connectivity.
 A placement names an exact revision, SHA256, length, permitted host versions,
 required copy count, failure domains and expiry. Each upload chunk names that
 placement, one selected host, offset, length and chunk digest. Each exchange is
-at most32768bytes and requires a fresh certified finite permission.
+at most 32768 bytes and requires a fresh certified finite permission.
 
 The host reserves the complete object extent before accepting the first chunk.
 An exact retry can reuse stored bytes; changed bytes, skipped offsets and another

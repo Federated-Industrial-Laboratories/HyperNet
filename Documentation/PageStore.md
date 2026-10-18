@@ -1,5 +1,7 @@
 # Approved Page host
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 The installed role 1 Page host stores exact immutable source or opaque content
 under an explicit durable content policy. Replica tickets name existing native
 source placements and durable acknowledgements. It runs as the confined

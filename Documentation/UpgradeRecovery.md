@@ -1,5 +1,7 @@
 # Offline package updates
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 Installation, activation and private state have separate lifecycles. The signed
 package workflow is described in [Packages](Packages.md). An update requires the
 current offline target policy below; it never starts a runtime, reuses obsolete

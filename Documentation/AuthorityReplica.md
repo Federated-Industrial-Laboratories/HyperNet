@@ -1,5 +1,7 @@
 # Authority replica operator entrypoint
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 `HyperNet authority-replica` runs one fixed-committee Basic HotStuff signer as a
 foreground Linux process inside mandatory OCI and Landlock confinement. Four
 independently configured replicas exchange
@@ -166,9 +168,9 @@ its current journal and stop the previous instance. Capacity exhaustion is an
 explicit refusal; do not delete history to restore service.
 
 A view timer is armed once per entered view and is consumed on expiry. Its
-duration is1000ms+250ms*floor(log2(view)); WISH retransmission continues while
+duration is 1000 ms+250 ms*floor(log2(view)); WISH retransmission continues while
 awaiting the next authenticated entry. Restart uses the retained view number.
-The finite-u64 profile reaches at most16.75seconds and refuses counter overflow;
+The finite-u64 profile reaches at most 16.75 seconds and refuses counter overflow;
 it provides no arbitrary-delay or five-second request-completion guarantee.
 An expired recipient challenge always needs a fresh explicit request.
 
@@ -224,10 +226,10 @@ reply bundles are retained, each within the 196608-byte peer payload bound.
 Canonical result bytes are limited to 188416 bytes; oversized application effects
 must produce a finite capacity refusal. An inert command produces no reply bundle.
 
-A128MiB maintenance allowance bounds reply bundles, archive transfers and
-staging. Journal storage is separate: each journal has at most224MiB encoded
-metadata and225MiB allocated bytes, plus its atomic replacement. Application
-states and checkpoint candidates are at most8MiB each. Their unique objects use
+A128 MiB maintenance allowance bounds reply bundles, archive transfers and
+staging. Journal storage is separate: each journal has at most 224 MiB encoded
+metadata and225 MiB allocated bytes, plus its atomic replacement. Application
+states and checkpoint candidates are at most 8 MiB each. Their unique objects use
 the existing pending object and byte limits. Before application execution, one
 complete maximum-size state allocation is reserved while old roots remain
 durable. A new checkpoint candidate aliases that same state object.
@@ -361,7 +363,7 @@ older durable floor to a current result. Catch-up never resets that floor or
 extends a recipient challenge. Checkpoint compaction preserves the complete
 application stream ledger.
 
-Each admitted requester has a permanent stream, with at most256 streams and
+Each admitted requester has a permanent stream, with at most 256 streams and
 1048576 encoded bytes including reserved refusals. Initial streams belong only
 to the subjects of authenticated genesis root grants. A request never creates
 its own stream. Ordinary signed requests bind a generation, generation identity,

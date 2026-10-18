@@ -1,5 +1,7 @@
 # Application authority protocol
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 Application operations use the canonical signed intent, fresh recipient challenge,
 ordered request, executed-result certificate and durable requester stream in
 [WireContract](WireContract.md). Three distinct eligible authority signatures
@@ -20,7 +22,7 @@ are refused. No legacy permission-string consent is accepted.
 ```
 
 Kind127 is ApplicationAdmission; kind128 is ApplicationWithdrawal. Both use the
-application key as lookup ID. Generation is1 with null previous. Both are
+application key as lookup ID. Generation is 1 with null previous. Both are
 create-only and retain exact signed mutation evidence. Identity classification
 and stream reservation survive expiry, withdrawal and grant revocation.
 
@@ -32,9 +34,9 @@ The inert acceptance payload is:
 ```
 
 The exact owner and application signatures cover identical payload bytes. The
-complete signed envelope is at most1024bytes. Nonce is a nonzero32-byte value.
-ApplicationValidity spans at most604800000milliseconds within the accepted grant;
-AcceptanceValidity spans at most86400000milliseconds within application validity.
+complete signed envelope is at most 1024 bytes. Nonce is a nonzero32-byte value.
+ApplicationValidity spans at most 604800000milliseconds within the accepted grant;
+AcceptanceValidity spans at most 86400000milliseconds within application validity.
 Both must conservatively cover the original registration. Acceptance contains no
 mutable Snapshot or requester sequence.
 
@@ -44,7 +46,7 @@ depth and excludes DelegateGrant. The owner must currently hold DelegateGrant
 through that parent, including all ancestor, tier, scope, admission and revocation
 checks. No member, reserved role or existing application key can be reassigned.
 
-The offline offer is bounded to8192bytes:
+The offline offer is bounded to8192 bytes:
 
 ```
 [200,1,"AuthorityApplicationOffer",OfferEnvelope,GrantBytes]
@@ -146,7 +148,7 @@ or resets an application's advanced stream. A retained completed registration
 can be disclosed after acceptance expiry without reapplying it. Withdrawal is
 not cleared, and the original completion bytes and dependencies remain exact.
 
-The historical confirmation is bounded to65536bytes:
+The historical confirmation is bounded to65536 bytes:
 
 ```
 [201,1,"AuthorityApplicationConfirmation",SignedIntent,SignedChallenge,

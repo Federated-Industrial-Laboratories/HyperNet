@@ -1,5 +1,7 @@
 # Source layout
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 `Source/Main.rs` declares the Rust modules and command entry point. Source files
 are grouped by responsibility. Tests stay beside the implementation they exercise.
 

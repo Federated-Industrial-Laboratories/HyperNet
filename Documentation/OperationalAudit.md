@@ -1,5 +1,7 @@
 # Operational event history
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 Each installed authority or service deployment has a private `Audit` directory.
 Setup creates a separate signing identity. Lifecycle events bind the deployment,
 network, incarnation, exact profile, software digest, consent generation, event
@@ -29,11 +31,11 @@ HyperNet runtime audit configure --directory /Private/AuthorityOne \
   --maximum-bytes 67108864 --retention-seconds 7776000
 ```
 
-The default event budget is16MiB with90days minimum local retention. The byte
-budget is configurable from64KiB to16GiB; it is a bounded local metadata budget,
-not a traffic rate. An additional1MiB allocation reserves failure-reporting space.
-Exports are paginated in batches of at most1MiB. Fixed event schemas are bounded
-to8KiB each. Choose storage and retention for the expected lifecycle activity.
+The default event budget is 16 MiB with 90 days minimum local retention. The byte
+budget is configurable from64 KiB to16 GiB; it is a bounded local metadata budget,
+not a traffic rate. An additional1 MiB allocation reserves failure-reporting space.
+Exports are paginated in batches of at most 1 MiB. Fixed event schemas are bounded
+to8 KiB each. Choose storage and retention for the expected lifecycle activity.
 Increasing the budget does not allocate that entire amount immediately. A lower
 budget must still fit retained history and the configuration outcome; it cannot
 remove events or bypass their retention interval.

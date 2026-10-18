@@ -1,5 +1,7 @@
 # Signed offline packages
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 HyperNet packages install independently of HyperNetSuite. The initial package
 carries the native `Bin/HyperNet` manager, an immutable OCI image, launchers,
 operator documentation and dependency notices. The native executable has the same
@@ -23,7 +25,8 @@ family does not require `dpkg`. Copied runtime libraries and their loader stay
 inside the OCI image. The native manager uses host-maintained shared libraries.
 The signed manifest declares its ELF interpreter, required libraries and minimum
 GNU libc version; installation refuses an older libc or missing interpreter.
-The native host also needs OpenSSL 3 and the qualified Podman/kernel profile.
+The native host also needs the qualified Podman/kernel profile. Network identity
+provisioning separately invokes the maintained OpenSSL executable.
 Package operations use Python, OpenSSH tools, Bash and the documented native
 runtime prerequisites. Authority ordering is provided by the installed HyperNet
 replicas.
@@ -123,7 +126,7 @@ Authority replacement uses the terminal and Ready workflow in
 lifecycle in [ServiceRuntime.md](ServiceRuntime.md). Package installation alone
 cannot change a running deployment or its authority floor.
 
-The current package declares authority schema1 for the canonical authority
+The current package declares authority schema 1 for the canonical authority
 contract. Incompatible prerelease state requires an explicit fresh deployment;
 there is no compatibility parser or implicit migration. Never restore old state,
 grants, checkpoints or floors to make another executable start.

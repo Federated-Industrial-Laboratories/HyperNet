@@ -1,6 +1,8 @@
 # Mail store operation
 
-A Mail service is an installed role3 workload with a dedicated Ed25519 service
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
+A Mail service is an installed role 3 workload with a dedicated Ed25519 service
 identity. Its operator signs the host consent and Mail profile, each bound to the exact
 canonical deployment manifest.
 Network registration, local operator consent and serving activation are separate
@@ -16,7 +18,7 @@ these values as the deployment operator; `mail register` publishes the result
 through an admitted manager with StoreMail14 and ManageService26 capabilities.
 The registered deployment's registrar and consent must also remain current.
 
-A ciphertext is at most128KiB. The profile may choose a smaller maximum with a
+A ciphertext is at most 128 KiB. The profile may choose a smaller maximum with a
 clear workload reason. Lifetime is at most seven days. Each of the two storage
 banks must fit its header and at least one maximum-sized entry. State admission
 must fit the chosen volume and role limits. The role's memory admission must be
@@ -29,8 +31,8 @@ Prepare the exact configuration artifacts:
 | --- | --- |
 | Bootstrap.cbor | Fully accepted, independently pinned bootstrap |
 | Manifest.cbor | Exact canonical admitted deployment manifest |
-| Service.key | Dedicated Mail service's raw32-byte private seed |
-| MailProfile.cbor | Signed role3 storage profile |
+| Service.key | Dedicated Mail service's raw 32-byte private seed |
+| MailProfile.cbor | Signed role 3 storage profile |
 | ServiceConfig.json | Fixed paths below |
 
 ```json

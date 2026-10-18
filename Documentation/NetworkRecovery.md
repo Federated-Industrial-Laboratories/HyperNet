@@ -1,5 +1,7 @@
 # Exceptional network recovery
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 Authority loss does not authorize a replacement committee or permit restored
 journals to issue old-network grants. Exceptional recovery creates a new network
 identity and a new incarnation with a complete independently accepted bootstrap.

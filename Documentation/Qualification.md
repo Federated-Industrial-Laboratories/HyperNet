@@ -1,5 +1,7 @@
 # Native Linux qualification
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 Support depends on measured kernel and runtime capabilities. A compiler pass or
 a distribution name is insufficient. The current development platform is native
 x86_64 Linux. Native AArch64, macOS and SELinux-enabled operation remain pending.

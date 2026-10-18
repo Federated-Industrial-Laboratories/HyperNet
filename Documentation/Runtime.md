@@ -1,5 +1,7 @@
 # Installed authority runtime
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 `HyperNet runtime` manages one already appointed authority voter per deployment.
 Four deployments use the same accepted bootstrap and distinct appointed voter
 keys. Their Basic HotStuff committee requires three replicas for authority
@@ -64,7 +66,7 @@ stores the canonical CBOR manifest in `Authorization/Manifest.cbor`; JSON remain
 a local input and display representation. The exact signed consent binds the
 canonical manifest, fixed workload handles and separately ordered peer list.
 
-The default resource allocation is512MiB RAM,64PIDs and one CPU period of100000
+The default resource allocation is 512 MiB RAM, 64 PIDs and one CPU period of 100000
 microseconds with a matching quota. CPU quota is configurable. These are workload
 allocations, separate from authority policy limits. Size production resources for
 the expected traffic and measured durable-storage latency. Four colocated voters
@@ -72,10 +74,10 @@ share storage and scheduling risks; four processes do not establish operational
 independence.
 
 `stateBytes` is an available-space admission requirement, not a filesystem quota.
-Its default1GiB leaves headroom above the engine's bounded object, result,
-maintenance, metadata and archive profile; the minimum is1GiB. This includes
-225MiB journal allocation and an atomic replacement,256MiB pending objects,
-128MiB maintenance and metadata/archive headroom. The engine
+Its default 1 GiB leaves headroom above the engine's bounded object, result,
+maintenance, metadata and archive profile; the minimum is 1 GiB. This includes
+225 MiB journal allocation and an atomic replacement, 256 MiB pending objects,
+128 MiB maintenance and metadata/archive headroom. The engine
 continues to enforce its individual storage limits. A deployment requires the
 configured available capacity at each start. Ordinary filesystems may have other
 consumers and filesystem overhead. The runtime does not claim total disk-quota
@@ -178,7 +180,7 @@ to renew consent, recover a host boot or change the installed software. It never
 recreates a signer to bypass expiry or a restart refusal. Live replacement is
 not supported.
 
-Each replica retains at most32 pending submissions and proposes eligible requests
+Each replica retains at most 32 pending submissions and proposes eligible requests
 in their first local admission order. Duplicate submissions retain their original
 position. A future request does not block eligible work, and completed, committed
 or expired entries leave both the request index and its ordering queue. A durable

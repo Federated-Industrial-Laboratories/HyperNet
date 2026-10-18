@@ -1,5 +1,7 @@
 # Authority operation
 
+[Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
 Authority state is ordered by four independently appointed Basic HotStuff
 replicas. Three matching signatures alone are insufficient: clients validate
 canonical statements, ordered ancestry, committed state, current permissions and
