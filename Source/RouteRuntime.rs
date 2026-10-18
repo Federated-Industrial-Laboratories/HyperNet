@@ -39,6 +39,19 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Channel for T {}
 type Stream = Box<dyn Channel>;
 static TIMING_SAMPLES: AtomicU64 = AtomicU64::new(0);
 const DISPATCH_MS: u64 = 100;
+const READ_RETRY_MS: u64 = 1000;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReadRetry {
+    FreshQuorumUnavailable,
+    HistoryOvertaken,
+}
+impl std::fmt::Display for ReadRetry {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(out, "fresh route context requires another read: {self:?}")
+    }
+}
+impl std::error::Error for ReadRetry {}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Phase {
     AdmissionQueue,
@@ -101,6 +114,12 @@ impl std::error::Error for Phase {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FailureCode {
     ObservationExpired,
+    FreshQuorumUnavailable,
+    HistoryOvertaken,
+    LocalReadClosed,
+    LocalWriteClosed,
+    LocalReadiness,
+    InspectionDeadline,
     Timeout,
     UnexpectedEof,
     ConnectionReset,
@@ -114,6 +133,12 @@ enum FailureCode {
 fn failure_code(error: &anyhow::Error) -> FailureCode {
     if error.is::<crate::consensus_clock::ObservationExpired>() {
         return FailureCode::ObservationExpired;
+    }
+    if error.is::<crate::authority_local_transport::FreshReadUnavailable>() {
+        return FailureCode::FreshQuorumUnavailable;
+    }
+    if error.is::<crate::authority_local_transport::HistoryOvertaken>() {
+        return FailureCode::HistoryOvertaken;
     }
     if error.is::<tokio::time::error::Elapsed>() {
         return FailureCode::Timeout;
@@ -131,6 +156,16 @@ fn failure_code(error: &anyhow::Error) -> FailureCode {
     }
     if error.is::<rustls::Error>() {
         return FailureCode::Tls;
+    }
+    // Legacy transport errors are mapped only for diagnostics, never retry authority.
+    for cause in error.chain() {
+        match cause.to_string().as_str() {
+            "private control read closed" => return FailureCode::LocalReadClosed,
+            "private control write closed" => return FailureCode::LocalWriteClosed,
+            "private control readiness failed or timed out" => return FailureCode::LocalReadiness,
+            "original inspection deadline expired" => return FailureCode::InspectionDeadline,
+            _ => {}
+        }
     }
     FailureCode::Other
 }
@@ -1563,18 +1598,32 @@ async fn endpoint(
 }
 fn clock_checked<T>(outcome: Result<T>) -> Result<Result<T>> {
     match outcome {
-        Err(error) if error.is::<crate::consensus_clock::ObservationExpired>() => Err(error),
+        Err(error)
+            if error.is::<crate::consensus_clock::ObservationExpired>()
+                || error.is::<ReadRetry>() =>
+        {
+            Err(error)
+        }
         outcome => Ok(outcome),
     }
 }
 async fn wait_for_clock(
-    mut check: impl FnMut() -> Result<()>,
+    check: impl FnMut() -> Result<()>,
     stopping: impl Future<Output = ()>,
 ) -> Result<bool> {
+    wait_for_retry(check, stopping, Duration::ZERO).await
+}
+async fn wait_for_retry(
+    mut check: impl FnMut() -> Result<()>,
+    stopping: impl Future<Output = ()>,
+    delay: Duration,
+) -> Result<bool> {
     tokio::pin!(stopping);
+    let retry_at = tokio::time::Instant::now() + delay;
     loop {
         match check() {
-            Ok(()) => return Ok(true),
+            Ok(()) if tokio::time::Instant::now() >= retry_at => return Ok(true),
+            Ok(()) => {}
             Err(error) if error.is::<crate::consensus_clock::ObservationExpired>() => {}
             Err(error) => return Err(error),
         }
@@ -1639,6 +1688,36 @@ pub async fn run(config: Config, guard: &Guard, active: &Active) -> Result<()> {
                 }
                 eprintln!(
                     "HyperNet private route clock: FreshObservation bootMs={:?}",
+                    crate::authority_challenge::boot_time_ms().ok()
+                );
+            }
+            Err(error) if error.is::<ReadRetry>() => {
+                // No existing admission survives; a new read gets its own challenge and deadline.
+                eprintln!(
+                    "HyperNet private route authority: Suspended reason={:?} bootMs={:?}",
+                    error.downcast_ref::<ReadRetry>(),
+                    crate::authority_challenge::boot_time_ms().ok()
+                );
+                let resumed = wait_for_retry(
+                    || {
+                        active.check_local(guard)?;
+                        guard.check_configuration()?;
+                        active.check(guard)
+                    },
+                    async {
+                        tokio::select! {
+                            _ = tokio::signal::ctrl_c() => {},
+                            _ = terminate.recv() => {},
+                        }
+                    },
+                    Duration::from_millis(READ_RETRY_MS),
+                )
+                .await?;
+                if !resumed {
+                    return Ok(());
+                }
+                eprintln!(
+                    "HyperNet private route authority: FreshAttempt bootMs={:?}",
                     crate::authority_challenge::boot_time_ms().ok()
                 );
             }

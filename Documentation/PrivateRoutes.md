@@ -325,3 +325,15 @@ activation, restore consumed voucher capacity, or extend a connection or
 permission deadline. Invalid clocks, changed authorization or configuration,
 unrecoverable journals and expired consent stop the service. Fixed
 `Suspended` and `FreshObservation` diagnostics contain no connection identifiers.
+
+A read-only route lookup or voucher-context request can report that its fresh
+quorum was unavailable, or that a certified checkpoint overtook its requested
+history. Only these typed transport outcomes trigger another attempt. The
+service first closes existing gates and connections, then waits one second.
+Local consent, activation, configuration and clock checks continue during this
+wait. A new read uses a fresh challenge and deadline before any new connection
+can be accepted. It does not replay an ordinary effect or restore an old stream.
+Malformed replies, invalid proofs, certified refusals, changed configuration
+and other transport failures remain terminal. Terminal diagnostics distinguish
+closed local reads, closed writes, readiness failures and expired inspection
+deadlines with fixed categories. They do not include error text or request data.
