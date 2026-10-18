@@ -3,16 +3,16 @@
 use super::*;
 use crate::runtime_manifest::Manifest;
 use bech32::{FromBase32, ToBase32, Variant};
-#[path = "AuthorityTransferCommands.rs"]
+#[path = "../../Transfers/AuthorityTransferCommands.rs"]
 mod commands;
 pub use commands::{Command, Effect};
-#[path = "AuthorityTransferEvaluation.rs"]
+#[path = "../../Transfers/AuthorityTransferEvaluation.rs"]
 mod evaluation;
 pub use evaluation::{evaluate, expected_recipient};
-#[path = "AuthorityTransferRequest.rs"]
+#[path = "../../Transfers/AuthorityTransferRequest.rs"]
 mod request;
 pub use request::Request;
-#[path = "AuthorityTransferReceipt.rs"]
+#[path = "../../Transfers/AuthorityTransferReceipt.rs"]
 mod receipt;
 pub use receipt::{RECEIPT_LIMIT, Receipt};
 pub const MAXIMUM_PAYLOAD: u64 = 8 * 1024 * 1024;
@@ -409,5 +409,5 @@ pub fn disk_header_bytes() -> u64 {
 }
 
 #[cfg(test)]
-#[path = "AuthorityTransferTests.rs"]
+#[path = "../../Transfers/AuthorityTransferTests.rs"]
 mod tests;

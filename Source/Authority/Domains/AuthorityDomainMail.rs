@@ -1,21 +1,21 @@
 // SPDX-License-Identifier: MIT
 // Mailbox revisions and one-use encryption packages remain certified domain state.
 use super::*;
-#[path = "AuthorityMailObjects.rs"]
+#[path = "../../Mail/AuthorityMailObjects.rs"]
 pub mod objects;
-#[path = "AuthorityMailProfile.rs"]
+#[path = "../../Mail/AuthorityMailProfile.rs"]
 mod profile;
 pub use profile::{Profile, Service, validate_service};
-#[path = "AuthorityMailCommands.rs"]
+#[path = "../../Mail/AuthorityMailCommands.rs"]
 mod commands;
 pub use commands::{Command, Effect};
-#[path = "AuthorityMailEvaluation.rs"]
+#[path = "../../Mail/AuthorityMailEvaluation.rs"]
 mod evaluation;
 pub use evaluation::{disk_header_bytes, evaluate, expected_recipient, reservation_bytes};
-#[path = "AuthorityMailRequest.rs"]
+#[path = "../../Mail/AuthorityMailRequest.rs"]
 mod request;
 pub use request::Request;
-#[path = "AuthorityMailReceipt.rs"]
+#[path = "../../Mail/AuthorityMailReceipt.rs"]
 mod receipt;
 pub use receipt::{RECEIPT_LIMIT, Receipt};
 // Two mailboxes, eight packages, twelve current or retained stores and one claim.
@@ -279,5 +279,5 @@ pub fn validate_state(state: &State) -> Result<()> {
 }
 
 #[cfg(test)]
-#[path = "AuthorityMailTests.rs"]
+#[path = "../../Mail/AuthorityMailTests.rs"]
 pub(crate) mod tests;

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Fixed-destination, bounded TCP relay for an isolated internal network.
-#[path = "../Source/Confinement.rs"]
+#[path = "../Source/Runtime/Confinement.rs"]
 mod confinement;
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;

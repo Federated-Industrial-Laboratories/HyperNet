@@ -644,5 +644,5 @@ fn sealed_replacement_replays_exact_prior_withdrawal_and_tombstone() {
     );
 }
 
-#[path = "AuthorityLocalSearchLeaseTests.rs"]
+#[path = "../Authority/AuthorityLocalSearchLeaseTests.rs"]
 mod local_search_tests;

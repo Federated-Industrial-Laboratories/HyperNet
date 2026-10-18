@@ -15,40 +15,40 @@ pub const TICKET_LIFETIME_MS: u64 = 60_000;
 // A certified result has at most 64 exact version references.
 pub const MAXIMUM_CONTEXT_RECORDS: usize = 64;
 
-#[path = "AuthorityPageContent.rs"]
+#[path = "../../Pages/AuthorityPageContent.rs"]
 pub mod content;
-#[path = "AuthorityContentPolicy.rs"]
+#[path = "../../Hosting/AuthorityContentPolicy.rs"]
 mod content_policy;
-#[path = "AuthorityPageObjects.rs"]
+#[path = "../../Pages/AuthorityPageObjects.rs"]
 pub mod objects;
 pub use content_policy::ContentPolicy;
-#[path = "AuthorityPageProfile.rs"]
+#[path = "../../Pages/AuthorityPageProfile.rs"]
 mod profile;
 pub use profile::{ApplicationPolicy, Host, HostProfile, PlacementPolicy};
-#[path = "AuthorityPageStorage.rs"]
+#[path = "../../Pages/AuthorityPageStorage.rs"]
 mod storage;
 pub use storage::{
     STORAGE_BANK_HEADER_BYTES, media_storage_budget, media_storage_charge, serialized_bank_bytes,
 };
-#[path = "AuthorityPageRecords.rs"]
+#[path = "../../Pages/AuthorityPageRecords.rs"]
 mod records;
 pub use records::retained_inputs;
 pub use records::*;
-#[path = "AuthorityPageCommands.rs"]
+#[path = "../../Pages/AuthorityPageCommands.rs"]
 mod commands;
 pub use commands::{Command, MediaEffect};
-#[path = "AuthorityPageEvaluation.rs"]
+#[path = "../../Pages/AuthorityPageEvaluation.rs"]
 mod evaluation;
 pub(crate) use evaluation::context::Evaluation;
 pub(crate) use evaluation::evaluate_read;
 pub use evaluation::{evaluate, expected_recipient};
-#[path = "AuthorityPageResponse.rs"]
+#[path = "../../Pages/AuthorityPageResponse.rs"]
 mod response;
 pub use response::response_inputs;
-#[path = "AuthorityPageMediaRequest.rs"]
+#[path = "../../Media/AuthorityPageMediaRequest.rs"]
 mod media_request;
 pub use media_request::Request as MediaRequest;
-#[path = "AuthorityPageMediaReceipt.rs"]
+#[path = "../../Media/AuthorityPageMediaReceipt.rs"]
 mod media_receipt;
 pub use media_receipt::{MEDIA_RECEIPT_LIMIT, Receipt as MediaReceipt, Report as MediaReport};
 
@@ -130,7 +130,7 @@ fn identity(label: &str, fields: Vec<V>) -> Result<Digest> {
 }
 
 #[cfg(test)]
-#[path = "AuthorityPageTests.rs"]
+#[path = "../../Pages/AuthorityPageTests.rs"]
 mod tests;
 #[cfg(test)]
 pub(crate) use tests::complete_content;

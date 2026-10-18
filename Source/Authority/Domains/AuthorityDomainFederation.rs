@@ -7,21 +7,21 @@ use crate::{
 };
 use std::collections::BTreeSet;
 
-#[path = "AuthorityFederationRecords.rs"]
+#[path = "../../Federation/AuthorityFederationRecords.rs"]
 mod records;
 pub use records::*;
-#[path = "AuthorityFederationProfile.rs"]
+#[path = "../../Federation/AuthorityFederationProfile.rs"]
 mod profile;
 pub use profile::*;
-#[path = "AuthorityFederationCommands.rs"]
+#[path = "../../Federation/AuthorityFederationCommands.rs"]
 mod commands;
 pub use commands::Command;
-#[path = "AuthorityFederationProof.rs"]
+#[path = "../../Federation/AuthorityFederationProof.rs"]
 mod proof;
 pub use proof::{ForeignProof, VerifiedForeign};
-#[path = "AuthorityFederationContext.rs"]
+#[path = "../../Federation/AuthorityFederationContext.rs"]
 mod context;
-#[path = "AuthorityFederationEvaluation.rs"]
+#[path = "../../Federation/AuthorityFederationEvaluation.rs"]
 mod evaluation;
 pub use evaluation::{evaluate, expected_recipient};
 
@@ -163,5 +163,5 @@ pub fn response_inputs(_intent: &Intent, _value: &V) -> Result<Vec<Reference>> {
 }
 
 #[cfg(test)]
-#[path = "AuthorityFederationTests.rs"]
+#[path = "../../Federation/AuthorityFederationTests.rs"]
 mod tests;

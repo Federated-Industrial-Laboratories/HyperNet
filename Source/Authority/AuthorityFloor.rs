@@ -14,7 +14,7 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{collections::BTreeMap, ffi::OsStr, fs::File, path::Path};
-#[path = "AuthorityEpochFloor.rs"]
+#[path = "Epochs/AuthorityEpochFloor.rs"]
 mod epoch;
 #[path = "AuthorityReadFloor.rs"]
 mod read;

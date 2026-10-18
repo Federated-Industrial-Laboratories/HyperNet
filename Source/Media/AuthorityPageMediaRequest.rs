@@ -10,7 +10,7 @@ use crate::{
     },
     trust_bootstrap::Verified,
 };
-#[path = "AuthorityPageContentRequest.rs"]
+#[path = "../Pages/AuthorityPageContentRequest.rs"]
 mod content_request;
 type ResultContext = (V, Vec<VersionRef>, State, Vec<Vec<u8>>);
 

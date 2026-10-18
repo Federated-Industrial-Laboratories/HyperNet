@@ -1,147 +1,147 @@
-#[path = "AuthorityContentDisk.rs"]
+#[path = "Hosting/AuthorityContentDisk.rs"]
 mod authority_content_disk;
-#[path = "AuthorityContentService.rs"]
+#[path = "Hosting/AuthorityContentService.rs"]
 mod authority_content_service;
 // SPDX-License-Identifier: MIT
-#[path = "AuthorityApplication.rs"]
+#[path = "Authority/Governance/AuthorityApplication.rs"]
 mod authority_application;
-#[path = "AuthorityApplications.rs"]
+#[path = "Authority/Governance/AuthorityApplications.rs"]
 mod authority_applications;
-#[path = "AuthorityBackupCli.rs"]
+#[path = "Backup/AuthorityBackupCli.rs"]
 mod authority_backup_cli;
-#[path = "AuthorityBridgeService.rs"]
+#[path = "Hosting/AuthorityBridgeService.rs"]
 mod authority_bridge_service;
-#[path = "AuthorityCapacity.rs"]
+#[path = "Authority/AuthorityCapacity.rs"]
 mod authority_capacity;
-#[path = "AuthorityChallenge.rs"]
+#[path = "Authority/AuthorityChallenge.rs"]
 mod authority_challenge;
-#[path = "AuthorityClockHandoff.rs"]
+#[path = "Authority/AuthorityClockHandoff.rs"]
 mod authority_clock_handoff;
-#[path = "AuthorityClockMonitor.rs"]
+#[path = "Authority/AuthorityClockMonitor.rs"]
 mod authority_clock_monitor;
-#[path = "AuthorityDeploymentRecords.rs"]
+#[path = "Authority/Deployments/AuthorityDeploymentRecords.rs"]
 mod authority_deployment_records;
-#[path = "AuthorityDeployments.rs"]
+#[path = "Authority/Deployments/AuthorityDeployments.rs"]
 mod authority_deployments;
-#[path = "AuthorityDomains.rs"]
+#[path = "Authority/Domains/AuthorityDomains.rs"]
 mod authority_domains;
-#[path = "AuthorityEpoch.rs"]
+#[path = "Authority/Epochs/AuthorityEpoch.rs"]
 mod authority_epoch;
-#[path = "AuthorityFiles.rs"]
+#[path = "Authority/AuthorityFiles.rs"]
 mod authority_files;
-#[path = "AuthorityFloor.rs"]
+#[path = "Authority/AuthorityFloor.rs"]
 mod authority_floor;
-#[path = "AuthorityGovernance.rs"]
+#[path = "Authority/Governance/AuthorityGovernance.rs"]
 mod authority_governance;
-#[path = "AuthorityGrantReview.rs"]
+#[path = "Authority/Governance/AuthorityGrantReview.rs"]
 mod authority_grant_review;
-#[path = "AuthorityHistory.rs"]
+#[path = "Authority/AuthorityHistory.rs"]
 mod authority_history;
-#[path = "AuthorityLocalTransport.rs"]
+#[path = "Authority/AuthorityLocalTransport.rs"]
 mod authority_local_transport;
-#[path = "AuthorityMailService.rs"]
+#[path = "Mail/AuthorityMailService.rs"]
 mod authority_mail_service;
-#[path = "AuthorityMediaService.rs"]
+#[path = "Media/AuthorityMediaService.rs"]
 mod authority_media_service;
-#[path = "AuthorityMembership.rs"]
+#[path = "Authority/Governance/AuthorityMembership.rs"]
 mod authority_membership;
-#[path = "AuthorityObjectFiles.rs"]
+#[path = "Authority/AuthorityObjectFiles.rs"]
 mod authority_object_files;
-#[path = "AuthorityObjects.rs"]
+#[path = "Authority/AuthorityObjects.rs"]
 mod authority_objects;
-#[path = "AuthorityOperationalConsent.rs"]
+#[path = "Authority/Deployments/AuthorityOperationalConsent.rs"]
 mod authority_operational_consent;
-#[path = "AuthorityPageService.rs"]
+#[path = "Pages/AuthorityPageService.rs"]
 mod authority_page_service;
-#[path = "AuthorityPolicies.rs"]
+#[path = "Authority/Governance/AuthorityPolicies.rs"]
 mod authority_policies;
-#[path = "AuthorityProof.rs"]
+#[path = "Authority/AuthorityProof.rs"]
 mod authority_proof;
-#[path = "AuthorityRead.rs"]
+#[path = "Authority/AuthorityRead.rs"]
 mod authority_read;
-#[path = "AuthorityRecipient.rs"]
+#[path = "Authority/Recipients/AuthorityRecipient.rs"]
 mod authority_recipient;
 #[cfg(test)]
-#[path = "AuthorityRecovery.rs"]
+#[path = "Authority/AuthorityRecovery.rs"]
 mod authority_recovery;
-#[path = "AuthorityReplica.rs"]
+#[path = "Authority/AuthorityReplica.rs"]
 mod authority_replica;
-#[path = "AuthorityRouteReader.rs"]
+#[path = "Routing/AuthorityRouteReader.rs"]
 mod authority_route_reader;
-#[path = "AuthorityRuntimeActivation.rs"]
+#[path = "Authority/Deployments/AuthorityRuntimeActivation.rs"]
 mod authority_runtime_activation;
-#[path = "AuthorityTiers.rs"]
+#[path = "Authority/Governance/AuthorityTiers.rs"]
 mod authority_tiers;
-#[path = "AuthorityTransferService.rs"]
+#[path = "Transfers/AuthorityTransferService.rs"]
 mod authority_transfer_service;
-#[path = "Confinement.rs"]
+#[path = "Runtime/Confinement.rs"]
 mod confinement;
-#[path = "Consensus.rs"]
+#[path = "Consensus/Consensus.rs"]
 mod consensus;
-#[path = "ConsensusClock.rs"]
+#[path = "Consensus/ConsensusClock.rs"]
 mod consensus_clock;
-#[path = "Markup.rs"]
+#[path = "HyperPage/Markup.rs"]
 mod markup;
-#[path = "Policy.rs"]
+#[path = "Policy/Policy.rs"]
 mod policy;
-#[path = "Protocol.rs"]
+#[path = "Protocol/Protocol.rs"]
 mod protocol;
-#[path = "RouteAuthority.rs"]
+#[path = "Routing/RouteAuthority.rs"]
 mod route_authority;
-#[path = "RouteConfig.rs"]
+#[path = "Routing/RouteConfig.rs"]
 mod route_config;
 #[cfg(test)]
-#[path = "RouteConnector.rs"]
+#[path = "Routing/RouteConnector.rs"]
 mod route_connector;
-#[path = "RouteEndpoint.rs"]
+#[path = "Routing/RouteEndpoint.rs"]
 mod route_endpoint;
-#[path = "RouteIo.rs"]
+#[path = "Routing/RouteIo.rs"]
 mod route_io;
-#[path = "RouteProfile.rs"]
+#[path = "Routing/RouteProfile.rs"]
 mod route_profile;
-#[path = "RouteProtocol.rs"]
+#[path = "Routing/RouteProtocol.rs"]
 mod route_protocol;
-#[path = "RouteRuntime.rs"]
+#[path = "Routing/RouteRuntime.rs"]
 mod route_runtime;
-#[path = "RouteState.rs"]
+#[path = "Routing/RouteState.rs"]
 mod route_state;
-#[path = "RouteTls.rs"]
+#[path = "Routing/RouteTls.rs"]
 mod route_tls;
-#[path = "RuntimeAudit.rs"]
+#[path = "Runtime/RuntimeAudit.rs"]
 mod runtime_audit;
-#[path = "RuntimeAuthorization.rs"]
+#[path = "Runtime/RuntimeAuthorization.rs"]
 mod runtime_authorization;
-#[path = "RuntimeBootstrapKeys.rs"]
+#[path = "Runtime/RuntimeBootstrapKeys.rs"]
 mod runtime_bootstrap_keys;
-#[path = "RuntimeGuard.rs"]
+#[path = "Runtime/RuntimeGuard.rs"]
 mod runtime_guard;
-#[path = "Runtime.rs"]
+#[path = "Runtime/Runtime.rs"]
 mod runtime_management;
-#[path = "RuntimeManifest.rs"]
+#[path = "Runtime/RuntimeManifest.rs"]
 mod runtime_manifest;
-#[path = "RuntimeProvision.rs"]
+#[path = "Runtime/RuntimeProvision.rs"]
 mod runtime_provision;
-#[path = "RuntimeServiceActivate.rs"]
+#[path = "Runtime/RuntimeServiceActivate.rs"]
 mod runtime_service_activate;
-#[path = "RuntimeServiceAuthorization.rs"]
+#[path = "Runtime/RuntimeServiceAuthorization.rs"]
 mod runtime_service_authorization;
-#[path = "RuntimeServiceEntry.rs"]
+#[path = "Runtime/RuntimeServiceEntry.rs"]
 mod runtime_service_entry;
-#[path = "RuntimeServiceEpochCommand.rs"]
+#[path = "Runtime/RuntimeServiceEpochCommand.rs"]
 mod runtime_service_epoch_command;
-#[path = "SearchText.rs"]
+#[path = "Search/SearchText.rs"]
 mod search_text;
-#[path = "SshProof.rs"]
+#[path = "Services/SshProof.rs"]
 mod ssh_proof;
-#[path = "SshService.rs"]
+#[path = "Services/SshService.rs"]
 mod ssh_service;
-#[path = "Store.rs"]
+#[path = "Storage/Store.rs"]
 mod store;
-#[path = "Transport.rs"]
+#[path = "Transport/Transport.rs"]
 mod transport;
-#[path = "TrustBootstrap.rs"]
+#[path = "Protocol/TrustBootstrap.rs"]
 mod trust_bootstrap;
-#[path = "TrustWire.rs"]
+#[path = "Protocol/TrustWire.rs"]
 #[allow(dead_code)]
 mod trust_wire;
 
@@ -336,5 +336,5 @@ fn main() {
 }
 
 #[cfg(test)]
-#[path = "AuthorityDeploymentTests.rs"]
+#[path = "Authority/Deployments/AuthorityDeploymentTests.rs"]
 mod authority_deployment_tests;

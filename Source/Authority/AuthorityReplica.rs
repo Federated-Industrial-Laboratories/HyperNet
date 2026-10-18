@@ -22,7 +22,7 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
-#[path = "AuthorityEpochReplica.rs"]
+#[path = "Epochs/AuthorityEpochReplica.rs"]
 mod epoch;
 const RECORD: &str = "Replica.json";
 const MAX_CONFIG: usize = 32768;

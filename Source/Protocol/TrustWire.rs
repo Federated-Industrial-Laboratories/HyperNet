@@ -305,7 +305,7 @@ mod tests {
     #[test]
     fn normative_encoding_and_signatures() {
         let vectors: serde_json::Value =
-            serde_json::from_str(include_str!("../Documentation/WireVectors.json")).unwrap();
+            serde_json::from_str(include_str!("../../Documentation/WireVectors.json")).unwrap();
         for case in vectors["canonical"].as_array().unwrap() {
             let bytes = hex::decode(case["wireHex"].as_str().unwrap()).unwrap();
             assert_eq!(encode(&decode(&bytes).unwrap()).unwrap(), bytes);

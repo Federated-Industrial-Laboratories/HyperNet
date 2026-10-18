@@ -867,7 +867,7 @@ mod tests {
     #[test]
     fn grammar_vectors() {
         let corpus: serde_json::Value =
-            serde_json::from_str(include_str!("../Tests/MarkupVectors.json")).unwrap();
+            serde_json::from_str(include_str!("../../Tests/MarkupVectors.json")).unwrap();
         for case in corpus.as_array().unwrap() {
             assert_eq!(
                 validate(case["body"].as_str().unwrap()).is_ok(),
