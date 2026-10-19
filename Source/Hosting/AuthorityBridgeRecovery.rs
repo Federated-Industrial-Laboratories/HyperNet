@@ -95,11 +95,11 @@ fn control(
         }
         transport::remaining(deadline)?;
         store
-            .accept(verified, session, guard.health()?, 0)?
-            .perform(
+            .accept_with_clock(verified, session, &mut || guard.health(), 0)?
+            .perform_with_clock(
                 store,
                 session,
-                guard.health()?,
+                &mut || guard.health(),
                 1,
                 |restrictions| {
                     guard.check()?;

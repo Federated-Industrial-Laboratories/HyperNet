@@ -220,7 +220,7 @@ impl Stored {
 
 pub struct Store {
     directory: File,
-    _lock: File,
+    _lock: files::ProfileLock,
     descriptor: TrustDescriptor,
     initial_descriptor: TrustDescriptor,
     stored: Stored,
@@ -448,6 +448,7 @@ impl Store {
     }
     /// The lower bound is an independent credential start, or zero when none applies.
     /// The original live challenge already establishes causal issuance through BOOTTIME.
+    #[cfg(test)]
     pub fn accept(
         &mut self,
         result: VerifiedResult,
@@ -455,18 +456,27 @@ impl Store {
         health: ClockHealth,
         not_before_ms: u64,
     ) -> Result<Permit> {
+        self.accept_with_clock(result, session, &mut || Ok(health), not_before_ms)
+    }
+    pub fn accept_with_clock(
+        &mut self,
+        result: VerifiedResult,
+        session: &mut Session,
+        clock: &mut impl FnMut() -> Result<ClockHealth>,
+        not_before_ms: u64,
+    ) -> Result<Permit> {
         ensure!(
             result.disposition() == Disposition::Permit,
             "recipient requires a successful certified result"
         );
         self.check_result(&result)?;
-        let now = session.check(&result, not_before_ms, health)?;
+        let now = session.check(&result, not_before_ms, clock()?)?;
         ensure!(
             now.wall_ms >= self.stored.wall_floor_ms,
             "recipient clock is below its durable floor"
         );
         self.advance(&result, now.wall_ms)?;
-        session.check(&result, not_before_ms, health)?;
+        session.check(&result, not_before_ms, clock()?)?;
         Ok(Permit {
             result,
             not_before_ms,

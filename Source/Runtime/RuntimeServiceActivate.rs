@@ -285,7 +285,7 @@ pub fn activate(guard: &Guard) -> Result<Active> {
         );
         Ok(())
     };
-    let permit = store.accept(result, &mut session, clock()?, 0)?;
+    let permit = store.accept_with_clock(result, &mut session, &mut clock, 0)?;
     if let Some(prior) = prior {
         permit.reconcile(
             &mut store,

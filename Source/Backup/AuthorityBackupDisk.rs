@@ -22,7 +22,7 @@ struct Catalogue {
 }
 pub(super) struct Disk {
     directory: File,
-    _lock: File,
+    _lock: files::ProfileLock,
     path: PathBuf,
     catalogue: Catalogue,
     pub(super) profile: backup::Profile,

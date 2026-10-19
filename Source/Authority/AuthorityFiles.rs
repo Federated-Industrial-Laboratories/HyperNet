@@ -196,7 +196,22 @@ pub fn remove_private_at(parent: &File, value: &OsStr) -> Result<()> {
     parent.sync_all()?;
     Ok(())
 }
-pub fn profile_lock(parent: &File, value: &OsStr) -> Result<File> {
+pub struct ProfileLock {
+    file: File,
+    owner_pid: libc::pid_t,
+}
+impl Drop for ProfileLock {
+    fn drop(&mut self) {
+        if self.owner_pid == unsafe { libc::getpid() } {
+            // Forked helpers can retain the description until exec. Only the
+            // process that acquired ownership may release its lock explicitly.
+            unsafe {
+                libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+            }
+        }
+    }
+}
+pub fn profile_lock(parent: &File, value: &OsStr) -> Result<ProfileLock> {
     use sha2::{Digest, Sha256};
     let label = format!(
         "Network{}.lock",
@@ -220,8 +235,12 @@ pub fn profile_lock(parent: &File, value: &OsStr) -> Result<File> {
         unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0,
         "another command owns this profile"
     );
+    let lock = ProfileLock {
+        file,
+        owner_pid: unsafe { libc::getpid() },
+    };
     parent.sync_all()?;
-    Ok(file)
+    Ok(lock)
 }
 #[cfg(test)]
 pub struct Destination {
@@ -269,6 +288,26 @@ impl Destination {
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+    #[test]
+    fn profile_lock_owner_releases_inherited_description_without_child_unlock() {
+        let root = std::env::temp_dir().join(format!("ProfileLock{}", crate::random_hex::<8>()));
+        let directory = create_directory(&root).unwrap();
+        let name = OsStr::new("Profile");
+        let owner = profile_lock(&directory, name).unwrap();
+        let inherited = owner.file.try_clone().unwrap();
+        assert!(profile_lock(&directory, name).is_err());
+        drop(owner);
+        let mut resumed = profile_lock(&directory, name).unwrap();
+        drop(inherited);
+        assert!(profile_lock(&directory, name).is_err());
+        let child_description = resumed.file.try_clone().unwrap();
+        resumed.owner_pid = 0;
+        drop(resumed);
+        assert!(profile_lock(&directory, name).is_err());
+        drop(child_description);
+        drop(profile_lock(&directory, name).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn publication_rejects_symlinks_traversal_and_destination_races() {
         let root = std::env::temp_dir().join(format!(
