@@ -996,7 +996,7 @@ async fn relay(
                         timing
                     });
                     if crate::authority_local_transport::remaining(deadline).is_err() { incoming.diagnostics.refuse(Refusal::Deadline); timing.mark(Phase::AdmissionRefused); continue; }
-                    let admitted = clock_checked(client.admit(&opened.open, opened.signer, opened.connection, opened.binding, (started, deadline), timing))
+                    let admitted = admission_checked(client.admit(&opened.open, opened.signer, opened.connection, opened.binding, (started, deadline), timing))
                         .context(Phase::AdmissionAuthority)?;
                     active.check(guard).context(Phase::AdmissionCurrent)?;
                     let admission = match admitted {
@@ -1595,6 +1595,19 @@ async fn endpoint(
     drain(&mut incoming).await;
     drain(&mut responses).await;
     outcome
+}
+fn admission_checked<T>(outcome: Result<T>) -> Result<Result<T>> {
+    match outcome {
+        // This read has its own bounded challenge. Failure denies this connection without
+        // revoking unrelated proofs; every existing gate retains its original expiry.
+        Err(error)
+            if error.is::<ReadRetry>()
+                && !error.is::<crate::consensus_clock::ObservationExpired>() =>
+        {
+            Ok(Err(error))
+        }
+        outcome => clock_checked(outcome),
+    }
 }
 fn clock_checked<T>(outcome: Result<T>) -> Result<Result<T>> {
     match outcome {

@@ -184,6 +184,79 @@ fn private_route_fresh_read_retry_requires_typed_read_transport_failure() {
     }
 }
 
+#[tokio::test]
+async fn private_route_failed_admission_preserves_unrelated_forwarding_until_proof_expiry() {
+    use crate::authority_local_transport::{FreshReadUnavailable, HistoryOvertaken};
+
+    let (mut reader, relay) = tokio::io::duplex(128);
+    let (service, mut destination) = tokio::io::duplex(128);
+    let start = crate::authority_challenge::boot_time_ms().unwrap();
+    let expires = start + 500;
+    let gate = route_io::Gate::new(expires);
+    let forwarding = tokio::spawn(route_io::forward_guarded(
+        relay,
+        service,
+        Limits {
+            bytes: 16384,
+            duration_ms: 2000,
+            idle_ms: 1000,
+        },
+        gate.clone(),
+        start + 2000,
+    ));
+
+    for error in [
+        anyhow::Error::new(FreshReadUnavailable),
+        anyhow::Error::new(HistoryOvertaken),
+    ] {
+        let denied = admission_checked::<()>(Err(Client::retry_read(error)))
+            .unwrap()
+            .unwrap_err();
+        assert!(denied.is::<ReadRetry>());
+        assert_eq!(gate.expiry().unwrap(), expires);
+        reader.write_u8(42).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(200), destination.read_u8())
+                .await
+                .unwrap()
+                .unwrap(),
+            42
+        );
+    }
+
+    tokio::time::sleep(Duration::from_millis(
+        expires.saturating_sub(crate::authority_challenge::boot_time_ms().unwrap()) + 1,
+    ))
+    .await;
+    reader.write_u8(43).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(40), destination.read_u8())
+            .await
+            .is_err(),
+        "another admission cannot extend an existing proof"
+    );
+    assert_eq!(gate.expiry().unwrap(), expires);
+    gate.close();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), forwarding)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+
+    for error in [
+        anyhow::Error::new(ObservationExpired),
+        anyhow::Error::new(ObservationExpired).context(ReadRetry::FreshQuorumUnavailable),
+    ] {
+        assert!(
+            admission_checked::<()>(Err(error))
+                .unwrap_err()
+                .is::<ObservationExpired>()
+        );
+    }
+}
+
 #[test]
 fn private_route_terminal_diagnostics_exclude_private_error_text() {
     for (message, expected) in [
