@@ -163,11 +163,11 @@ impl Client {
                 "incorrect SSH stream response"
             );
             self.store
-                .accept(verified, &mut self.session, clock()?, 0)?
-                .perform(
+                .accept_with_clock(verified, &mut self.session, clock, 0)?
+                .perform_with_clock(
                     &mut self.store,
                     &mut self.session,
-                    clock()?,
+                    clock,
                     1,
                     |r| {
                         ensure!(
@@ -446,19 +446,20 @@ impl Client {
                 bail!("SSH lease refused with code {code}");
             }
             let expires = verified.executed.expires_at_ms;
+            let clock = std::cell::RefCell::new(clock);
             self.store
-                .accept(verified, &mut self.session, clock()?, 0)?
-                .perform_once(
+                .accept_with_clock(verified, &mut self.session, &mut || clock.borrow_mut()(), 0)?
+                .perform_once_with_clock(
                     &mut self.store,
                     &mut self.session,
-                    clock()?,
+                    &mut || clock.borrow_mut()(),
                     1,
                     |r| {
                         ensure!(*r == Restrictions::default(), "SSH restrictions changed");
                         guard()
                     },
                     |_, _| {
-                        let now = clock()?.observe()?;
+                        let now = clock.borrow_mut()()?.observe()?;
                         let remaining = expires
                             .checked_sub(now.wall_ms)
                             .and_then(|v| v.checked_sub(crate::authority_challenge::DELTA_MS))

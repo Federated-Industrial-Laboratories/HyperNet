@@ -275,11 +275,11 @@ impl<'a> Client<'a> {
                 "Route status returned another control response"
             );
             self.store
-                .accept(result, &mut self.session, self.guard.health()?, 0)?
-                .perform(
+                .accept_with_clock(result, &mut self.session, &mut || self.guard.health(), 0)?
+                .perform_with_clock(
                     &mut self.store,
                     &mut self.session,
-                    self.guard.health()?,
+                    &mut || self.guard.health(),
                     1,
                     |r| {
                         self.active.check(self.guard)?;
@@ -520,11 +520,11 @@ impl<'a> Client<'a> {
             result::minimum(&candidate.versions, self.store.generations())?;
             transport::remaining(deadline)?;
             self.store
-                .accept(verified, &mut self.session, self.guard.health()?, 0)?
-                .perform(
+                .accept_with_clock(verified, &mut self.session, &mut || self.guard.health(), 0)?
+                .perform_with_clock(
                     &mut self.store,
                     &mut self.session,
-                    self.guard.health()?,
+                    &mut || self.guard.health(),
                     1,
                     |r| {
                         self.active.check(self.guard)?;

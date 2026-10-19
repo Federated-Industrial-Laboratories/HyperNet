@@ -54,6 +54,12 @@ candidate identities.
 Run `Tools/Check.sh` on the candidate and the applicable native workflows after
 integration. Keep tools, build caches, reports and recoverable state on persistent
 storage. Temporary scratch is disposable only after its durable result is retained.
+The check uses `${XDG_STATE_HOME:-$HOME/.local/state}/HyperNet/Tests` for fixtures.
+Set `HYPERNET_TEST_DIRECTORY` to choose another absolute, canonical, private
+directory. Its ancestors must prevent replacement by other accounts, and its
+length must leave room for Unix socket fixture names. The check validates these
+requirements before building; a short directory directly beneath the user's home
+can avoid workspace permission and socket path limits.
 Do not report earlier releases or userspace distribution containers as qualification
 of the current authority implementation or a different native kernel.
 

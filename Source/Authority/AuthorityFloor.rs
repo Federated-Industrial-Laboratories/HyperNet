@@ -218,7 +218,7 @@ impl PreparedRequest {
 }
 pub struct Store {
     directory: File,
-    _lock: File,
+    _lock: files::ProfileLock,
     descriptor: TrustDescriptor,
     initial_descriptor: TrustDescriptor,
     stored: Stored,
@@ -613,11 +613,21 @@ impl Store {
     }
     /// The lower bound is an independent credential start, or zero when none applies.
     /// The original live challenge already establishes causal issuance through BOOTTIME.
+    #[cfg(test)]
     pub fn accept(
         &mut self,
         result: VerifiedResult,
         session: &mut Session,
         health: ClockHealth,
+        not_before_ms: u64,
+    ) -> Result<DurablePermit> {
+        self.accept_with_clock(result, session, &mut || Ok(health), not_before_ms)
+    }
+    pub fn accept_with_clock(
+        &mut self,
+        result: VerifiedResult,
+        session: &mut Session,
+        clock: &mut impl FnMut() -> Result<ClockHealth>,
         not_before_ms: u64,
     ) -> Result<DurablePermit> {
         self.unchanged()?;
@@ -627,13 +637,13 @@ impl Store {
             "non-permit result or wrong configuration"
         );
         self.check_history(&result)?;
-        let now = session.check(&result, not_before_ms, health)?;
+        let now = session.check(&result, not_before_ms, clock()?)?;
         ensure!(
             now.wall_ms >= self.stored.wall_floor_ms,
             "wall clock is below durable floor"
         );
         self.advance(&result, now.wall_ms)?;
-        session.check(&result, not_before_ms, health)?;
+        session.check(&result, not_before_ms, clock()?)?;
         Ok(DurablePermit {
             result,
             not_before_ms,
@@ -836,6 +846,7 @@ impl DurablePermit {
             false,
         )
     }
+    #[cfg(test)]
     pub fn perform<T>(
         self,
         store: &mut Store,
@@ -845,21 +856,58 @@ impl DurablePermit {
         check_current_restrictions: impl FnMut(&proof::Restrictions) -> Result<()>,
         effect: impl FnOnce(&OperationResult, &Store) -> Result<T>,
     ) -> Result<T> {
+        self.perform_with_clock(
+            store,
+            session,
+            &mut || Ok(health),
+            requested_effect,
+            check_current_restrictions,
+            effect,
+        )
+    }
+    pub fn perform_with_clock<T>(
+        self,
+        store: &mut Store,
+        session: &mut Session,
+        clock: &mut impl FnMut() -> Result<ClockHealth>,
+        requested_effect: u64,
+        check_current_restrictions: impl FnMut(&proof::Restrictions) -> Result<()>,
+        effect: impl FnOnce(&OperationResult, &Store) -> Result<T>,
+    ) -> Result<T> {
         self.run(
             store,
             session,
-            health,
+            clock,
             requested_effect,
             check_current_restrictions,
             effect,
             false,
         )
     }
+    #[cfg(test)]
     pub fn perform_once<T>(
         self,
         store: &mut Store,
         session: &mut Session,
         health: ClockHealth,
+        requested_effect: u64,
+        check_current_restrictions: impl FnMut(&proof::Restrictions) -> Result<()>,
+        effect: impl FnOnce(&OperationResult, &Store) -> Result<T>,
+    ) -> Result<T> {
+        self.perform_once_with_clock(
+            store,
+            session,
+            &mut || Ok(health),
+            requested_effect,
+            check_current_restrictions,
+            effect,
+        )
+    }
+    pub fn perform_once_with_clock<T>(
+        self,
+        store: &mut Store,
+        session: &mut Session,
+        clock: &mut impl FnMut() -> Result<ClockHealth>,
         requested_effect: u64,
         check_current_restrictions: impl FnMut(&proof::Restrictions) -> Result<()>,
         effect: impl FnOnce(&OperationResult, &Store) -> Result<T>,
@@ -871,7 +919,7 @@ impl DurablePermit {
         self.run(
             store,
             session,
-            health,
+            clock,
             requested_effect,
             check_current_restrictions,
             effect,
@@ -886,15 +934,15 @@ impl DurablePermit {
         self,
         store: &mut Store,
         session: &mut Session,
-        health: ClockHealth,
+        clock: &mut impl FnMut() -> Result<ClockHealth>,
         requested_effect: u64,
         mut check_current_restrictions: impl FnMut(&proof::Restrictions) -> Result<()>,
         effect: impl FnOnce(&OperationResult, &Store) -> Result<T>,
         once: bool,
     ) -> Result<T> {
-        self.check(store, session, health, requested_effect)?;
+        self.check(store, session, clock()?, requested_effect)?;
         check_current_restrictions(&self.result.executed.restrictions)?;
-        self.save_body(store, session, health, requested_effect)?;
+        self.save_body(store, session, clock()?, requested_effect)?;
         let request = self.result.request().digest();
         let ordinary = matches!(self.result.request(), proof::SignedRequest::Intent(_));
         if ordinary {
@@ -913,9 +961,9 @@ impl DurablePermit {
             let next = store.stored.tracker.effect(request, true)?;
             store.local(next, transaction::Transition::Claim { request }, false)?;
         }
-        self.check(store, session, health, requested_effect)?;
+        self.check(store, session, clock()?, requested_effect)?;
         check_current_restrictions(&self.result.executed.restrictions)?;
-        let consumption = session.consume(&self.result, self.not_before_ms, health)?;
+        let consumption = session.consume(&self.result, self.not_before_ms, clock()?)?;
         let value = effect(&self.result.result, store)?;
         if ordinary
             && !store
@@ -932,7 +980,7 @@ impl DurablePermit {
         // The callback and final durable publication consume the original validity interval.
         self.check_floor(store, requested_effect)?;
         check_current_restrictions(&self.result.executed.restrictions)?;
-        let now = session.finish_consumption(consumption, health)?;
+        let now = session.finish_consumption(consumption, clock()?)?;
         ensure!(
             now.wall_ms >= self.wall_floor_ms.max(store.stored.wall_floor_ms),
             "wall clock fell below durable floor before return"

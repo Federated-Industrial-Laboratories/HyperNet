@@ -280,12 +280,14 @@ fn offer_accept_selected_recipient_effect_and_cancel_preserve_exact_generations(
         .iter()
         .map(|v| v.bytes().unwrap().to_vec())
         .collect::<Vec<_>>();
-    assert!(
-        !Governance::record_versions(f.state.network, f.state.incarnation, &records)
-            .unwrap()
-            .iter()
-            .any(|r| r.kind == 114)
-    );
+    let versions =
+        Governance::record_versions(f.state.network, f.state.incarnation, &records).unwrap();
+    let custody = Governance::record_versions(f.state.network, f.state.incarnation, &f.records)
+        .unwrap()
+        .into_iter()
+        .find(|r| r.kind == 114)
+        .unwrap();
+    assert!(versions.contains(&custody));
     for (value, allowed) in [
         (&d.value, true),
         (&deployment::without_live_consent(&d.value), false),

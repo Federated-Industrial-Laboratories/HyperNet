@@ -359,7 +359,14 @@ fn independently_executed_inspection_is_exact_and_replay_preserves_logical_resul
     assert_eq!(attestation_bytes(&one), attestation_bytes(&two));
     let value = wire::decode(result_bytes(&one)).unwrap();
     let value = wire::decode(value.array(6).unwrap()[5].bytes().unwrap()).unwrap();
-    assert_eq!(value.array(5).unwrap()[3].list(64).unwrap().len(), 3);
+    let dependencies = value.array(5).unwrap()[3].list(64).unwrap();
+    let expected = f
+        .expected
+        .iter()
+        .filter(|v| matches!(v.kind, 100 | 101 | 102 | 114))
+        .map(reference)
+        .collect::<Vec<_>>();
+    assert_eq!(dependencies, expected.as_slice());
     let retry = f
         .app
         .execute(

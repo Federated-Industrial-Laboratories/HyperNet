@@ -297,7 +297,7 @@ fn handle(
         ensure!(*r == Restrictions::default(), "mail restrictions differ");
         Ok(())
     };
-    let permit = store.accept(result, &mut session, clock()?, 0)?;
+    let permit = store.accept_with_clock(result, &mut session, &mut clock, 0)?;
     let response = if prior.is_some() {
         permit.reconcile(
             store,

@@ -390,3 +390,68 @@ fn epoch_activation_keeps_uncertain_effects_and_recovers_interrupted_publication
             .is_err()
     );
 }
+
+#[test]
+fn recipient_acceptance_resamples_after_durable_floor_without_extending_authority() {
+    for case in ["Current", "Stale", "Expired", "Unavailable"] {
+        let directory = Directory::new();
+        let mut session = Session::new().unwrap();
+        let f = fixture(&mut session);
+        let mut recipient = store(&directory, &f);
+        let sequence = recipient.stored.sequence;
+        let mut calls = 0;
+        let result = recipient.accept_with_clock(
+            f.verify().unwrap(),
+            &mut session,
+            &mut || {
+                calls += 1;
+                if calls == 1 {
+                    return Ok(health());
+                }
+                let published: Stored =
+                    serde_json::from_slice(&std::fs::read(directory.0.join(FLOOR))?).unwrap();
+                assert!(published.sequence > sequence && published.certificate.is_some());
+                let elapsed = if case == "Expired" { 4600 } else { 1600 };
+                if case == "Unavailable" {
+                    anyhow::bail!("monitor unavailable");
+                }
+                Ok(ClockHealth::new(
+                    10000 + elapsed,
+                    100 + elapsed,
+                    100 + elapsed + if case == "Stale" { 0 } else { 1000 },
+                    100,
+                )?
+                .frozen())
+            },
+            0,
+        );
+        assert_eq!(calls, 2);
+        if case == "Current" {
+            assert!(result.is_ok());
+        } else {
+            let expected = match case {
+                "Unavailable" => "monitor unavailable",
+                "Stale" => "clock health is stale or invalid",
+                "Expired" => {
+                    "authority effect is outside its conservative absolute validity interval"
+                }
+                _ => unreachable!(),
+            };
+            assert!(
+                format!("{:#}", result.err().unwrap()).contains(expected),
+                "{case}"
+            );
+        }
+        assert_eq!(recipient.prefix().height(), 1);
+        assert!(recipient.stored.claims.is_empty());
+        drop(recipient);
+        let retained = Store::open(
+            &directory.0,
+            f.descriptor,
+            f.recipient.verifying_key().to_bytes(),
+        )
+        .unwrap();
+        assert_eq!(retained.prefix().height(), 1);
+        assert!(retained.stored.claims.is_empty());
+    }
+}

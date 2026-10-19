@@ -16,6 +16,15 @@ path = Path(sys.argv[1])
 metadata = path.lstat()
 if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
     raise SystemExit('Test directory must be private and owned by the current user')
+if not path.is_absolute() or path.resolve() != path:
+    raise SystemExit('Test directory must be canonical and absolute')
+for ancestor in path.parents:
+    metadata = ancestor.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_mode & 0o022:
+        raise SystemExit('Test directory ancestors must not be writable by other accounts: ' + str(ancestor))
+# The longest socket fixture adds a 17-byte directory and Control.sock.
+if len(os.fsencode(path / ('S' + '0' * 16) / 'Control.sock')) >= 108:
+    raise SystemExit('Test directory is too long for Unix sockets; set HYPERNET_TEST_DIRECTORY to a shorter private path')
 PYTHON
 cargo fmt --manifest-path "$root/Cargo.toml" -- --check
 cargo clippy --manifest-path "$root/Cargo.toml" --release --locked --all-targets --jobs "$jobs" -- -D warnings
