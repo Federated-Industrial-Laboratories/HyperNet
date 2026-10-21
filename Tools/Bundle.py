@@ -230,7 +230,9 @@ def parse_archive(archive, output=None):
         try:
             if output is not None:
                 destination = output / name
-                destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                for parent in reversed(PurePosixPath(name).parents):
+                    if str(parent) != '.':
+                        (output / str(parent)).mkdir(mode=0o700, exist_ok=True)
                 outgoing = destination.open('xb')
                 os.chmod(destination, entry['mode'])
             remaining = item.size
