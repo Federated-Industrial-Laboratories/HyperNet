@@ -27,7 +27,7 @@ def main():
         parser.error('Select an existing private persistent work directory owned by this user')
     if not re.fullmatch(r'sha256:[a-f0-9]{64}', args.image) or os.geteuid() == 0:
         parser.error('Use an immutable local image and a non-root operator')
-    report = {'product': 'HyperNet', 'version': '0.7.5', 'imageId': args.image,
+    report = {'product': 'HyperNet', 'version': '0.8.0', 'imageId': args.image,
               'system': platform.system(), 'architecture': platform.machine(),
               'kernel': platform.release(), 'passed': False, 'profile': None, 'error': None}
     container = None

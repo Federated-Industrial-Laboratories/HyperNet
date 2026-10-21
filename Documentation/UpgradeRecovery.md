@@ -28,15 +28,17 @@ its final newline. It is not OpenSSH's displayed base64 fingerprint.
 python3 Tools/Bundle.py KeyPin --public-key /Trust/Publisher.pub
 python3 Tools/Bundle.py TrustInit --trust-directory /Private/CorePackageTrust \
   --public-key /Trust/Publisher.pub --root-pin <independently-authenticated-sha256> \
-  --root-generation 1 --version-floor 0.7.5 --state-contract HyperNet080Authority2
+  --root-generation 1 --version-floor 0.8.0 --state-contract HyperNet080Authority2
 ```
 
 The state contract is fixed by this product; an arbitrary operator-supplied label
 cannot mark incompatible state as compatible. The current authority contract uses
 immutable references for signer-state bodies. Incompatible inline-state packages
 and retained package trust are refused; they cannot activate this layout in place.
-Suite uses a different contract and trust directory. Current prerelease binaries retain version0.7.5; signed update
-sequences distinguish their exact builds and cannot move backwards.
+Suite uses a different contract and trust directory. The Linux release is version 0.8.0. Signed update sequences identify exact
+builds and cannot move backwards. Earlier development packages do not become
+release packages when a version label changes. Use independently accepted release
+trust and the signed target for the new package; retain existing state and floors.
 
 After creating a signed archive, the publisher authorises its exact target:
 
@@ -44,7 +46,7 @@ After creating a signed archive, the publisher authorises its exact target:
 python3 Tools/Bundle.py Authorise --archive HyperNet.tar \
   --signature HyperNet.tar.sig --public-key /Trust/Publisher.pub \
   --signing-key /Offline/Publisher --output Target.json \
-  --root-generation 1 --sequence <next-sequence> --version-floor 0.7.5 \
+  --root-generation 1 --sequence <next-sequence> --version-floor 0.8.0 \
   --state-contract HyperNet080Authority2 \
   --not-before <unix-seconds> --expires <unix-seconds>
 ```

@@ -17,7 +17,7 @@ Python 3.11 or later and OpenSSH
 separate authenticated channel. A key delivered only beside an untrusted archive
 is not an independent trust anchor. No default publisher key is embedded.
 
-## Prepare a private candidate
+## Prepare a package
 
 Build the binaries and image using [Hosting](Hosting.md). The packager reads
 Debian-format build-host library inventories; installation on another Linux
@@ -42,7 +42,7 @@ python3 Tools/Bundle.py Create \
 Create accepts trusted build outputs only. It inspects the local image without
 starting it, verifies its architecture and compares its actual binaries with the
 supplied build files. Package version identifies the actual HyperNet runtime;
-the current runtime is 0.7.5. Other runtime contracts are rejected.
+the current runtime is 0.8.0. Other runtime contracts are rejected.
 The helper generates no signing identity. Select and protect the operator's own
 offline signing key; no signing secret enters the package.
 After assembly, use `Authorise` to sign the exact finite update target. See
@@ -57,10 +57,11 @@ payload file's SHA-256, size and mode. Archives are uncompressed USTAR, at most
 512 MiB, with at most 512 payload files and at most 256 MiB per file. Archives
 contain only one initial manifest and explicitly inventoried regular files.
 
-System-library source accompaniment remains a pre-distribution requirement.
+The public Linux release includes a separate system-library source archive.
+Download it alongside the binary package when redistributing the complete release.
 [LibraryLicences](../Packaging/LibraryLicences.md) describes the exact source
-package and patch inventory. Creating or signing a private candidate does not
-supply those source packages or constitute public release qualification.
+package and patch inventory. Creating or signing a package does not automatically
+supply those sources. See [release notes](ReleaseNotes.md) for the download set.
 
 ## Verify and install
 

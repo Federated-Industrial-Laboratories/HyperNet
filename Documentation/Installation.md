@@ -2,14 +2,16 @@
 
 [Documentation](ReadMe.md) | [Project](../ReadMe.md) | [Next: Host requirements](Hosting.md)
 
+For public packages, start with the [Linux 0.8.0 download and installation steps](ReleaseNotes.md).
+
 Install HyperNet to operate authority replicas or consenting services. To browse,
 send mail or exchange files as a network member, use the separate
 [HyperNetSuite](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite).
 A client does not need the Core host runtime.
 
-HyperNet is in development. Source builds and independently signed offline
-packages are the current installation paths. There is no public production
-package download or one-command network setup.
+Install the public Linux package or build from source. Signed offline packages
+require independently accepted publisher trust. Installation does not create a
+network; follow the deployment steps below after checking the release limits.
 
 ## Requirements by task
 
