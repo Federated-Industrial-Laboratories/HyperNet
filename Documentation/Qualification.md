@@ -3,8 +3,8 @@
 [Documentation](ReadMe.md) | [Project](../ReadMe.md)
 
 Support depends on measured kernel and runtime capabilities. A compiler pass or
-a distribution name is insufficient. The current development platform is native
-x86_64 Linux. Native AArch64, macOS and SELinux-enabled operation remain pending.
+a distribution name is insufficient. Release 0.8.0 is qualified on native Ubuntu 24.04 x86_64, with GNU libc 2.39
+and the enforced kernel/runtime controls below. Native AArch64, macOS and SELinux-enabled operation remain pending.
 Windows and arbitrary SSH shells are outside the current installed profile.
 
 The host needs rootless Podman, a maintained OCI runtime, subordinate-only user
@@ -118,5 +118,5 @@ unchanged; do not relabel an earlier executable as a current candidate.
 One sequential reader and four voters on one machine establish only that tested
 profile. Neither a configured connection ceiling nor four local voters proves
 throughput, independent failure domains or operator independence. Native platform
-and graphics limits remain explicit. Private qualification is not a public release
-or an independent security assessment.
+and graphics limits remain explicit. The Linux release does not establish independent operator separation or an
+independent security assessment. See [release notes](ReleaseNotes.md) for its scope.

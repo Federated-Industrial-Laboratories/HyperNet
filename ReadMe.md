@@ -1,8 +1,11 @@
-<h1 align="center">HyperNet</h1>
+<p align="center">
+  <img src=".github/assets/header.svg" width="720" alt="HyperNet. Permissioned network infrastructure. Graphite wordmark and connected nodes on a silver engineering grid.">
+</p>
 
 <p align="center">Permissioned networks for pages, private communication and shared services.</p>
 
 <p align="center">
+  <a href="https://github.com/Federated-Industrial-Laboratories/HyperNet/releases/tag/v0.8.0">Linux 0.8.0</a> |
   <a href="Documentation/Installation.md">Install</a> |
   <a href="Documentation/Hosting.md">Host</a> |
   <a href="Documentation/ReadMe.md">Documentation</a> |
@@ -10,11 +13,14 @@
   <a href="https://github.com/Federated-Industrial-Laboratories/HyperNetSuite">HyperNetSuite</a>
 </p>
 
-HyperNet connects consenting hosts to provide reviewed publications, encrypted
-mail and file exchange. Networks control admission and assign explicit
-permissions for reading, publishing, reviewing, storage and administration.
-Federation lets separate networks share approved publications without combining
-their memberships or handing over administrative authority.
+HyperNet lets a group run its own network for publishing Pages, exchanging
+encrypted mail and files, and sharing services. Each network decides who can
+join and what its members can do. Hosts choose which services they provide and
+how much storage, compute and network access they allow.
+
+Pages are reviewed publications with text, layout, forms and images. Separate
+networks can share approved Pages through federation while keeping their own
+membership and administration.
 
 This repository provides the authority, hosting services and local runtime
 manager. [HyperNetSuite](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite)
@@ -22,24 +28,26 @@ provides the separate native graphical browser, terminal viewer and command-line
 clients. Reading a Page does not require running a host or authority replica.
 
 > [!NOTE]
-> HyperNet is in development. The current runtime version is 0.7.5; a public
-> production release is not available. Native x86_64 Linux is the current
-> development platform. See [platform and deployment limits](Documentation/Qualification.md)
-> before planning a deployment.
+> **Linux 0.8.0** is qualified on native Ubuntu x86_64 within the documented limits.
+> Other Linux distributions depend on compatible libraries and the required
+> kernel and runtime capabilities. AArch64, macOS and SELinux-enabled operation
+> remain unqualified. This release has no independent security certification.
+> Read the [release notes](Documentation/ReleaseNotes.md) and
+> [deployment limits](Documentation/Qualification.md) before choosing a deployment.
 
 ## Capabilities
 
 | Area | Function |
 | --- | --- |
-| Pages | Immutable, reviewed publications with responsive layout, colours, forms and static media. HyperPages contain no scripts; viewers generate decorative motion locally. |
-| Confidential content | Sealed publications for explicitly authorised readers; storage hosts separately consent to opaque content. |
-| Mail | Encrypted letters, owner-controlled addresses, separate devices and recipient-selected storage. |
-| File exchange | Encrypted transfers with exact recipient acceptance and durable delivery receipts. |
-| Shared services | Separately consented fixed-command OpenSSH services, without granting arbitrary shell access. |
-| Search | Approved network catalogues and explicitly selected local search; confidential local terms are not automatically forwarded. |
-| Federation | Bilateral agreements, author opt-in and destination review for shared publications. |
-| Hosting | Exact local consent for software, storage, exposure, resources and lifetime; withdrawal works without a quorum. |
-| Administration | Replicated policy and capability changes, scoped application access, audit, backup and explicit recovery. |
+| Pages | Publish reviewed revisions with responsive layouts, colours, forms and static media. HyperPages contain no scripts. |
+| Confidential content | Share sealed publications with selected readers and hosts that agree to store encrypted content. |
+| Mail | Exchange encrypted letters with owner-controlled addresses, separate devices and recipient-selected storage. |
+| File exchange | Offer encrypted files for a recipient to accept, with durable delivery receipts. |
+| Shared services | Offer approved, fixed-command OpenSSH services without granting arbitrary shell access. |
+| Search | Search approved network catalogues or an explicitly selected local catalogue. Private local queries stay local. |
+| Federation | Share publications through network agreements, author opt-in and destination review. |
+| Hosting | Choose software, storage, exposure, resources and lifetime. A host can withdraw without waiting for a quorum. |
+| Administration | Manage replicated policy and permissions, scoped application access, audit, backups and recovery. |
 
 Normal remote reader traffic uses authenticated, pinned TLS routes. SSH is a
 separate service capability, not the transport required to browse Pages or send
@@ -64,7 +72,15 @@ creates none of these.
 and the [protocol reference](Documentation/Protocol.md). Applications use separate
 identities and restricted grants; they do not receive a user's private keys.
 
-## Build from source
+## Install
+
+Download the [Linux 0.8.0 release](https://github.com/Federated-Industrial-Laboratories/HyperNet/releases/tag/v0.8.0)
+or build from source. For a signed package, follow the
+[package installation guide](Documentation/Packages.md): verification requires
+independently accepted publisher trust and the current signed update policy.
+Packages include the matching immutable OCI image.
+
+### Build from source
 
 Use Linux, a Rust toolchain supporting edition 2024, a GNAT compiler with Ada 2022
 support, and C linker and archive tools. GNATprove is needed for the separate
@@ -83,9 +99,7 @@ This builds the manager and confinement helper. It does not install a service,
 open a listener or create a network. `GNAT_GCC` selects an Ada-capable compiler
 when the default `gcc` lacks Ada support. Dependencies are locked in `Cargo.lock`.
 
-[Signed offline packages](Documentation/Packages.md) provide verified installation
-with independently accepted publisher trust. They include the matching immutable
-OCI image. Build outputs, package trust and live data use separate directories.
+Keep build outputs, package trust and live data in separate directories.
 
 ## Operate a host
 
@@ -120,7 +134,8 @@ for permissions and recovery.
 
 ## Documentation and development
 
-The [documentation index](Documentation/ReadMe.md) provides reading routes for
+The [release notes](Documentation/ReleaseNotes.md) describe the 0.8.0 scope and
+known limits. The [documentation index](Documentation/ReadMe.md) provides reading routes for
 operators, authors and application developers, plus the complete reference library.
 [Source layout](Documentation/SourceLayout.md) maps implementation modules.
 [Qualification](Documentation/Qualification.md) describes focused checks and the

@@ -46,7 +46,7 @@ class Packages(unittest.TestCase):
             'Documentation/ThirdPartyNotices.txt', 'Documentation/SystemLibraries.tsv',
             'Documentation/SystemLibraryNotices.txt', 'Images/HyperNetOci.tar')}
         self.payload['ImageId.txt'] = (self.image + '\n').encode()
-        self.manifest = {'format': 1, 'product': 'HyperNet', 'version': '0.7.5',
+        self.manifest = {'format': 1, 'product': 'HyperNet', 'version': '0.8.0',
                          'architecture': Bundle.architecture(), 'metadata': {
                              'imageId': self.image, 'imageArchive': 'Images/HyperNetOci.tar',
                              'authoritySchema': 1,
@@ -105,12 +105,12 @@ class Packages(unittest.TestCase):
             PackageTrust.trust_command(Bundle, argparse.Namespace(command='TrustInit',
                 trust_directory=args.trust_directory, public_key=args.public_key,
                 root_pin=PackageTrust.pin(Bundle.public_key(args.public_key)), root_generation=1,
-                version_floor='0.7.5', state_contract='HyperNet080Authority2'))
+                version_floor='0.8.0', state_contract='HyperNet080Authority2'))
         args.policy = self.directory / ('Target' + str(self.counter) + '.json')
         args.policy_signature = Path(str(args.policy) + '.sig')
         PackageTrust.authorise(Bundle, argparse.Namespace(archive=args.archive, signature=args.signature,
             public_key=args.public_key, signing_key=self.key, output=args.policy,
-            root_generation=1, sequence=1, version_floor='0.7.5', state_contract='HyperNet080Authority2',
+            root_generation=1, sequence=1, version_floor='0.8.0', state_contract='HyperNet080Authority2',
             not_before=int(time.time()) - 1, expires=int(time.time()) + 3600, ssh_keygen='/usr/bin/ssh-keygen'))
 
     def test_signature_namespace_pinned_key_and_private_copy_precede_parsing(self):
@@ -178,7 +178,7 @@ class Packages(unittest.TestCase):
     def test_install_is_no_clobber_and_remove_refuses_modified_or_extra_files(self):
         args = self.archive()
         self.installed(args)
-        self.assertEqual(Bundle.installed_manifest(args)[0]['version'], '0.7.5')
+        self.assertEqual(Bundle.installed_manifest(args)[0]['version'], '0.8.0')
         self.assertEqual((args.prefix / 'Bin/HyperNet').stat().st_mode & 0o777, 0o700)
         with self.assertRaises(ValueError):
             self.installed(args)
@@ -286,16 +286,16 @@ class OfflineUpdates(unittest.TestCase):
         self.contract = PackageTrust.CONTRACTS[Bundle.PRODUCT]
         self.init = argparse.Namespace(command='TrustInit', trust_directory=self.trust,
             public_key=str(self.key) + '.pub', root_pin=PackageTrust.pin(Bundle.public_key(str(self.key) + '.pub')),
-            root_generation=1, version_floor='0.7.5', state_contract=self.contract)
+            root_generation=1, version_floor='0.8.0', state_contract=self.contract)
         PackageTrust.trust_command(Bundle, self.init)
         self.archive = self.root / 'Archive.tar'
         self.archive.write_bytes(b'Exact synthetic archive identity')
-        self.manifest = {'version': '0.7.5', 'architecture': Bundle.architecture(),
+        self.manifest = {'version': '0.8.0', 'architecture': Bundle.architecture(),
                          'files': [{'path': 'Tools/PackageTrust.py'}]}
         self.original = Bundle.encode(self.manifest)
         self.now = int(time.time())
         self.target = {'format': 1, 'product': Bundle.PRODUCT, 'architecture': Bundle.architecture(),
-            'version': '0.7.5', 'versionFloor': '0.7.5', 'stateContract': self.contract,
+            'version': '0.8.0', 'versionFloor': '0.8.0', 'stateContract': self.contract,
             'rootGeneration': 1, 'rootPin': self.init.root_pin, 'sequence': 1,
             'notBefore': self.now - 1, 'expires': self.now + 60,
             'archiveSha256': Bundle.digest_file(self.archive), 'archiveBytes': self.archive.stat().st_size,
@@ -344,7 +344,7 @@ class OfflineUpdates(unittest.TestCase):
                         {'product': 'Other'},
                         {'architecture': 'Other'}, {'sequence': True},
                         {'sequence': 1 << 63}, {'archiveBytes': True},
-                        {'versionFloor': '0.7.6'}, {'archiveSha256': '0' * 64}):
+                        {'versionFloor': '0.8.1'}, {'archiveSha256': '0' * 64}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 self.accept(self.policy(changes))
         self.assertEqual(self.state()['sequence'], 0)
