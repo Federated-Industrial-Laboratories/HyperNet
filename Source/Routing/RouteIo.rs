@@ -447,32 +447,8 @@ pub async fn guarded_send<S: AsyncWrite + Unpin>(
     .await?;
     guarded_write(stream, bytes, gate, deadline, idle_ms).await
 }
-async fn direction<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
-    reader: &mut R,
-    writer: &mut W,
-    bytes: Arc<AtomicU64>,
-    gate: &Gate,
-    deadline: u64,
-    idle_ms: u64,
-) -> Result<()> {
-    let mut buffer = [0; 8192];
-    loop {
-        let left = crate::authority_local_transport::remaining(deadline)?.min(idle_ms);
-        let count =
-            tokio::time::timeout(Duration::from_millis(left), reader.read(&mut buffer)).await??;
-        if count == 0 {
-            return Ok(());
-        }
-        ensure!(
-            bytes
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| remaining
-                    .checked_sub(count as u64))
-                .is_ok(),
-            "route byte admission exhausted"
-        );
-        guarded_write(writer, &buffer[..count], gate, deadline, idle_ms).await?;
-    }
-}
+#[path = "RouteDuplex.rs"]
+mod duplex;
 pub async fn forward_guarded<
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
@@ -483,18 +459,7 @@ pub async fn forward_guarded<
     gate: Gate,
     deadline: u64,
 ) -> Result<()> {
-    limits.validate()?;
-    let bytes = Arc::new(AtomicU64::new(limits.bytes));
-    let (mut lr, mut lw) = tokio::io::split(left);
-    let (mut rr, mut rw) = tokio::io::split(right);
-    let left = crate::authority_local_transport::remaining(deadline)?;
-    tokio::time::timeout(Duration::from_millis(left), async {
-        tokio::select! {
-            result = direction(&mut lr, &mut rw, bytes.clone(), &gate, deadline, limits.idle_ms) => result,
-            result = direction(&mut rr, &mut lw, bytes, &gate, deadline, limits.idle_ms) => result,
-            _ = gate.closed() => anyhow::bail!("route permission closed"),
-        }
-    }).await?
+    duplex::forward(left, right, limits, gate, deadline).await
 }
 #[cfg(test)]
 pub async fn forward<A: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin>(
@@ -773,7 +738,7 @@ mod tests {
         assert!(!gate.demanded());
     }
     #[tokio::test]
-    async fn closing_reader_cancels_both_opaque_directions() {
+    async fn closed_reader_rejects_response_and_ends_duplex() {
         let (mut reader, relay) = tokio::io::duplex(128);
         let (service, mut destination) = tokio::io::duplex(128);
         let task = tokio::spawn(forward(
@@ -790,11 +755,17 @@ mod tests {
         destination.read_exact(&mut bytes).await.unwrap();
         assert_eq!(&bytes, b"opaque");
         drop(reader);
-        tokio::time::timeout(Duration::from_millis(200), task)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
+        // EOF alone can be a request half-close. A response to a fully closed
+        // reader fails and terminates the remaining direction.
+        assert_eq!(destination.read(&mut bytes).await.unwrap(), 0);
+        destination.write_all(b"unread response").await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
         assert_eq!(destination.read(&mut bytes).await.unwrap(), 0);
     }
     #[tokio::test]

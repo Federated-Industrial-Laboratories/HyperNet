@@ -16,8 +16,19 @@ pub struct Setup {
     operator_key: PathBuf,
     #[arg(long)]
     host_consent: PathBuf,
-    #[arg(long)]
-    authority_directory: PathBuf,
+    #[arg(
+        long,
+        required_unless_present = "authority_connector_directory",
+        conflicts_with = "authority_connector_directory"
+    )]
+    authority_directory: Option<PathBuf>,
+    /// Exact mapped Ingress directory of a Suite network authority connector.
+    #[arg(
+        long,
+        required_unless_present = "authority_directory",
+        conflicts_with = "authority_directory"
+    )]
+    authority_connector_directory: Option<PathBuf>,
     #[arg(long)]
     clock_directory: PathBuf,
     /// Exact local content or media service controls exposed to a bridge as HOSTKEY=INSTALLED_DIRECTORY.
@@ -26,6 +37,9 @@ pub struct Setup {
     /// Exact installed application socket exposed by a route endpoint.
     #[arg(long)]
     route_service: Option<PathBuf>,
+    /// Private application broker directory containing the exact signed binding metadata.
+    #[arg(long, conflicts_with = "route_service")]
+    application_directory: Option<PathBuf>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -181,12 +195,26 @@ pub fn run(args: Setup) -> Result<Value> {
     );
     let host = authority_files::read(&args.host_consent, wire::MAXIMUM, true)?;
     host_consent(&manifest, &host)?;
-    let (authority, _) = super::super::model::load(&files::root(&args.authority_directory)?)?;
-    ensure!(
-        authority.network == hex::encode(manifest.network)
-            && authority.incarnation == hex::encode(manifest.incarnation),
-        "private authority control belongs to another network"
-    );
+    let (authority_control, authority_binding) = match (
+        &args.authority_directory,
+        &args.authority_connector_directory,
+    ) {
+        (Some(directory), None) => {
+            let root = files::root(directory)?;
+            let (authority, _) = super::super::model::load(&root)?;
+            ensure!(
+                authority.network == hex::encode(manifest.network)
+                    && authority.incarnation == hex::encode(manifest.incarnation),
+                "private authority control belongs to another network"
+            );
+            (root.join("Launch/State/Control"), None)
+        }
+        (None, Some(directory)) => (
+            directory.clone(),
+            Some(authority_connector::Binding::read(directory, &manifest)?),
+        ),
+        _ => anyhow::bail!("select exactly one local authority or remote authority connector"),
+    };
     files::safe_path(&args.clock_directory)?;
     ensure!(
         args.clock_directory.is_absolute()
@@ -238,7 +266,8 @@ pub fn run(args: Setup) -> Result<Value> {
         );
     }
     ensure!(
-        manifest.roles[0].role == 5 || args.route_service.is_none(),
+        manifest.roles[0].role == 5
+            || args.route_service.is_none() && args.application_directory.is_none(),
         "application socket mounts require role5"
     );
     let route_target = if let Some(directory) = &args.route_service {
@@ -253,11 +282,27 @@ pub fn run(args: Setup) -> Result<Value> {
     } else {
         None
     };
+    let application_target = if let Some(directory) = &args.application_directory {
+        let directory = directory.clone();
+        let configuration: crate::route_config::Configuration =
+            serde_json::from_slice(&data["ServiceConfig.json"])?;
+        let application = configuration
+            .application
+            .context("application stream configuration absent")?;
+        crate::route_config::application_mount::validate_host(&directory, &application)?;
+        Some(MediaMount {
+            directory,
+            profile_digest: hex::encode(application.binding.digest()?),
+        })
+    } else {
+        None
+    };
     if manifest.roles[0].role == 5 {
         crate::route_config::validate_import(
             &manifest,
             &data,
             route_target.as_ref().map(|v| v.directory.as_path()),
+            application_target.as_ref().map(|v| v.directory.as_path()),
         )?;
         let route_profile = crate::authority_domains::routes::RegisteredProfile::parse(
             &data["RouteProfile.cbor"],
@@ -270,24 +315,28 @@ pub fn run(args: Setup) -> Result<Value> {
         );
         data.insert(
             "RouteBinding.json".into(),
-            Zeroizing::new(serde_json::to_vec(&route_target)?),
+            Zeroizing::new(serde_json::to_vec(
+                &route_target.as_ref().or(application_target.as_ref()),
+            )?),
         );
     }
     let seccomp = serde_json::to_vec(&super::super::setup::seccomp()?)?;
     data.insert("Seccomp.json".into(), Zeroizing::new(seccomp));
     let profile = Profile {
-        version: 1,
+        version: if authority_binding.is_some() { 2 } else { 1 },
         root: args.directory.clone(),
         manifest,
         artifacts: data
             .iter()
             .map(|(n, v)| (n.clone(), wire::digest(v)))
             .collect(),
-        authority_control: args.authority_directory.join("Launch/State/Control"),
+        authority_control,
+        authority_binding,
         clock_directory: args.clock_directory,
         selinux: files::selinux_enabled()?,
         media_controls,
         route_target,
+        application_target,
     };
     profile.validate()?;
     ensure!(

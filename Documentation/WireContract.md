@@ -403,6 +403,13 @@ Fresh read replies are
 Status is Pending=0, Complete=1, Unavailable=2 or Invalid=3. A complete response
 requires three matching kind61 signatures over the supplied result. A local
 Unavailable or Invalid reply is not authenticated permission or a quorum refusal.
+Unavailable code1 means the original collection or healthy challenge is unavailable.
+Code2 means the bounded collection count or retained-byte allocation is full.
+Completed certificates retain their collection until its original expiry so a
+lost response remains recoverable. A client may resubmit only the identical
+signed read and challenge after code2, within the same monotonic deadline and
+healthy-clock checks. It must not extend a permission, mint another challenge,
+replay a mutation or treat capacity as approval. Code1 terminates that exchange.
 Protocol1 reader endpoints admit operations0-4and6-7, with exact scope and request
 validation; operation5 remains a local diagnostic. Pending replies keep demand
 only when reply family, scope and exact submitted or polled ID all match.
@@ -928,14 +935,16 @@ authorisations remain excluded.
 
 State has at most262144 bytes. Kind48 uses at most16 chunks of16384 bytes, with
 zero-based exact indices and only the final chunk shorter. Archive requests name
-one exact range of1-512 leaves; their first index is zero-based. The archive has at
-most131072 leaves, approximately4MiB of raw Node digests. Request identifiers,
-checkpoint identities, expected indices and counts must all match. Duplicate,
+one exact range of1-512 leaves; their first index is zero-based. Segmented archive
+storage retains the committed prefix under a local physical quota; heights remain
+below2^63. Request identifiers, checkpoint identities, expected indices and counts
+must all match. Duplicate,
 unrequested and unrelated responses refuse. Transport authentication does not
 make a partial chunk authoritative.
 
-A replica stages at most one transfer per eligible remote peer in bounded private
-memory, with a120-second transfer lifetime. It checks canonical state, the complete
+A replica stages at most one transfer per eligible remote peer, with at most three
+active transfers and a120-second transfer lifetime. State buffers remain bounded
+in private memory; archive staging uses private disk under the local archive quota. It checks canonical state, the complete
 state digest, its concrete application's state validator and the full certified
 archive root before publication. Its existing archive prefix must match exactly.
 A donor pins at most one served state per eligible remote peer, at most three

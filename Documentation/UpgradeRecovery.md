@@ -40,6 +40,15 @@ builds and cannot move backwards. Earlier development packages do not become
 release packages when a version label changes. Use independently accepted release
 trust and the signed target for the new package; retain existing state and floors.
 
+Version 0.9 retains the existing package state-contract identifier. This does not
+make new application-stream records or segmented authority history readable by
+version 0.8. Installing 0.9 advances the retained version floor to at least 0.9.0.
+Do not open post-0.9 state with 0.8, replace segmented history with `History.bin`,
+or delete trust state, requester journals or generation floors to permit a downgrade.
+Recovery requires stopped workloads and a complete consistent backup, including
+history, journals and separately retained current floors, with a compatible
+installation. Restoring a backup does not authorise lowering any retained floor.
+
 After creating a signed archive, the publisher authorises its exact target:
 
 ```sh
@@ -121,7 +130,10 @@ they do not assert freshness or lower the retained update floor. Package removal
 leaves runtime profiles, state, trust directories and loaded images untouched.
 Changing the executable of a deployment requires fresh consent and the certified
 replacement procedure in [AuthorityEpochs](AuthorityEpochs.md) where applicable.
-There is no automatic runtime switch, rollback or state migration.
+Package installation does not automatically switch runtimes, roll back data or
+migrate deployment state. The verified version 0.9 history-format migration occurs
+when the compatible replica opens its retained journal; see
+[Authority replica storage](AuthorityReplica.md).
 
 `AdmitInstalled` is the runtime's activation check. It additionally requires the
 exact retained target and a currently valid signed policy, returning the current

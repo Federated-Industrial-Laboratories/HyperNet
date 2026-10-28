@@ -149,24 +149,42 @@ fn private_route_fresh_read_retry_requires_typed_read_transport_failure() {
     use crate::authority_local_transport::{FreshReadUnavailable, HistoryOvertaken};
     for (error, reason) in [
         (
-            anyhow::Error::new(FreshReadUnavailable),
+            anyhow::Error::new(FreshReadUnavailable { code: 1 }),
             ReadRetry::FreshQuorumUnavailable,
         ),
         (
             anyhow::Error::new(HistoryOvertaken),
             ReadRetry::HistoryOvertaken,
         ),
+        (
+            anyhow::Error::new(crate::authority_challenge::ChallengeExpired),
+            ReadRetry::ChallengeExpired,
+        ),
+        (
+            anyhow::Error::new(crate::authority_local_transport::ControlClosed::Read),
+            ReadRetry::TransportClosed,
+        ),
+        (
+            std::io::Error::from(std::io::ErrorKind::ConnectionReset).into(),
+            ReadRetry::TransportClosed,
+        ),
     ] {
         let error = Client::retry_read(error.context("read transport"));
         assert_eq!(error.downcast_ref::<ReadRetry>(), Some(&reason));
-        let propagated = clock_checked::<()>(Err(error)).unwrap_err();
+        let propagated = clock_checked::<()>(Err(error)).unwrap().unwrap_err();
         assert!(propagated.is::<ReadRetry>());
-        assert!(propagated.is::<FreshReadUnavailable>() || propagated.is::<HistoryOvertaken>());
+        assert!(
+            propagated.is::<FreshReadUnavailable>()
+                || propagated.is::<HistoryOvertaken>()
+                || propagated.is::<crate::authority_challenge::ChallengeExpired>()
+                || crate::authority_local_transport::transport_closed(&propagated)
+        );
     }
     // An ordinary effect with the same underlying failure cannot acquire read retry authority.
     for error in [
-        anyhow::Error::new(FreshReadUnavailable),
+        anyhow::Error::new(FreshReadUnavailable { code: 2 }),
         anyhow::Error::new(HistoryOvertaken),
+        anyhow::Error::new(crate::authority_local_transport::ControlClosed::Read),
     ] {
         assert!(clock_checked::<()>(Err(error)).unwrap().is_err());
     }
@@ -184,8 +202,42 @@ fn private_route_fresh_read_retry_requires_typed_read_transport_failure() {
     }
 }
 
+#[test]
+fn expired_ordinary_attempt_drains_while_read_expiry_remains_connection_local() {
+    use crate::authority_challenge::ChallengeExpired;
+    for read_context in [false, true] {
+        let error = anyhow::Error::new(ChallengeExpired);
+        let error = if read_context {
+            Client::retry_read(error)
+        } else {
+            error.context("recover exact pending ordinary request")
+        };
+        assert_eq!(failure_code(&error), FailureCode::ChallengeExpired);
+        let outcome = clock_checked::<()>(Err(error));
+        let refused = if read_context {
+            outcome.unwrap().unwrap_err()
+        } else {
+            outcome.unwrap_err()
+        };
+        assert!(refused.is::<ChallengeExpired>());
+    }
+    assert!(
+        clock_checked::<()>(Err(ChallengeExpired.into()))
+            .unwrap_err()
+            .is::<ChallengeExpired>()
+    );
+    let invalid = anyhow::anyhow!("challenge context or clock progression is invalid");
+    assert_eq!(failure_code(&invalid), FailureCode::Other);
+    assert!(
+        !clock_checked::<()>(Err(invalid))
+            .unwrap()
+            .unwrap_err()
+            .is::<ChallengeExpired>()
+    );
+}
+
 #[tokio::test]
-async fn private_route_failed_admission_preserves_unrelated_forwarding_until_proof_expiry() {
+async fn private_route_failed_connection_read_preserves_unrelated_forwarding_until_proof_expiry() {
     use crate::authority_local_transport::{FreshReadUnavailable, HistoryOvertaken};
 
     let (mut reader, relay) = tokio::io::duplex(128);
@@ -206,10 +258,12 @@ async fn private_route_failed_admission_preserves_unrelated_forwarding_until_pro
     ));
 
     for error in [
-        anyhow::Error::new(FreshReadUnavailable),
+        anyhow::Error::new(FreshReadUnavailable { code: 2 }),
         anyhow::Error::new(HistoryOvertaken),
+        anyhow::Error::new(crate::authority_challenge::ChallengeExpired),
+        anyhow::Error::new(crate::authority_local_transport::ControlClosed::Read),
     ] {
-        let denied = admission_checked::<()>(Err(Client::retry_read(error)))
+        let denied = clock_checked::<()>(Err(Client::retry_read(error)))
             .unwrap()
             .unwrap_err();
         assert!(denied.is::<ReadRetry>());
@@ -250,7 +304,7 @@ async fn private_route_failed_admission_preserves_unrelated_forwarding_until_pro
         anyhow::Error::new(ObservationExpired).context(ReadRetry::FreshQuorumUnavailable),
     ] {
         assert!(
-            admission_checked::<()>(Err(error))
+            clock_checked::<()>(Err(error))
                 .unwrap_err()
                 .is::<ObservationExpired>()
         );

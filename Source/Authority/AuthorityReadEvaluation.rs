@@ -16,6 +16,11 @@ pub(crate) fn evaluate_domain(
     at: u64,
 ) -> Result<domains::Decision> {
     match &operation.command {
+        domains::Command::Stream(
+            domains::streams::Command::Permit { .. }
+            | domains::streams::Command::Lookup { .. }
+            | domains::streams::Command::Inspect { .. },
+        ) => domains::streams::evaluate_read(operation, state, records, reserved, requester, at),
         domains::Command::Page(domains::page::Command::View { .. }) => {
             domains::page::evaluate_read(operation, state, records, reserved, requester, at)
         }

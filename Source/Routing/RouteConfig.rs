@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Installed route services bind one signed profile, fixed application mount and isolated numeric egress.
 use crate::{
-    authority_domains::routes::RegisteredProfile, authority_files as files, confinement,
-    route_profile::Identity, runtime_manifest::Manifest, trust_wire as wire,
+    authority_domains::{routes::RegisteredProfile, streams},
+    authority_files as files, confinement,
+    route_profile::Identity,
+    runtime_manifest::Manifest,
+    trust_wire as wire,
 };
 use anyhow::{Context, Result, ensure};
 use ed25519_dalek::SigningKey;
@@ -13,6 +16,8 @@ use std::{
     path::{Path, PathBuf},
 };
 use zeroize::Zeroizing;
+#[path = "ApplicationStreamMount.rs"]
+pub(crate) mod application_mount;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -20,6 +25,14 @@ pub struct Configuration {
     pub version: u64,
     pub relay_identity: Option<Identity>,
     pub relay_address: Option<SocketAddr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application: Option<Application>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Application {
+    pub registration: Vec<u8>,
+    pub binding: streams::local::Binding,
 }
 pub struct Config {
     pub profile: RegisteredProfile,
@@ -27,6 +40,7 @@ pub struct Config {
     pub key: SigningKey,
     pub relay: Option<(Identity, SocketAddr)>,
     pub metadata_bytes: usize,
+    pub application: Option<Application>,
 }
 fn parse(
     manifest: &Manifest,
@@ -40,7 +54,8 @@ fn parse(
     let profile = RegisteredProfile::parse(profile, manifest.network, manifest.incarnation)?;
     let configuration: Configuration = serde_json::from_slice(configuration)?;
     ensure!(
-        configuration.version == 1
+        (configuration.version == 1 && configuration.application.is_none()
+            || configuration.version == 2 && configuration.application.is_some())
             && profile.deployment == manifest.deployment
             && profile.service == manifest.roles[0].service_key
             && profile.operator == manifest.operator
@@ -94,22 +109,54 @@ fn parse(
             .is_some_and(|n| n <= manifest.roles[0].memory_bytes / 2),
         "route stream buffers exceed the consented memory admission"
     );
+    ensure!(
+        (profile.protocol == streams::PROTOCOL) == configuration.application.is_some(),
+        "application stream binding is required only for protocol7"
+    );
+    if let Some(application) = &configuration.application {
+        let registration = streams::Registration::parse(
+            &application.registration,
+            manifest.network,
+            manifest.incarnation,
+        )?;
+        application.binding.registration(&registration, &profile)?;
+        ensure!(
+            application.binding.network == manifest.network
+                && application.binding.incarnation == manifest.incarnation,
+            "local application binding network differs"
+        );
+    }
     Ok((profile, configuration))
 }
 pub fn validate_import(
     manifest: &Manifest,
     data: &BTreeMap<String, Zeroizing<Vec<u8>>>,
     target_directory: Option<&Path>,
+    application_directory: Option<&Path>,
 ) -> Result<()> {
-    let (profile, _) = parse(
+    let (profile, configuration) = parse(
         manifest,
         &data["RouteProfile.cbor"],
         &data["ServiceConfig.json"],
     )?;
     ensure!(
-        (profile.mode != 1 && profile.protocol != 1) == target_directory.is_some(),
+        (profile.mode != 1 && profile.protocol != 1 && profile.protocol != streams::PROTOCOL)
+            == target_directory.is_some(),
         "route endpoint requires exactly its own application socket binding"
     );
+    ensure!(
+        (profile.protocol == streams::PROTOCOL) == application_directory.is_some(),
+        "application stream endpoint requires its exact broker directory"
+    );
+    if let Some(path) = application_directory {
+        application_mount::validate_host(
+            path,
+            configuration
+                .application
+                .as_ref()
+                .context("application configuration absent")?,
+        )?;
+    }
     if let Some(path) = target_directory {
         let target = Manifest::parse(&files::read(
             &path.join("Config/Manifest.cbor"),
@@ -141,6 +188,14 @@ pub fn validate_import(
         data["CertificateAuthority.pem"].as_slice()
             == profile.identity.certificate_authority_pem.as_bytes(),
         "route trust roots differ from signed profile"
+    );
+    Ok(())
+}
+pub fn validate_application_directory(path: &Path, application: &Application) -> Result<()> {
+    let _ = files::private_directory(path)?;
+    ensure!(
+        files::read(&path.join("Binding.json"), 16384, true)? == application.binding.encode()?,
+        "application broker binding changed"
     );
     Ok(())
 }
@@ -181,9 +236,15 @@ impl Config {
             key,
             relay,
             metadata_bytes,
+            application: configuration.application,
         })
     }
     pub fn confinement(&self) -> Result<confinement::Profile> {
+        // The inert preparation helper reads consented metadata without a live
+        // application mount. The serving process verifies it before activation.
+        if let Some(application) = &self.application {
+            validate_application_directory(Path::new("/Application"), application)?;
+        }
         let mut read = [
             "/Config",
             "/Clock",

@@ -52,8 +52,9 @@ application's signed request and current authority.
 
 Buffers remain transient. Both directions share one reserved ciphertext byte
 allowance. Original monotonic duration, idle and consent limits bound the whole
-connection. Closing either direction closes both. A retry cannot replenish bytes
-or restart those limits.
+connection. Directional EOF closes that write half and lets the opposite half
+drain. Cancellation, permission loss and hard failure close both halves. A retry
+cannot replenish bytes or restart those limits.
 
 A live connection retains its original verified Permit, voucher, connection ID,
 transcript and exact relay and destination profiles. Fresh `RouteVoucherContext`
@@ -99,6 +100,9 @@ the reader verifies its exact suffix and advances its floor through normal
 result acceptance. Preparation does not reset transport time, idle or byte limits.
 Every frame is checked against the endpoint's selected protocol. An I/O failure
 closes the channel; an unresolved operation cannot silently reconnect or replay.
+
+Protocol 7 carries [application streams](ApplicationStreams.md), with separate
+current permission for each admitted application principal.
 
 For protocols 1 through 5, one bounded task handles the session's validated
 frames while the authority requester refreshes its shared endpoint permission
@@ -329,9 +333,14 @@ unrecoverable journals and expired consent stop the service. Fixed
 `Suspended` and `FreshObservation` diagnostics contain no connection identifiers.
 
 A read-only route lookup or voucher-context request can report that its fresh
-quorum was unavailable, or that a certified checkpoint overtook its requested
-history. Only these typed transport outcomes trigger another attempt. The
-service first closes existing gates and connections, then waits one second.
+quorum was unavailable, that a certified checkpoint overtook its requested
+history, or that the authenticated private control peer closed its channel.
+The connector can close a read while its own signed clock observation is stale.
+During service startup or renewal of the endpoint's own permission,
+these typed outcomes close existing gates and connections before a new attempt
+after one second. A failure while admitting, pairing or renewing an individual
+connection closes that connection only. Unrelated connections retain their
+original permission deadlines; no old permission is extended.
 Local consent, activation, configuration and clock checks continue during this
 wait. A new read uses a fresh challenge and deadline before any new connection
 can be accepted. It does not replay an ordinary effect or restore an old stream.
@@ -339,3 +348,13 @@ Malformed replies, invalid proofs, certified refusals, changed configuration
 and other transport failures remain terminal. Terminal diagnostics distinguish
 closed local reads, closed writes, readiness failures and expired inspection
 deadlines with fixed categories. They do not include error text or request data.
+
+An ordinary recipient challenge that reaches its original monotonic deadline
+closes all gates and connections before the service waits and reopens its
+requester state. Recovery retains the exact pending signed operation and sequence. It
+requires a fresh verified response before consuming an unfinished result. It
+cannot issue another ordinary operation or restore a consumed admission.
+Session, digest, intent and clock progression mismatches remain terminal even
+when the deadline has elapsed. A read-only challenge failure remains local to
+its connection, except when it checks the endpoint's own current permission.
+This recovery never extends the original consent or a previous stream.

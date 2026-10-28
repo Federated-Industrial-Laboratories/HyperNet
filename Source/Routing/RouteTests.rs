@@ -36,6 +36,7 @@ fn typed_voucher(
         digest,
     };
     let voucher = routes::Voucher {
+        baseline: None,
         relay: reference(165, relay, [81; 32]),
         destination: reference(165, destination, [82; 32]),
         sponsor: ed25519_dalek::SigningKey::from_bytes(&[83; 32])
@@ -393,6 +394,7 @@ fn readiness_fixture(
     let permission = route_io::Gate::new(start);
     let (stream, boundary) = route_io::Transport::new(stream, deadline);
     let session = Session {
+        exporter: [0; 32],
         stream: Box::new(stream),
         boundary,
         deadline,
@@ -681,6 +683,7 @@ async fn private_route_plain_session_progresses_while_authority_maintenance_is_d
     let slots = Arc::new(Semaphore::new(1));
     let slot = slots.clone().acquire_owned().await.unwrap();
     let session = Session {
+        exporter: [0; 32],
         stream: Box::new(stream),
         boundary,
         deadline,
@@ -2009,4 +2012,187 @@ fn private_route_parked_identity_never_reuses_forwarding_permission() {
     assert!(total_deadline(boot - limits.duration_ms, limits, 200000, 1000, boot).is_err());
     assert!(forwarding_limits(limits, boot).is_err());
     assert!(forwarding_limits(limits, boot + 2000).unwrap().duration_ms <= 2000);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn application_stream_nested_tls_authenticates_principal_and_drains_half_close() {
+    use crate::authority_domains::streams;
+    use crate::authority_proof::VersionRef;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (relay_certificate, endpoint_certificate) = certificates();
+    let service = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let destination = service.local_addr().unwrap();
+    let relay = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let relay_address = relay.local_addr().unwrap();
+    let limits = Limits {
+        bytes: 1024 * 1024,
+        duration_ms: 10000,
+        idle_ms: 2000,
+    };
+    let endpoint_id = endpoint_certificate.identity.service;
+    let acceptor = TlsAcceptor::from(
+        route_tls::server(
+            &endpoint_certificate.identity,
+            &endpoint_certificate.pem,
+            &endpoint_certificate.key,
+        )
+        .unwrap(),
+    );
+    let principal = ed25519_dalek::SigningKey::from_bytes(&[91; 32]);
+    let expected_principal = principal.verifying_key().to_bytes();
+    let service_task = tokio::spawn(async move {
+        let (socket, _) = service.accept().await.unwrap();
+        let mut session = endpoint_incoming(socket, acceptor, limits).await.unwrap();
+        let gate = route_io::Gate::new(session.deadline);
+        session
+            .boundary
+            .arm(gate.clone(), session.deadline)
+            .unwrap();
+        route_io::guarded_send(
+            &mut session.stream,
+            &protocol::endpoint_ready([1; 32], [2; 32], endpoint_id, 7).unwrap(),
+            &gate,
+            session.deadline,
+            limits.idle_ms,
+        )
+        .await
+        .unwrap();
+        route_io::guarded_send(
+            &mut session.stream,
+            &streams::protocol::challenge([1; 32], [2; 32], [92; 32], [93; 32]).unwrap(),
+            &gate,
+            session.deadline,
+            limits.idle_ms,
+        )
+        .await
+        .unwrap();
+        let signed = route_io::receive(&mut session.stream, wire::MAXIMUM)
+            .await
+            .unwrap();
+        let proof = streams::Proof::parse(&signed, [1; 32], [2; 32]).unwrap();
+        assert_eq!(proof.principal, expected_principal);
+        assert_eq!(proof.challenge, [93; 32]);
+        assert_eq!(proof.exporter, session.exporter);
+        let reference = VersionRef {
+            kind: 173,
+            id: proof.id().unwrap(),
+            generation: proof.generation,
+            digest: [96; 32],
+        };
+        route_io::guarded_send(
+            &mut session.stream,
+            &streams::protocol::accepted(&reference, &proof, [94; 32]).unwrap(),
+            &gate,
+            session.deadline,
+            limits.idle_ms,
+        )
+        .await
+        .unwrap();
+        let mut request = vec![];
+        session.stream.read_to_end(&mut request).await.unwrap();
+        assert_eq!(request, vec![7; 32768]);
+        for _ in 0..4 {
+            session.stream.write_all(&[8; 8192]).await.unwrap();
+            session.stream.flush().await.unwrap();
+        }
+        session.stream.shutdown().await.unwrap();
+    });
+    let relay_acceptor = TlsAcceptor::from(
+        route_tls::server(
+            &relay_certificate.identity,
+            &relay_certificate.pem,
+            &relay_certificate.key,
+        )
+        .unwrap(),
+    );
+    let relay_id = relay_certificate.identity.service;
+    let possession = ed25519_dalek::SigningKey::from_bytes(&[79; 32]);
+    let voucher = typed_voucher(relay_id, endpoint_id, possession.verifying_key().to_bytes());
+    let relay_task = tokio::spawn(async move {
+        let (socket, _) = relay.accept().await.unwrap();
+        let opened = ingress(socket, relay_acceptor, [1; 32], [2; 32], relay_id, limits)
+            .await
+            .unwrap();
+        let destination = TcpStream::connect(destination).await.unwrap();
+        let mut stream = opened.stream;
+        route_io::send(
+            &mut stream,
+            &protocol::ready(opened.binding, limits).unwrap(),
+        )
+        .await
+        .unwrap();
+        let _ = route_io::forward(stream, destination, limits).await;
+    });
+    let profile = Profile {
+        version: 1,
+        network: [1; 32],
+        incarnation: [2; 32],
+        relay_address,
+        relay: relay_certificate.identity,
+        destination: endpoint_certificate.identity,
+        domain: "Destination".into(),
+        relay_domain: "Relay".into(),
+        protocol: 7,
+        assurance: Assurance::Independent,
+        minimum_assurance: Assurance::Independent,
+        limits,
+        voucher: voucher.bytes,
+    };
+    tokio::task::spawn_blocking(move || {
+        use std::io::{Read, Write};
+        use std::net::Shutdown;
+        use std::os::unix::net::UnixStream;
+        let cancel = || false;
+        let deadline = crate::authority_challenge::boot_time_ms().unwrap() + 10000;
+        let mut session =
+            route_connector::Session::connect(&profile, &possession, deadline, &cancel).unwrap();
+        let mut proof = streams::Proof {
+            service: VersionRef {
+                kind: 172,
+                id: [92; 32],
+                generation: 1,
+                digest: [95; 32],
+            },
+            principal: principal.verifying_key().to_bytes(),
+            grant: VersionRef {
+                kind: 102,
+                id: [97; 32],
+                generation: 1,
+                digest: [98; 32],
+            },
+            protocol: "example.events/1".into(),
+            slot: 0,
+            generation: 1,
+            nonce: [0; 32],
+            challenge: [0; 32],
+            exporter: [0; 32],
+            limits,
+            expires: 999999999,
+            envelope: vec![],
+        };
+        let accepted = session
+            .authenticate_application([1; 32], [2; 32], &mut proof, [94; 32], &principal)
+            .unwrap();
+        assert_eq!(accepted.id, proof.id().unwrap());
+        let (local, mut caller) = UnixStream::pair().unwrap();
+        caller
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        caller
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let client = std::thread::spawn(move || {
+            caller.write_all(&[7; 32768]).unwrap();
+            caller.shutdown(Shutdown::Write).unwrap();
+            let mut reply = vec![];
+            caller.read_to_end(&mut reply).unwrap();
+            assert_eq!(reply, vec![8; 32768]);
+        });
+        session.forward_application(local, limits.bytes).unwrap();
+        client.join().unwrap();
+    })
+    .await
+    .unwrap();
+    service_task.await.unwrap();
+    relay_task.await.unwrap();
 }

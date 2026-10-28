@@ -178,7 +178,7 @@ pub fn endpoint_ready(
         network != [0; 32]
             && incarnation != [0; 32]
             && service != [0; 32]
-            && (1..=6).contains(&protocol),
+            && (1..=7).contains(&protocol),
         "invalid final service readiness identity"
     );
     encode(

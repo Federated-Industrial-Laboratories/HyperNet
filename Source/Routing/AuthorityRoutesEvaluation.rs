@@ -30,7 +30,7 @@ impl Context<'_> {
                 let mut permitted = false;
                 for action in actions {
                     let action = action.uint()?;
-                    if !matches!(action, 0 | 1 | 10 | 15 | 16 | 18 | 19) {
+                    if !matches!(action, 0 | 1 | 10 | 15 | 16 | 18 | 19 | 29 | 30) {
                         continue;
                     }
                     for scope in scopes {
@@ -504,7 +504,36 @@ pub fn evaluate(
                         "relay possession key is an application identity"
                     );
                 }
+                let baseline = if let Some(previous) = state.records.get(&(166, *id)) {
+                    let previous = previous.clone();
+                    c.select(166, *id)?;
+                    let old = Voucher::parse(&previous.payload)?;
+                    if replay {
+                        old.baseline
+                    } else {
+                        ensure!(
+                            at >= old.expires
+                                && old.sponsor == intent.requester
+                                && old.possession == *possession
+                                && old.relay.id == *relay
+                                && old.destination.id == *destination
+                                && old.action == *action
+                                && old.scope == *scope
+                                && old.grant.id == grant.id,
+                            "voucher renewal changes ownership or overlaps its old admission"
+                        );
+                        let usage = if state.records.contains_key(&(167, *id)) {
+                            Some(Usage::parse(&c.select(167, *id)?.payload)?)
+                        } else {
+                            None
+                        };
+                        Some(usage.map_or((0, 0), |u| (u.connections, u.bytes)))
+                    }
+                } else {
+                    None
+                };
                 let voucher = Voucher {
+                    baseline,
                     relay: rr.reference,
                     destination: dr.reference,
                     sponsor: intent.requester,
@@ -525,11 +554,25 @@ pub fn evaluate(
                         "route voucher has another creation"
                     );
                 } else {
-                    ensure!(
-                        !state.records.contains_key(&(166, *id)),
-                        "route voucher already exists"
-                    );
                     changed = Some(Record::next(state, 166, *id, voucher.value())?);
+                }
+            }
+            Command::RenewContext { voucher } => {
+                let current = c.select(166, voucher.id)?;
+                ensure!(
+                    current.reference == *voucher,
+                    "voucher renewal context generation changed"
+                );
+                let v = Voucher::parse(&current.payload)?;
+                ensure!(
+                    intent.requester == v.sponsor,
+                    "voucher renewal belongs to another sponsor"
+                );
+                c.capability(grant(operation)?, intent.requester, v.action, v.scope)?;
+                c.service(v.relay.id, true)?;
+                c.service(v.destination.id, true)?;
+                if state.records.contains_key(&(167, voucher.id)) {
+                    c.select(167, voucher.id)?;
                 }
             }
             Command::VoucherContext { voucher } | Command::Permit { voucher, .. } => {
@@ -572,8 +615,12 @@ pub fn evaluate(
                             .checked_add(charge)
                             .context("route budget overflow")?;
                         ensure!(
-                            connections <= v.connections
-                                && bytes <= v.bytes
+                            connections
+                                .checked_sub(v.baseline.map_or(0, |b| b.0))
+                                .is_some_and(|n| n <= v.connections)
+                                && bytes
+                                    .checked_sub(v.baseline.map_or(0, |b| b.1))
+                                    .is_some_and(|n| n <= v.bytes)
                                 && prior.as_ref().is_none_or(|u| u.connection != *connection),
                             "route budget exhausted or connection reused"
                         );

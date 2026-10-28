@@ -56,6 +56,7 @@ pub fn record_reference(bytes: &[u8]) -> Result<VersionRef> {
         digest: wire::digest(bytes),
     })
 }
+#[cfg(test)]
 fn prefix(
     value: &V,
     kind: u64,
@@ -81,12 +82,30 @@ pub struct Registration {
     pub owner: Key,
     pub grant: VersionRef,
     pub validity: (u64, u64),
+    #[cfg(test)]
+    pub renewable: bool,
     pub reference: VersionRef,
 }
 impl Registration {
     pub fn parse(bytes: &[u8], network: Digest, incarnation: Digest) -> Result<Self> {
         let value = wire::decode(bytes)?;
-        let f = prefix(&value, 127, 11, network, incarnation)?;
+        let f = value.array(11)?;
+        ensure!(
+            f[0].uint()? == 127
+                && matches!(f[1].uint()?, 1 | 2)
+                && f[2].fixed::<32>()? == network
+                && f[3].fixed::<32>()? == incarnation,
+            "application admission context differs"
+        );
+        let renewable = f[1].uint()? == 2;
+        ensure!(
+            if renewable {
+                f[4].uint()? > 1 && f[5].fixed::<32>().is_ok()
+            } else {
+                f[4].uint()? == 1 && f[5] == V::Null
+            },
+            "application admission generation differs"
+        );
         let application = f[6].fixed()?;
         let owner = f[7].fixed()?;
         wire::valid_key(&application)?;
@@ -103,6 +122,8 @@ impl Registration {
             owner,
             grant,
             validity,
+            #[cfg(test)]
+            renewable,
             reference: record_reference(bytes)?,
         })
     }
@@ -202,6 +223,69 @@ impl Acceptance {
         })
     }
 }
+/// Fresh dual consent extends only the validity of the retained immutable rights template.
+#[derive(Clone, Debug)]
+pub struct Renewal {
+    pub admission: VersionRef,
+    pub owner: Key,
+    pub grant: VersionRef,
+    pub validity: (u64, u64),
+    pub acceptance_validity: (u64, u64),
+}
+impl Renewal {
+    pub fn parse(
+        bytes: &[u8],
+        network: Digest,
+        incarnation: Digest,
+        accepted: bool,
+    ) -> Result<Self> {
+        ensure!(bytes.len() <= 1024, "application renewal exceeds its bound");
+        let (payload, signatures) = wire::envelope(bytes, 2)?;
+        let value = wire::decode(&payload)?;
+        let f = value.array(11)?;
+        ensure!(
+            f[0].uint()? == 200
+                && f[1].uint()? == 2
+                && f[2].text()? == "AuthorityApplicationRenewal"
+                && f[3].fixed::<32>()? == network
+                && f[4].fixed::<32>()? == incarnation,
+            "application renewal context differs"
+        );
+        let admission = version(&f[5])?;
+        let owner = f[6].fixed()?;
+        let grant = version(&f[7])?;
+        let validity = span(&f[8])?;
+        id(&f[9])?;
+        let acceptance_validity = span(&f[10])?;
+        ensure!(
+            admission.kind == 127
+                && grant.kind == 102
+                && admission.id != owner
+                && validity.1 - validity.0 <= 604800000
+                && acceptance_validity.1 - acceptance_validity.0 <= 86400000
+                && acceptance_validity.0 >= validity.0
+                && acceptance_validity.1 <= validity.1,
+            "application renewal restrictions differ"
+        );
+        wire::valid_key(&owner)?;
+        wire::valid_key(&admission.id)?;
+        ensure!(
+            signatures.len() == if accepted { 2 } else { 1 }
+                && signatures.iter().any(|(key, _)| *key == owner)
+                && signatures
+                    .iter()
+                    .all(|(key, _)| *key == owner || accepted && *key == admission.id),
+            "application renewal lacks exact owner and application possession"
+        );
+        Ok(Self {
+            admission,
+            owner,
+            grant,
+            validity,
+            acceptance_validity,
+        })
+    }
+}
 #[derive(Clone, Debug)]
 pub struct Point {
     pub epoch: u64,
@@ -232,6 +316,11 @@ pub enum Operation {
         acceptance: Acceptance,
         snapshot: Snapshot,
     },
+    Renew {
+        previous: Vec<u8>,
+        consent: Renewal,
+        snapshot: Snapshot,
+    },
     Get {
         application: Key,
         minimum: Vec<VersionRef>,
@@ -251,6 +340,7 @@ impl Operation {
             action,
             "AuthorityDelegationContext"
                 | "AuthorityApplicationRegister"
+                | "AuthorityApplicationRenew"
                 | "AuthorityApplicationGet"
                 | "AuthorityApplicationList"
                 | "AuthorityApplicationWithdraw"
@@ -266,7 +356,12 @@ impl Operation {
         ensure!(
             f.len() >= 3
                 && f[0].uint()? == 200
-                && f[1].uint()? == 1
+                && f[1].uint()?
+                    == if intent.action == "AuthorityApplicationRenew" {
+                        2
+                    } else {
+                        1
+                    }
                 && f[2].text()? == intent.action,
             "application parameters differ from action"
         );
@@ -307,6 +402,27 @@ impl Operation {
                 Self::Register {
                     parent,
                     acceptance,
+                    snapshot: Snapshot::parse(&f[5])?,
+                }
+            }
+            "AuthorityApplicationRenew" => {
+                let f = value.array(6)?;
+                let previous = f[3].bytes()?.to_vec();
+                let old = Registration::parse(&previous, intent.network, intent.incarnation)?;
+                let consent =
+                    Renewal::parse(f[4].bytes()?, intent.network, intent.incarnation, true)?;
+                ensure!(
+                    old.reference == consent.admission
+                        && old.owner == consent.owner
+                        && old.grant == consent.grant
+                        && old.application == intent.resource
+                        && old.owner == intent.requester
+                        && consent.validity.1 > old.validity.1,
+                    "renewal changes identity, rights or does not extend validity"
+                );
+                Self::Renew {
+                    previous,
+                    consent,
                     snapshot: Snapshot::parse(&f[5])?,
                 }
             }
@@ -364,7 +480,9 @@ impl Operation {
     }
     pub fn snapshot(&self) -> Option<&Snapshot> {
         match self {
-            Self::Register { snapshot, .. } | Self::Withdraw { snapshot, .. } => Some(snapshot),
+            Self::Register { snapshot, .. }
+            | Self::Renew { snapshot, .. }
+            | Self::Withdraw { snapshot, .. } => Some(snapshot),
             _ => None,
         }
     }
@@ -376,6 +494,29 @@ impl Operation {
         }
     }
     pub fn derive(&self, intent: &Intent) -> Result<Option<Vec<u8>>> {
+        if let Self::Renew {
+            previous,
+            consent,
+            snapshot,
+        } = self
+        {
+            let mut f = wire::decode(previous)?.array(11)?.to_vec();
+            f[1] = V::Uint(2);
+            f[4] = V::Uint(
+                consent
+                    .admission
+                    .generation
+                    .checked_add(1)
+                    .context("application generation exhausted")?,
+            );
+            f[5] = b(&consent.admission.digest);
+            f[9] = a(vec![
+                V::Uint(consent.validity.0),
+                V::Uint(consent.validity.1),
+            ]);
+            f[10] = snapshot.value.clone();
+            return Ok(Some(wire::encode(&a(f))?));
+        }
         let mut fields = vec![
             V::Uint(if matches!(self, Self::Register { .. }) {
                 127
@@ -768,6 +909,113 @@ impl Operation {
                 decision.dependencies.push(created);
                 decision.finish(&intent.action, vec![b(&bytes)], 64)?;
             }
+            Self::Renew {
+                previous, consent, ..
+            } => {
+                let bytes = self.derive(intent)?.context("renewal record missing")?;
+                let created = record_reference(&bytes)?;
+                decision.record = Some(bytes.clone());
+                decision.created = Some(created.clone());
+                if replay {
+                    if index
+                        .get(&created.index())
+                        .is_none_or(|(_, r)| *r != created)
+                    {
+                        decision.refuse(12);
+                    }
+                    decision.dependencies = intent.expected.clone();
+                } else {
+                    if index
+                        .get(&consent.admission.index())
+                        .is_none_or(|(r, _)| *r != previous.as_slice())
+                    {
+                        decision.refuse(12);
+                    }
+                    if index.contains_key(&(128, consent.admission.id)) {
+                        decision.refuse(3);
+                    }
+                    if !current(at, consent.validity) || !current(at, consent.acceptance_validity) {
+                        decision.refuse(7);
+                    }
+                    let g = Governance::parse(intent.network, intent.incarnation, records)?;
+                    let grant = wire::decode(g.record_bytes(102, consent.grant.id)?)?;
+                    let f = grant.array(17)?;
+                    let parent = version(&f[13])?;
+                    match owner_capability(&g, parent.id, consent.owner, at) {
+                        Ok(c) => {
+                            decision.dependencies = c.dependencies;
+                            decision.expires_ms = c.expires_ms;
+                        }
+                        Err(_) => {
+                            decision.refuse(membership::capability_failure(&g, parent.id, at))
+                        }
+                    }
+                    let mut prospective = records
+                        .iter()
+                        .filter(|r| record_reference(r).is_ok_and(|v| v.index() != created.index()))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    prospective.push(bytes.clone());
+                    membership::sort_records(&mut prospective)?;
+                    match Governance::parse(intent.network, intent.incarnation, &prospective) {
+                        Ok(g) => {
+                            let actions = f[10]
+                                .list(32)?
+                                .iter()
+                                .map(V::uint)
+                                .collect::<Result<Vec<_>>>()?;
+                            for scope in f[11].list(64)? {
+                                let scope = scope.array(2)?;
+                                match g.current_capability(
+                                    consent.grant.id,
+                                    &Requirement {
+                                        subject: consent.admission.id,
+                                        actions: &actions,
+                                        scope: (scope[0].uint()?, scope[1].fixed()?),
+                                        namespace: None,
+                                        usage: [0, 1, 0, 1],
+                                        evaluated_at_ms: at,
+                                        expected: &[],
+                                    },
+                                ) {
+                                    Ok(c) => {
+                                        decision.dependencies.extend(
+                                            c.dependencies
+                                                .into_iter()
+                                                .filter(|v| v.index() != created.index()),
+                                        );
+                                        decision.expires_ms = decision.expires_ms.min(c.expires_ms);
+                                    }
+                                    Err(_) => decision.refuse(membership::capability_failure(
+                                        &g,
+                                        consent.grant.id,
+                                        at,
+                                    )),
+                                }
+                            }
+                        }
+                        Err(_) => decision.refuse(4),
+                    }
+                    decision.dependencies.push(consent.admission.clone());
+                    decision.dependencies.sort_by_key(VersionRef::index);
+                    decision.dependencies.dedup();
+                    if exact && decision.dependencies != intent.expected {
+                        decision.refuse(12);
+                    }
+                    decision.expires_ms = decision
+                        .expires_ms
+                        .min(consent.acceptance_validity.1)
+                        .min(consent.validity.1);
+                }
+                decision.dependencies.push(created);
+                let dependencies = decision.dependencies.clone();
+                decision.dependencies.retain(|v| {
+                    v.index() != consent.admission.index()
+                        || v == decision.created.as_ref().unwrap()
+                });
+                decision.finish(&intent.action, vec![b(&bytes)], 64)?;
+                decision.dependencies = dependencies;
+            }
             Self::Get {
                 application,
                 minimum,
@@ -941,8 +1189,9 @@ pub fn validate_lifecycle_result(intent: &Intent, value: &V) -> Result<Vec<Versi
                     && version(&g[13])?.kind == 102
                     && child.depth == 0
                     && !child.actions.contains(&11)
-                    && admission.validity.0 >= child.validity.0
-                    && admission.validity.1 <= child.validity.1,
+                    && (admission.renewable
+                        || admission.validity.0 >= child.validity.0
+                            && admission.validity.1 <= child.validity.1),
                 "application metadata grant differs"
             );
             Snapshot::parse(&g[16])?;
@@ -1015,4 +1264,32 @@ pub fn validate_lifecycle_result(intent: &Intent, value: &V) -> Result<Vec<Versi
         "application result versions or size differ"
     );
     Ok(declared)
+}
+
+#[cfg(test)]
+mod renewal_vectors {
+    use super::*;
+    #[test]
+    fn published_dual_consent_vector_binds_exact_predecessor_and_parties() {
+        let value: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../Documentation/ApplicationRenewalVector.json"
+        ))
+        .unwrap();
+        let bytes = |name: &str| hex::decode(value[name].as_str().unwrap()).unwrap();
+        let network: Digest = bytes("network").try_into().unwrap();
+        let incarnation: Digest = bytes("incarnation").try_into().unwrap();
+        let previous =
+            Registration::parse(&bytes("previousAdmission"), network, incarnation).unwrap();
+        let envelope = bytes("renewalConsent");
+        let renewal = Renewal::parse(&envelope, network, incarnation, true).unwrap();
+        assert_eq!(renewal.admission, previous.reference);
+        assert_eq!(renewal.owner, previous.owner);
+        assert_eq!(renewal.grant, previous.grant);
+        assert!(Renewal::parse(&envelope, network, incarnation, false).is_err());
+        assert!(Renewal::parse(&envelope, [9; 32], incarnation, true).is_err());
+        let mut changed = envelope;
+        let last = changed.len() - 1;
+        changed[last] ^= 1;
+        assert!(Renewal::parse(&changed, network, incarnation, true).is_err());
+    }
 }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Bounded requested checkpoint transfer; single shares never publish remote state.
+use super::super::archive::History;
 use super::super::checkpoint;
 use super::peer::InputAnchor;
 use super::*;
@@ -28,7 +29,7 @@ pub(super) struct Transfer {
     id: Digest,
     state: Vec<u8>,
     total: Option<usize>,
-    leaves: Vec<Digest>,
+    leaves: super::super::archive::Staged,
     pending: Message,
     deadline: Instant,
 }
@@ -153,7 +154,7 @@ impl Driver {
                         id,
                         state: vec![],
                         total: None,
-                        leaves: self.engine.archive.leaves().to_vec(),
+                        leaves: self.engine.archive.stage()?,
                         pending,
                         deadline: Instant::now() + TRANSFER_LIFETIME,
                     },
@@ -196,7 +197,7 @@ impl Driver {
                         id,
                         state: vec![],
                         total: None,
-                        leaves: self.engine.archive.leaves().to_vec(),
+                        leaves: self.engine.archive.stage()?,
                         pending,
                         deadline,
                     },
@@ -248,20 +249,15 @@ impl Driver {
                     return Ok(());
                 }
                 let served = &self.served_checkpoints[&sender];
-                let leaves = self
-                    .engine
-                    .archive
-                    .leaves()
-                    .get(..served.height)
-                    .context("Pinned checkpoint history is unavailable")?;
+                let leaves = &self.engine.archive;
                 ensure!(
-                    super::super::archive::root(leaves) == served.root,
+                    leaves.root_at(served.height)? == served.root,
                     "Pinned checkpoint history changed"
                 );
                 let (index, count) = (usize::try_from(index)?, usize::try_from(count)?);
                 ensure!(
                     (1..=512).contains(&count)
-                        && index.checked_add(count).is_some_and(|n| n <= leaves.len()),
+                        && index.checked_add(count).is_some_and(|n| n <= served.height),
                     "Archive request index or count differs"
                 );
                 self.send(
@@ -270,7 +266,7 @@ impl Driver {
                         id,
                         digest,
                         index as u64,
-                        leaves[index..index + count].to_vec(),
+                        leaves.range(index, count)?,
                     ),
                 )?;
             }
@@ -282,12 +278,16 @@ impl Driver {
                 ensure!(
                     id == transfer.id
                         && digest == transfer.digest
-                        && index as usize == transfer.leaves.len()
+                        && index as usize == transfer.leaves.archive.len()
                         && matches!(transfer.pending,Message::ArchiveRequest(i,d,n,count) if i==id && d==digest && n==index && count==leaves.len() as u64)
-                        && transfer.leaves.len() + leaves.len() <= transfer.height,
+                        && transfer.leaves.archive.len() + leaves.len() <= transfer.height,
                     "Archive response differs from exact pending range"
                 );
-                transfer.leaves.extend(leaves);
+                transfer.leaves.archive.append(
+                    index,
+                    transfer.leaves.archive.tree_root(),
+                    &leaves,
+                )?;
                 self.transfer_progress(sender)?;
             }
             _ => anyhow::bail!("Unexpected checkpoint transport message"),
@@ -329,11 +329,11 @@ impl Driver {
             "Served checkpoint capacity exhausted"
         );
         let state = self.engine.checkpoint_state(digest)?.to_vec();
-        let leaves = self.engine.checkpoint_leaves(digest)?;
+        let height = self.engine.checkpoint_leaves(digest)?;
         ensure!(
             state.len() <= checkpoint::MAX_STATE
                 && wire::digest(&state) == *checkpoint.state()
-                && super::super::archive::root(leaves) == *checkpoint.head().root(),
+                && self.engine.archive.root_at(height)? == *checkpoint.head().root(),
             "Served checkpoint contents differ"
         );
         // The archive is append-only; retain its certified prefix identity rather
@@ -447,12 +447,12 @@ impl Driver {
                 self.application.validate_checkpoint(&t.state, c.height())?;
                 let refs = self.application.retained_inputs(&t.state)?;
                 self.engine.reserve_checkpoint_inputs(t.id, &refs)?;
-                if t.leaves.len() < t.height {
-                    let count = (t.height - t.leaves.len()).min(512);
+                if t.leaves.archive.len() < t.height {
+                    let count = (t.height - t.leaves.archive.len()).min(512);
                     t.pending = Message::ArchiveRequest(
                         t.id,
                         t.digest,
-                        t.leaves.len() as u64,
+                        t.leaves.archive.len() as u64,
                         count as u64,
                     );
                 } else {
@@ -472,7 +472,7 @@ impl Driver {
                             self.engine.install_checkpoint_with_inputs(
                                 &t.proof,
                                 &t.state,
-                                &t.leaves,
+                                &t.leaves.archive,
                                 &refs,
                                 |state, height| application.validate_checkpoint(state, height),
                                 expired,

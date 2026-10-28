@@ -131,7 +131,7 @@ impl Record {
         };
         let f = decoded.array(arity)?;
         ensure!(
-            f[1].uint()? == 1
+            (f[1].uint()? == 1 || kind == 127 && f[1].uint()? == 2)
                 && id(&f[2])? == network
                 && id(&f[3])? == incarnation
                 && f[4].uint()? > 0,
@@ -242,6 +242,7 @@ impl Record {
                 let span = validity(&f[9])?;
                 ensure!(
                     application != owner
+                        && (f[1].uint()? == 1 || f[4].uint()? > 1)
                         && reference(&f[8])?.kind == 102
                         && span.1 - span.0 <= 7 * 24 * 60 * 60 * 1000,
                     "invalid application admission"
@@ -378,7 +379,9 @@ impl Record {
             "membership admission or grant revocation requires a snapshot"
         );
         ensure!(
-            !matches!(kind, 127 | 128 | 130 | 131) || f[4].uint()? == 1,
+            !matches!(kind, 127 | 128 | 130 | 131)
+                || f[4].uint()? == 1
+                || kind == 127 && f[1].uint()? == 2,
             "application records are create-only"
         );
         ensure!(
@@ -493,8 +496,12 @@ impl Governance {
                     && parent.fields[8].fixed::<32>()? == owner
                     && grant.fields[14].uint()? == 0
                     && !actions(&grant.fields[10])?.contains(&11)
-                    && span.0 >= grant_span.0
-                    && span.1 <= grant_span.1,
+                    && (if application.fields[1].uint()? == 2 {
+                        let parent_span = validity(&parent.fields[12])?;
+                        span.0 >= parent_span.0 && span.1 <= parent_span.1
+                    } else {
+                        span.0 >= grant_span.0 && span.1 <= grant_span.1
+                    }),
                 "application differs from its exact accepted grant"
             );
         }
@@ -678,7 +685,15 @@ impl Governance {
             let tsc = scopes(&ts[10], self.network)?;
             let gl = limits(&g[15])?;
             let tl = limits(&ts[12])?;
-            let span = validity(&g[12])?;
+            let span = if child.is_none()
+                && let Some(application) = self.records.get(&(127, request.subject))
+                && application.fields[1].uint()? == 2
+                && reference(&application.fields[8])? == current.reference
+            {
+                validity(&application.fields[9])?
+            } else {
+                validity(&g[12])?
+            };
             if tier.reference == pinned_tier {
                 ensure!(
                     ga.iter().all(|a| ta.contains(a))
@@ -707,7 +722,14 @@ impl Governance {
             let admission = self.admitted(subject, request.evaluated_at_ms, &mut dependencies)?;
             if let Some(child) = child {
                 let c = &child.fields;
-                let cv = validity(&c[12])?;
+                let cv = if let Some(application) = self.records.get(&(127, request.subject))
+                    && application.fields[1].uint()? == 2
+                    && reference(&application.fields[8])? == child.reference
+                {
+                    validity(&application.fields[9])?
+                } else {
+                    validity(&c[12])?
+                };
                 ensure!(
                     c[7].fixed::<32>()? == subject
                         && ga.contains(&11)

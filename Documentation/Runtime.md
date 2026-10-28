@@ -10,10 +10,12 @@ results. Setup does not create membership or appoint voters. The separate
 identities, certificates, clock inputs and strict peer configurations. An
 authority deployment exposes no reader endpoint.
 
-The supported installed profile is Linux, rootless Podman, delegated cgroup v2,
+The supported installed profile is Linux, rootless Podman, `slirp4netns`, delegated cgroup v2,
 Landlock ABI6 or later and seccomp. It uses explicit IPv4 addresses and one owned
 NAT bridge per deployment. IPv6 installation and SELinux-enabled operation require
 platform qualification. Mandatory confinement failures stop activation.
+Outbound service helpers require `slirp4netns` in `/usr/bin` or `/bin` on the host.
+The OCI image does not supply this host networking dependency.
 
 ## Inputs and setup
 

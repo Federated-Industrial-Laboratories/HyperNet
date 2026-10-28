@@ -17,6 +17,33 @@ pub fn remaining(deadline: u64) -> Result<u64> {
     ensure!(now < deadline, "original inspection deadline expired");
     Ok(deadline - now)
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ControlClosed {
+    Read,
+    Write,
+}
+impl std::fmt::Display for ControlClosed {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str(match self {
+            Self::Read => "private control read closed",
+            Self::Write => "private control write closed",
+        })
+    }
+}
+impl std::error::Error for ControlClosed {}
+
+pub(crate) fn transport_closed(error: &anyhow::Error) -> bool {
+    error.is::<ControlClosed>()
+        || error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+            )
+        })
+}
 pub struct LocalControl {
     directory: File,
     name: CString,
@@ -187,7 +214,7 @@ fn write_all(stream: &mut UnixStream, mut bytes: &[u8], deadline: u64) -> Result
     while !bytes.is_empty() {
         remaining(deadline)?;
         match stream.write(bytes) {
-            Ok(0) => bail!("private control write closed"),
+            Ok(0) => return Err(ControlClosed::Write.into()),
             Ok(n) => bytes = &bytes[n..],
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 ready(stream, libc::POLLOUT, deadline)?
@@ -202,7 +229,7 @@ fn read_all(stream: &mut UnixStream, mut bytes: &mut [u8], deadline: u64) -> Res
     while !bytes.is_empty() {
         remaining(deadline)?;
         match stream.read(bytes) {
-            Ok(0) => bail!("private control read closed"),
+            Ok(0) => return Err(ControlClosed::Read.into()),
             Ok(n) => bytes = &mut bytes[n..],
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 ready(stream, libc::POLLIN, deadline)?
@@ -627,6 +654,161 @@ mod tests {
     use super::*;
     use std::time::Duration;
     #[test]
+    fn closed_control_socket_preserves_typed_failure_without_replaying_io() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client.set_nonblocking(true).unwrap();
+        drop(server);
+        let error = read_all(&mut client, &mut [0; 4], boot_time_ms().unwrap() + 1000).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<ControlClosed>(),
+            Some(&ControlClosed::Read)
+        );
+        assert!(transport_closed(&error));
+        assert!(transport_closed(
+            &write_all(&mut client, b"request", boot_time_ms().unwrap() + 1000).unwrap_err()
+        ));
+        for error in [
+            anyhow::anyhow!("private control read closed"),
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied).into(),
+            std::io::Error::from(std::io::ErrorKind::TimedOut).into(),
+        ] {
+            assert!(!transport_closed(&error));
+        }
+    }
+    #[test]
+    fn fresh_read_capacity_reuses_exact_packet_and_original_deadline() {
+        use std::{
+            os::unix::{fs::PermissionsExt, net::UnixListener},
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering},
+            },
+        };
+        for terminal in [true, false] {
+            let fixture = crate::authority_proof::tests::Fixture::new(10000);
+            let prefix = fixture.descriptor.genesis().unwrap();
+            let key = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
+            let wall = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            let boot = boot_time_ms().unwrap();
+            let signed = crate::authority_read::Request::sign(
+                fixture.descriptor.scope(),
+                &key,
+                key.verifying_key().to_bytes(),
+                [77; 32],
+                0,
+                crate::authority_read::Query::PolicyContext,
+            )
+            .unwrap();
+            let health = ClockHealth::new(wall, boot, boot + 1000, 1).unwrap();
+            let challenge = crate::authority_challenge::Session::new()
+                .unwrap()
+                .issue_read(&signed, &key, [77; 32], 5000, health.frozen())
+                .unwrap();
+            let id = crate::authority_read::read_id(&signed, &challenge).unwrap();
+            let expected = wire::encode(&a(vec![
+                V::Uint(41),
+                V::Uint(1),
+                prefix.scope().value(),
+                V::Uint(6),
+                b(&wire::encode(&a(vec![b(&signed), b(&challenge)])).unwrap()),
+            ]))
+            .unwrap();
+            let path = std::env::temp_dir().join(format!(
+                "FR{}",
+                hex::encode(crate::route_protocol::random().unwrap())[..12].to_owned()
+            ));
+            files::create_directory(&path).unwrap();
+            let socket = path.join("Control.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let scope = prefix.scope().value();
+            let done = Arc::new(AtomicBool::new(false));
+            let stopped = done.clone();
+            let server = std::thread::spawn(move || {
+                let mut count = 0;
+                while !stopped.load(Ordering::Relaxed) {
+                    let (mut stream, _) = match listener.accept() {
+                        Ok(v) => v,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(1));
+                            continue;
+                        }
+                        Err(e) => panic!("{e}"),
+                    };
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(1)))
+                        .unwrap();
+                    let mut size = [0; 4];
+                    stream.read_exact(&mut size).unwrap();
+                    let size = u32::from_be_bytes(size) as usize;
+                    assert!(size <= wire::MAXIMUM);
+                    let mut received = vec![0; size];
+                    stream.read_exact(&mut received).unwrap();
+                    assert_eq!(
+                        received, expected,
+                        "capacity must not mint another request or challenge"
+                    );
+                    count += 1;
+                    let code = if terminal && count == 3 { 1 } else { 2 };
+                    let reply = wire::encode(&a(vec![
+                        V::Uint(62),
+                        V::Uint(1),
+                        scope.clone(),
+                        V::Uint(2),
+                        V::Uint(code),
+                        b(&id),
+                        V::Null,
+                        V::Null,
+                        V::Null,
+                        a(vec![]),
+                    ]))
+                    .unwrap();
+                    if stream
+                        .write_all(&(reply.len() as u32).to_be_bytes())
+                        .and_then(|()| stream.write_all(&reply))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                count
+            });
+            let start = boot_time_ms().unwrap();
+            let mut clock = || Ok(ClockHealth::new(wall, boot, boot + 1000, 1).unwrap());
+
+            let error = exchange_read(
+                &fixture.descriptor,
+                &signed,
+                &challenge,
+                start + 120,
+                &socket,
+                &prefix,
+                None,
+                &mut clock,
+            )
+            .err()
+            .expect("unavailability cannot become authority");
+            let elapsed = boot_time_ms().unwrap() - start;
+            done.store(true, Ordering::Relaxed);
+            let count = server.join().unwrap();
+            assert_eq!(
+                error.downcast_ref::<FreshReadUnavailable>().unwrap().code,
+                if terminal { 1 } else { 2 }
+            );
+            if terminal {
+                assert_eq!(count, 3);
+            } else {
+                assert!(count >= 2);
+                assert!((120..1000).contains(&elapsed));
+            }
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+    #[test]
     fn overtaken_history_requires_exact_unavailable_reply() {
         let fixture = crate::authority_proof::tests::Fixture::new(10000);
         let prefix = fixture.descriptor.genesis().unwrap();
@@ -742,10 +924,16 @@ mod tests {
 }
 
 #[derive(Debug)]
-pub struct FreshReadUnavailable;
+pub struct FreshReadUnavailable {
+    pub code: u64,
+}
 impl std::fmt::Display for FreshReadUnavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("fresh authority quorum is unavailable within the original challenge")
+        write!(
+            f,
+            "fresh authority read unavailable with code {} within the original challenge",
+            self.code
+        )
     }
 }
 impl std::error::Error for FreshReadUnavailable {}
@@ -772,7 +960,9 @@ pub fn exchange_read(
         ]))
     };
     let payload = wire::encode(&a(vec![b(request), b(challenge)]))?;
-    let mut bytes = control.exchange(&query(6, &payload)?, deadline)?;
+    let submission = query(6, &payload)?;
+    let poll = query(7, &id)?;
+    let mut bytes = control.exchange(&submission, deadline)?;
     let reply = loop {
         let value = wire::decode(&bytes)?;
         let f = record(&value, 62, 10)?;
@@ -781,12 +971,13 @@ pub fn exchange_read(
             "fresh local reply scope or identity differs"
         );
         f[9].array(0)?;
-        match f[3].uint()? {
+        let busy = match f[3].uint()? {
             0 => {
                 ensure!(f[4].uint()? == 0, "fresh pending code differs");
                 f[6].null()?;
                 f[7].null()?;
                 f[8].null()?;
+                false
             }
             1 => {
                 ensure!(f[4].uint()? == 0, "fresh completion code differs");
@@ -804,13 +995,30 @@ pub fn exchange_read(
                 f[6].null()?;
                 f[7].null()?;
                 f[8].null()?;
-                return Err(FreshReadUnavailable.into());
+                let code = f[4].uint()?;
+                if code == 1 {
+                    return Err(FreshReadUnavailable { code }.into());
+                }
+                true
             }
             _ => anyhow::bail!("fresh local request invalid"),
-        }
+        };
         clock()?.observe()?;
-        std::thread::sleep(Duration::from_millis(remaining(deadline)?.min(25)));
-        bytes = control.exchange(&query(7, &id)?, deadline)?;
+        let bounded = |error: anyhow::Error| {
+            if busy && remaining(deadline).is_err() {
+                error.context(FreshReadUnavailable { code: 2 })
+            } else {
+                error
+            }
+        };
+        std::thread::sleep(Duration::from_millis(
+            remaining(deadline).map_err(bounded)?.min(25),
+        ));
+        // Capacity is not a refusal or a new operation. Re-submit only these exact
+        // read/challenge bytes; an admitted collection resumes its original identity.
+        bytes = control
+            .exchange(if busy { &submission } else { &poll }, deadline)
+            .map_err(bounded)?;
     };
     let history = HistoryEvidence::fetch(&control, retained, head, &reply.node, deadline)?;
     remaining(deadline)?;

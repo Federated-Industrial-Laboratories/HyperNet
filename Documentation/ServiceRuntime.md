@@ -62,6 +62,36 @@ directory is mounted; no authority signer key or replica journal is available
 to the service. The signed clock witness has its own read-only mount.
 The clock directory must contain `ClockHealth.cbor` directly.
 
+### Authority on another machine
+
+All installed service roles can use Suite's generic authority connector. Prepare
+a dedicated joined network profile and retain an approved protocol 1 authority
+route. Run the connector under the same native account that manages the service:
+
+```sh
+HyperNetSuite network authority-connector \
+  --profile /Private/AuthorityClient.json \
+  --ipc-directory /Private/AuthorityConnector
+```
+
+In `runtime services setup`, replace `--authority-directory` with
+`--authority-connector-directory /Private/AuthorityConnector/Ingress`. Select
+exactly one authority source. Only the mapped `Ingress` directory enters the
+container; the connector's profile, transport keys and native account remain
+outside it. Use a separate profile for another long-running application companion.
+
+The version 2 local service profile pins the network, incarnation, accepted
+bootstrap digest and public route digest. Setup and startup verify canonical
+binding bytes and subordinate ownership. Changing the target requires new local
+consent. An explicit same-target voucher update preserves the public binding.
+
+The connector transports existing signed requests and bounded replies through
+HyperNet. It does not provide membership, sign for the service, reset journals,
+or extend request deadlines. The service retains quorum verification and its own
+signed local clock. Inspect connector state with Suite's
+`network authority-connector-status --directory /Private/AuthorityConnector`.
+An unavailable route refuses requests without a direct connection fallback.
+
 ## Activate and supervise
 
 The deployment must already have current network admission and its domain's

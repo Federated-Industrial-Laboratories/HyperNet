@@ -554,7 +554,7 @@ fn checkpoint_and_initial_journal_require_the_complete_nonempty_object_closure()
             .install_checkpoint_with_inputs(
                 &proof,
                 &state,
-                source.archive.leaves(),
+                &source.archive,
                 &refs,
                 |_, _| Ok(()),
                 None
@@ -572,14 +572,7 @@ fn checkpoint_and_initial_journal_require_the_complete_nonempty_object_closure()
             .unwrap();
     }
     target
-        .install_checkpoint_with_inputs(
-            &proof,
-            &state,
-            source.archive.leaves(),
-            &refs,
-            |_, _| Ok(()),
-            None,
-        )
+        .install_checkpoint_with_inputs(&proof, &state, &source.archive, &refs, |_, _| Ok(()), None)
         .unwrap();
     target.unpin_checkpoint_inputs(&transfer);
     let generation = target.generation();

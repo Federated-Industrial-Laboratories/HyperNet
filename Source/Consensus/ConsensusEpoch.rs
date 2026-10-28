@@ -296,26 +296,26 @@ impl Engine {
                 && retained.height() <= checkpoint.height(),
             "Terminal history request scope differs"
         );
-        let leaves = self.archive.leaves();
+        let leaves = &self.archive;
         let height = retained.height() as usize;
         ensure!(
             if height == 0 {
                 *retained.node() == self.configuration.genesis().digest()?
             } else {
-                leaves.get(height - 1) == Some(retained.node())
+                leaves.get(height - 1)? == *retained.node()
             },
             "Retained node is outside terminal history"
         );
         let (size, root, consistency) = if let Some(head) = head {
             ensure!(
                 head.size() <= retained.height()
-                    && archive::root(&leaves[..head.size() as usize]) == *head.root(),
+                    && leaves.root_at(head.size() as usize)? == *head.root(),
                 "Retained history root differs"
             );
             (
                 head.size(),
                 records::bytes(head.root()),
-                archive::consistency(leaves, head.size() as usize)?,
+                archive::consistency_at(leaves, leaves.len(), head.size() as usize)?,
             )
         } else {
             (0, V::Null, vec![])
@@ -323,7 +323,7 @@ impl Engine {
         let inclusion = if height == 0 {
             vec![]
         } else {
-            archive::inclusion(leaves, height - 1)?
+            archive::inclusion_at(leaves, leaves.len(), height - 1)?
         };
         let b = records::bytes;
         wire::encode(&V::Array(vec![

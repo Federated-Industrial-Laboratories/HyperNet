@@ -122,9 +122,9 @@ fn archive_crash_suffix_and_corruption_follow_journal_boundaries() {
     drop(a);
     let mut f = OpenOptions::new()
         .write(true)
-        .open(d.0.join("History.bin"))
+        .open(d.0.join("History/Data0000000000000000.bin"))
         .unwrap();
-    f.seek(SeekFrom::Start(48)).unwrap();
+    f.seek(SeekFrom::Start(64)).unwrap();
     f.write_all(&[99]).unwrap();
     f.sync_all().unwrap();
     drop(f);
