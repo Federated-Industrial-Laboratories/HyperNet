@@ -60,7 +60,11 @@ impl Query {
                 ensure!(
                     matches!(
                         &op.command,
-                        domains::Command::Page(domains::page::Command::View { .. })
+                        domains::Command::Stream(
+                            domains::streams::Command::Permit { .. }
+                                | domains::streams::Command::Lookup { .. }
+                                | domains::streams::Command::Inspect { .. }
+                        ) | domains::Command::Page(domains::page::Command::View { .. })
                             | domains::Command::Route(
                                 domains::routes::Command::Lookup { .. }
                                     | domains::routes::Command::VoucherContext { .. }

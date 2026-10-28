@@ -42,7 +42,7 @@ python3 Tools/Bundle.py Create \
 Create accepts trusted build outputs only. It inspects the local image without
 starting it, verifies its architecture and compares its actual binaries with the
 supplied build files. Package version identifies the actual HyperNet runtime;
-the current runtime is 0.8.0. Other runtime contracts are rejected.
+the current runtime is 0.9.0. Other runtime contracts are rejected.
 The helper generates no signing identity. Select and protect the operator's own
 offline signing key; no signing secret enters the package.
 After assembly, use `Authorise` to sign the exact finite update target. See
@@ -128,8 +128,9 @@ lifecycle in [ServiceRuntime.md](ServiceRuntime.md). Package installation alone
 cannot change a running deployment or its authority floor.
 
 The current package declares authority schema 1 for the canonical authority
-contract. Incompatible prerelease state requires an explicit fresh deployment;
-there is no compatibility parser or implicit migration. Never restore old state,
+contract. Version 0.9 migrates legacy committed history as described in
+[Authority replica storage](AuthorityReplica.md). Other incompatible state requires
+an explicit supported migration or fresh deployment. Never restore old state,
 grants, checkpoints or floors to make another executable start.
 
 The default offline bundle contains the Core image from `Tools/Package.sh`.

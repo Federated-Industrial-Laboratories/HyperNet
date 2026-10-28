@@ -264,11 +264,11 @@ storage timing diagnostics under the intended workload. A successful startup or
 short storage sample does not establish sustained availability. Preserve the
 durability and freshness requirements when correcting a storage bottleneck.
 
-`History.bin` retains at most 131072 committed node digests, approximately 4 MiB
-plus its header. The journal binds its exact size and root. Archive writes are
+The segmented `History` directory retains committed node digests and their hash
+index under a configured physical quota. The journal binds its exact size and root. Archive writes are
 synchronized before that journal generation is published. Restart verifies the
 committed prefix and discards only an uncommitted suffix. Missing committed
-history, corruption or a conflicting prefix refuses restart. Preserve this file
+history, corruption or a conflicting prefix refuses restart. Preserve this directory
 with the complete current signer journal; deleting it is not a repair procedure.
 
 Each peer has two bounded send lanes within one 128-message/4-MiB mailbox.
@@ -440,3 +440,41 @@ unchanged. Pure protocol and independent Suite interoperability tests exercise
 the underlying engine separately; they are not installed node qualification.
 The confined process workflow, signed clock handoff and independent failure
 domains require their own qualification.
+
+## Segmented committed history
+
+The replica stores committed node digests and indexed Merkle subtree hashes in
+`History/Data*.bin` and `History/Nodes*.bin`. Each private segment holds at most
+4096 entries. Completed segments are immutable; a restart discards only the
+uncommitted suffix beyond the signer journal's exact size and root. Startup
+verifies retained data and its complete hash index using bounded buffers.
+
+The RFC 9162 roots and inclusion/consistency proof encodings are unchanged.
+Proof retrieval reads indexed subtrees with logarithmic proof size and memory.
+A returning client can prove any retained older floor; no prefix is discarded
+because of client age. Payload traffic on application streams is not archived.
+The old 131072-leaf in-memory limit no longer bounds operation. The integer proof
+format bounds heights below 2^63; physical capacity is controlled separately.
+
+`History/QuotaBytes` contains the local byte quota, initially 1073741824 bytes.
+Stop the replica before changing this private decimal file. Preserve ownership
+and mode 0600. Increase the quota only after provisioning disk capacity. Do not
+lower it below retained history requirements. `authority replica status` reports
+`historyBytes`, `historyQuotaBytes` and `historyRemainingBytes`. Allocation
+reservation includes segment overhead. Exhausted quota refuses before append;
+a failed disk write quarantines the running instance until an exclusive reopen.
+
+Checkpoint catch-up stages history on disk, with at most three active transfers,
+each bounded by the same quota. Provision up to four times the archive quota for
+a replica receiving three concurrent transfers, plus ordinary state storage.
+Transfer staging is removed on completion, refusal, expiry or restart. State
+chunks, proof paths and history read buffers remain bounded in memory.
+
+On first open, an existing `History.bin` is streamed into the segmented format.
+Its exact committed prefix and Merkle root must match the signer journal before
+the new layout becomes authoritative. The original file remains as migration
+input; interrupted migration restarts from it. Once `History/Ready` is durable,
+future starts use the segmented layout. Keep the journal and complete history
+together in backups. This migration does not reset floors, votes, application
+records or outstanding results. Downgrading an active migrated journal to a
+release that only reads `History.bin` is not supported.

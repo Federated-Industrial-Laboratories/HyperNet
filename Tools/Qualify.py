@@ -27,11 +27,19 @@ def main():
         parser.error('Select an existing private persistent work directory owned by this user')
     if not re.fullmatch(r'sha256:[a-f0-9]{64}', args.image) or os.geteuid() == 0:
         parser.error('Use an immutable local image and a non-root operator')
-    report = {'product': 'HyperNet', 'version': '0.8.0', 'imageId': args.image,
+    report = {'product': 'HyperNet', 'version': '0.9.0', 'imageId': args.image,
               'system': platform.system(), 'architecture': platform.machine(),
               'kernel': platform.release(), 'passed': False, 'profile': None, 'error': None}
     container = None
     try:
+        network_helper = next((Path(directory) / 'slirp4netns' for directory in ('/usr/bin', '/bin')
+                               if os.access(Path(directory) / 'slirp4netns', os.X_OK)), None)
+        if network_helper is None:
+            raise ValueError('Install slirp4netns in /usr/bin or /bin for rootless service networking')
+        checked = subprocess.run([str(network_helper), '--version'], capture_output=True, timeout=5, check=True)
+        if len(checked.stdout) + len(checked.stderr) > 16384:
+            raise ValueError('Networking helper version exceeds its bound')
+        report['slirp4netns'] = {'path': str(network_helper), 'version': checked.stdout.decode('utf-8', 'replace').strip()}
         with tempfile.TemporaryDirectory(prefix='HyperNetQualification', dir=work) as name:
             temporary = Path(name)
             info = subprocess.run(['podman', 'info', '--format', 'json'], capture_output=True, timeout=30, check=True)

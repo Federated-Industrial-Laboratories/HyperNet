@@ -119,8 +119,8 @@ A permitted List value is:
 ```
 
 List contains the complete owner's set, sorted by application key. There is no
-pagination or truncation. At most63 rows fit the64 permanent stream slots when
-the owner is distinct. Only this result permits up to192 returned version
+pagination or truncation. The metadata result has a separate63-row bound; the network has256 permanent
+requester slots. A complete larger owner set refuses rather than truncates. Only this result permits up to192 returned version
 references; ordinary exact expectations and dependency closures remain limited
 to64. Get and List report lifecycle state, not current domain permission.
 
@@ -168,3 +168,40 @@ application validity, grant/tier chain, revocations, owner and ancestor admissio
 and all domain object, consent, audience and route requirements. Another grant
 to the same application does not expand its accepted authority. Archived proof
 or successful lifecycle inspection cannot bypass these checks.
+
+## Version 2 renewal
+
+The existing version 1 registration, acceptance and withdrawal encodings remain
+unchanged. A new dedicated operation explicitly migrates or renews an admission:
+
+```
+[200,2,"AuthorityApplicationRenew",PreviousAdmissionBytes,AcceptedEnvelope,Snapshot]
+[200,2,"AuthorityApplicationRenewal",N,I,PreviousAdmissionVersionRef,OwnerKey,
+ GrantVersionRef,NewValidity,Nonce,AcceptanceValidity]
+[200,2,"AuthorityApplicationRenewalOffer",PreviousAdmissionBytes,ConsentEnvelope]
+[127,2,N,I,PreviousGeneration+1,PreviousAdmissionDigest,ApplicationKey,OwnerKey,
+ GrantVersionRef,NewValidity,Snapshot]
+```
+
+The consent envelope requires exactly the owner and existing application's
+signatures. Its size remains1024 bytes; the offline offer remains8192 bytes.
+The new expiry must extend the previous expiry. Both finite intervals must be
+current at initial execution. All identity, grant and predecessor references
+must match exactly. The new admission validity cannot exceed its exact parent's
+validity. The immutable child grant supplies all rights, scopes, limits, depth,
+tier and ancestry; version 2 admission supplies only that leaf's effective
+validity. Current parent, tier, admission and revocation checks remain mandatory.
+
+The owner is the requester. The snapshot names the exact current predecessor
+and authority closure. The result uses the ordinary version 1 lifecycle result
+with the new admission reference replacing the predecessor reference in returned
+versions. The execution also includes its original creation height, as for other
+lifecycle mutations. Exact replay returns the original completion without
+changing its generation or evidence. A withdrawal permanently prevents renewal.
+
+Only current admission provenance is replaced. Its signed renewal contains the
+exact predecessor record and fresh dual consent; the certified containing state
+binds the current record. Historical committed roots remain in segmented history.
+No requester slot, sequence floor, pending operation or key-role reservation is
+removed. [ApplicationRenewalVector.json](ApplicationRenewalVector.json) supplies
+a shared signed encoding vector checked independently by both products.

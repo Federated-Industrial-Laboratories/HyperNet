@@ -1,6 +1,99 @@
 // SPDX-License-Identifier: MIT
 // Explicit fences preserve prior uncertain effects without retaining recursive request history.
 use super::*;
+
+#[test]
+fn expired_challenge_reopens_only_the_exact_unconsumed_request() {
+    let (directory, sample, mut session, mut store) = setup();
+    let (pending, operation) = prepare(&mut store, sample);
+    let result = certified(
+        &store,
+        &mut session,
+        sample,
+        pending.signed(),
+        &operation,
+        None,
+    );
+    let now = sample.observe().unwrap();
+    let later = ClockHealth::new(
+        now.wall_ms + 5000,
+        now.boot_ms + 5000,
+        now.boot_ms + 10000,
+        0,
+    )
+    .unwrap()
+    .frozen();
+    let failed = store.accept(result, &mut session, later, 0);
+    assert!(
+        failed
+            .err()
+            .unwrap()
+            .is::<crate::authority_challenge::ChallengeExpired>()
+    );
+    let descriptor = store.descriptor.clone();
+    drop(store);
+    let mut store = Store::open(&directory.0, descriptor).unwrap();
+    assert!(store.ordinary_slot().is_err());
+    assert_eq!(
+        store.resume_ordinary().unwrap().unwrap().signed(),
+        pending.signed()
+    );
+    let mut session = Session::new().unwrap();
+    let result = certified(
+        &store,
+        &mut session,
+        later,
+        pending.signed(),
+        &operation,
+        None,
+    );
+    let mut effects = 0;
+    store
+        .accept(result, &mut session, later, 0)
+        .unwrap()
+        .perform_once(
+            &mut store,
+            &mut session,
+            later,
+            1,
+            |_| Ok(()),
+            |_, _| {
+                effects += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(effects, 1);
+    assert!(store.resume_ordinary().unwrap().is_none());
+    assert_eq!(store.ordinary_slot().unwrap().sequence(), 2);
+    let result = certified(
+        &store,
+        &mut session,
+        later,
+        pending.signed(),
+        &operation,
+        None,
+    );
+    assert!(
+        store
+            .accept(result, &mut session, later, 0)
+            .unwrap()
+            .perform_once(
+                &mut store,
+                &mut session,
+                later,
+                1,
+                |_| Ok(()),
+                |_, _| {
+                    effects += 1;
+                    Ok(())
+                }
+            )
+            .is_err()
+    );
+    assert_eq!(effects, 1);
+}
+
 fn fence(store: &mut Store, session: &mut Session, sample: ClockHealth) {
     let old = store.stream_metadata().unwrap().unwrap();
     let prior = old.state().unwrap();

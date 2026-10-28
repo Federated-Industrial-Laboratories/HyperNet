@@ -86,18 +86,18 @@ fn certified_prefix(
     config: &Configuration,
     n: &Node,
     height: u64,
-    leaves: &[Digest],
+    leaves: &(impl archive::History + ?Sized),
 ) -> Result<bool> {
     Ok(n.height == 0 && *n == config.genesis()
         || n.height > 0
             && n.height <= height
-            && leaves.get(n.height as usize - 1) == Some(&n.digest()?))
+            && leaves.get(n.height as usize - 1)? == n.digest()?)
 }
 fn verify_safety_paths(
     config: &Configuration,
     state: &Snapshot,
     height: u64,
-    leaves: &[Digest],
+    leaves: &(impl archive::History + ?Sized),
 ) -> Result<()> {
     for reference in [state.highest_prepare, state.locked] {
         let qc = certificate(config, state, &reference)?;
@@ -147,24 +147,20 @@ fn verify_safety_paths(
 }
 impl Engine {
     pub(super) fn checkpoint_admission(&self, height: u64) -> Result<()> {
-        ensure!(
-            height <= archive::MAX_LEAVES as u64,
-            "Committed history capacity exhausted"
-        );
-        Ok(())
+        self.archive.reserve(usize::try_from(height)?)
     }
     pub(super) fn validate_checkpoint_snapshot(&self) -> Result<()> {
         let s = &self.snapshot;
         ensure!(
             s.archive_size == self.applied()?.height
                 && s.archive_root == self.archive.tree_root()
-                && s.archive_size as usize == self.archive.leaves().len()
+                && s.archive_size as usize == self.archive.len()
                 && s.candidates.len() <= 2,
             "Signer history position differs from applied state"
         );
         if s.archive_size > 0 {
             ensure!(
-                self.archive.leaves().last() == Some(&s.applied),
+                self.archive.get(self.archive.len() - 1)? == s.applied,
                 "Applied node differs from history"
             );
         }
@@ -175,18 +171,12 @@ impl Engine {
                     && s.prefix_nodes.get(&id(verified.node())) == Some(&verified.height())
                     && c.state.len() <= MAX_STATE
                     && wire::digest(&c.state) == *verified.state()
-                    && self.archive.leaves()[verified.height() as usize - 1] == *verified.node()
-                    && archive::root(&self.archive.leaves()[..verified.height() as usize])
-                        == *verified.head().root(),
+                    && self.archive.get(verified.height() as usize - 1)? == *verified.node()
+                    && self.archive.root_at(verified.height() as usize)? == *verified.head().root(),
                 "Retained checkpoint differs from archive or state"
             );
             wire::decode_state(&c.state)?;
-            verify_safety_paths(
-                &self.configuration,
-                s,
-                verified.height(),
-                self.archive.leaves(),
-            )?;
+            verify_safety_paths(&self.configuration, s, verified.height(), &self.archive)?;
             verified.height()
         } else {
             ensure!(
@@ -213,7 +203,7 @@ impl Engine {
                     && if *h == 0 {
                         n == self.configuration.genesis()
                     } else {
-                        self.archive.leaves().get(*h as usize - 1) == Some(&n.digest()?)
+                        self.archive.get(*h as usize - 1)? == n.digest()?
                     },
                 "Retained prefix header is not archived"
             );
@@ -233,9 +223,8 @@ impl Engine {
                     && a[3].uint()? == *h
                     && c.state.len() <= MAX_STATE
                     && wire::digest(&c.state) == a[6].fixed::<32>()?
-                    && self.archive.leaves()[*h as usize - 1] == a[4].fixed::<32>()?
-                    && archive::root(&self.archive.leaves()[..*h as usize])
-                        == a[8].fixed::<32>()?,
+                    && self.archive.get(*h as usize - 1)? == a[4].fixed::<32>()?
+                    && self.archive.root_at(*h as usize)? == a[8].fixed::<32>()?,
                 "Durable checkpoint candidate differs"
             );
             wire::decode_state(&c.state)?;
@@ -254,7 +243,7 @@ impl Engine {
         &mut self,
         proof: &[u8],
         state: &[u8],
-        leaves: &[Digest],
+        leaves: &(impl archive::History + ?Sized),
         validate: impl FnOnce(&[u8], u64) -> Result<()>,
         expired_before: Option<u64>,
     ) -> Result<()> {
@@ -264,7 +253,7 @@ impl Engine {
         &mut self,
         proof: &[u8],
         state: &[u8],
-        leaves: &[Digest],
+        leaves: &(impl archive::History + ?Sized),
         references: &[crate::authority_objects::Reference],
         validate: impl FnOnce(&[u8], u64) -> Result<()>,
         expired_before: Option<u64>,
@@ -277,8 +266,8 @@ impl Engine {
                 && wire::digest(state) == *c.state()
                 && leaves.len() as u64 == c.height()
                 && leaves.len() <= archive::MAX_LEAVES
-                && leaves.last() == Some(c.node())
-                && archive::root(leaves) == *c.head().root(),
+                && leaves.get(leaves.len() - 1)? == *c.node()
+                && leaves.root_at(leaves.len())? == *c.head().root(),
             "Transferred checkpoint state or archive differs"
         );
         wire::decode_state(state)?;
@@ -289,14 +278,14 @@ impl Engine {
         validate(state, c.height())?;
         self.input_reader()?.verify(references)?;
         ensure!(
-            leaves.starts_with(self.archive.leaves()),
+            leaves.root_at(self.archive.len())? == self.archive.tree_root(),
             "Transferred archive replaces the retained committed prefix"
         );
         let committed = self.committed()?;
         if committed.height <= c.height() {
             ensure!(
                 committed.height == 0
-                    || leaves[committed.height as usize - 1] == committed.digest()?,
+                    || leaves.get(committed.height as usize - 1)? == committed.digest()?,
                 "Transferred checkpoint conflicts with committed state"
             );
         } else {
@@ -341,7 +330,7 @@ impl Engine {
                 && next.retired_view == self.snapshot.retired_view,
             "Checkpoint changed local voting safety fields"
         );
-        self.publish_applied(next, &leaves[self.snapshot.archive_size as usize..])
+        self.publish_applied_history(next, leaves)
     }
     pub fn checkpoint_shares(&self) -> Vec<Vec<u8>> {
         self.snapshot
@@ -368,13 +357,13 @@ impl Engine {
         );
         Ok(&value.state)
     }
-    pub fn checkpoint_leaves(&self, digest: Digest) -> Result<&[Digest]> {
+    pub fn checkpoint_leaves(&self, digest: Digest) -> Result<usize> {
         let proof = self
             .checkpoint_proof()
             .context("Certified checkpoint is unavailable")?;
         let c = verified(&self.configuration, proof)?;
         ensure!(*c.digest() == digest, "Checkpoint identity differs");
-        Ok(&self.archive.leaves()[..c.height() as usize])
+        Ok(c.height() as usize)
     }
     pub fn combine_checkpoint(
         &self,
@@ -438,7 +427,7 @@ impl Engine {
         });
         next.candidates.retain(|h, _| *h > c.height());
         next.checkpoint_floor = next.checkpoint_floor.max(c.height());
-        self.compact_snapshot(&mut next, expired_before, self.archive.leaves(), true)?;
+        self.compact_snapshot(&mut next, expired_before, &self.archive, true)?;
         self.persist(next)?;
         Ok(true)
     }
@@ -489,7 +478,7 @@ impl Engine {
     }
     pub fn compact(&mut self, expired_before: Option<u64>) -> Result<()> {
         let mut next = self.snapshot.clone();
-        self.compact_snapshot(&mut next, expired_before, self.archive.leaves(), true)?;
+        self.compact_snapshot(&mut next, expired_before, &self.archive, true)?;
         if next.nodes.len() != self.snapshot.nodes.len()
             || next.commands.len() != self.snapshot.commands.len()
             || next.certificates.len() != self.snapshot.certificates.len()
@@ -509,15 +498,15 @@ impl Engine {
         &self,
         next: &mut Snapshot,
         expired_before: Option<u64>,
-        leaves: &[Digest],
+        leaves: &(impl archive::History + ?Sized),
         retire_votes: bool,
     ) -> Result<()> {
         let (height, anchor) = if let Some(checkpoint) = &next.checkpoint {
             let c = verified(&self.configuration, &checkpoint.proof)?;
             ensure!(
                 c.height() <= next.archive_size
-                    && leaves[c.height() as usize - 1] == *c.node()
-                    && archive::root(&leaves[..c.height() as usize]) == *c.head().root(),
+                    && leaves.get(c.height() as usize - 1)? == *c.node()
+                    && leaves.root_at(c.height() as usize)? == *c.head().root(),
                 "Checkpoint archive binding differs"
             );
             let bytes = fields(&checkpoint.proof)?;
@@ -709,22 +698,22 @@ impl Engine {
                 && (prior_size == 0) == prior_root.is_none(),
             "History retained position differs"
         );
-        let leaves = &self.archive.leaves()[..c.height() as usize];
+        let leaves = &self.archive;
         ensure!(
             if height == 0 {
                 from == self.configuration.genesis().digest()?
             } else {
-                leaves[height as usize - 1] == from
+                leaves.get(height as usize - 1)? == from
             },
             "History retained node differs"
         );
         if let Some(root) = prior_root {
             ensure!(
-                archive::root(&leaves[..prior_size as usize]) == root,
+                leaves.root_at(prior_size as usize)? == root,
                 "History retained root differs"
             );
         }
-        if let Some(index) = leaves.iter().position(|digest| *digest == target)
+        if let Some(index) = leaves.find(target, c.height() as usize)?
             && (index as u64 + 1) < c.height()
         {
             ensure!(
@@ -737,12 +726,12 @@ impl Engine {
         let inclusion = if height == 0 {
             vec![]
         } else {
-            archive::inclusion(leaves, height as usize - 1)?
+            archive::inclusion_at(leaves, c.height() as usize, height as usize - 1)?
         };
         let consistency = if prior_size == 0 {
             vec![]
         } else {
-            archive::consistency(leaves, prior_size as usize)?
+            archive::consistency_at(leaves, c.height() as usize, prior_size as usize)?
         };
         let history = wire::encode(&V::Array(vec![
             V::Uint(47),

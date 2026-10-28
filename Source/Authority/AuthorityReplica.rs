@@ -409,8 +409,9 @@ fn open_pinned(input: &Location, initial: Deployment) -> Result<(Deployment, Eng
 }
 
 fn status(deployment: &Deployment, engine: &Engine, label: &str) -> Result<Json> {
+    let (history_bytes, history_quota) = engine.history_capacity()?;
     Ok(
-        json!({"status":label,"network":hex::encode(deployment.configuration.scope.network),"signer":deployment.record.signer,"generation":engine.generation(),"configGeneration":deployment.record.config_generation,"configDigest":deployment.record.config_digest,"view":engine.view(),"committedHeight":engine.committed()?.height,"appliedHeight":engine.applied()?.height,"clockReady":deployment.runtime.clock.health().and_then(|health| health.observe()).is_ok(),"quorum":"NotProbed","epoch":deployment.configuration.scope.epoch,"canVote":engine.can_vote(),"terminal":engine.halted()}),
+        json!({"status":label,"historyBytes":history_bytes,"historyQuotaBytes":history_quota,"historyRemainingBytes":history_quota.saturating_sub(history_bytes),"network":hex::encode(deployment.configuration.scope.network),"signer":deployment.record.signer,"generation":engine.generation(),"configGeneration":deployment.record.config_generation,"configDigest":deployment.record.config_digest,"view":engine.view(),"committedHeight":engine.committed()?.height,"appliedHeight":engine.applied()?.height,"clockReady":deployment.runtime.clock.health().and_then(|health| health.observe()).is_ok(),"quorum":"NotProbed","epoch":deployment.configuration.scope.epoch,"canVote":engine.can_vote(),"terminal":engine.halted()}),
     )
 }
 fn refresh(

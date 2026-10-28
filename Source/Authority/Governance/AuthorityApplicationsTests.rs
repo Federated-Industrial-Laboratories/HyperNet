@@ -916,3 +916,178 @@ fn registration_capacity_refusal_keeps_candidate_record_stream_and_audit_atomic(
     assert_eq!(state.evidence.value(), before_evidence);
     assert_eq!(state.streams.keys(), before_keys);
 }
+
+fn renewal(
+    f: &Fixture,
+    prior: &[u8],
+    owner: &SigningKey,
+    app: &SigningKey,
+    at: u64,
+    end: u64,
+) -> Vec<u8> {
+    let state = State::parse(&f.app.config, prior).unwrap();
+    let previous = state
+        .records
+        .iter()
+        .find(|bytes| {
+            applications::record_reference(bytes).unwrap().index() == (127, m::public(app))
+        })
+        .unwrap();
+    let old = applications::Registration::parse(
+        previous,
+        f.app.config.scope.network,
+        f.app.config.scope.incarnation,
+    )
+    .unwrap();
+    let payload = wire::encode(&array(vec![
+        V::Uint(200),
+        V::Uint(2),
+        V::Text("AuthorityApplicationRenewal".into()),
+        b(&f.app.config.scope.network),
+        b(&f.app.config.scope.incarnation),
+        reference(&old.reference),
+        b(&m::public(owner)),
+        reference(&old.grant),
+        array(vec![V::Uint(at - 2000), V::Uint(end)]),
+        b(&[99; 32]),
+        array(vec![V::Uint(at - 2000), V::Uint(at + 10000)]),
+    ]))
+    .unwrap();
+    let mut signatures = [owner, app]
+        .iter()
+        .map(|key| {
+            wire::envelope(&wire::sign_envelope(&payload, key).unwrap(), 1)
+                .unwrap()
+                .1
+                .remove(0)
+        })
+        .collect::<Vec<_>>();
+    signatures.sort_by_key(|(key, _)| *key);
+    let consent = wire::encode(&array(vec![
+        V::Uint(0),
+        V::Uint(1),
+        b(&payload),
+        array(
+            signatures
+                .iter()
+                .map(|(key, signature)| array(vec![b(key), b(signature)]))
+                .collect(),
+        ),
+    ]))
+    .unwrap();
+    mutation(
+        f,
+        prior,
+        owner,
+        "AuthorityApplicationRenew",
+        m::public(app),
+        array(vec![
+            V::Uint(200),
+            V::Uint(2),
+            V::Text("AuthorityApplicationRenew".into()),
+            b(previous),
+            b(&consent),
+            m::snapshot(f, prior, &[]),
+        ]),
+        at,
+    )
+}
+
+#[test]
+fn renewable_admission_preserves_identity_rights_and_bounded_provenance_after_expiry() {
+    let (f, owner, prior) = setup();
+    let app = m::key(81);
+    let mut child = m::child(&f, m::public(&app), 72).array(8).unwrap().to_vec();
+    child[5] = array(vec![V::Uint(1000), V::Uint(850000)]);
+    let request = mutation(
+        &f,
+        &prior,
+        &owner,
+        "AuthorityDelegateGrant",
+        [72; 32],
+        array(vec![
+            V::Uint(200),
+            V::Uint(1),
+            V::Text("AuthorityDelegateGrant".into()),
+            reference(&record(&f, &prior, 102, [70; 32])),
+            array(child),
+            m::snapshot(&f, &prior, &[]),
+        ]),
+        5000,
+    );
+    let delegated = m::execute(&f, &prior, &request, &owner, 5000);
+    assert_eq!(m::code(&delegated), 0);
+    let registered = m::execute(
+        &f,
+        &delegated.state,
+        &register(&f, &delegated.state, &owner, &app, 72, 5000),
+        &owner,
+        5000,
+    );
+    assert_eq!(m::code(&registered), 0);
+    assert!(!capability(
+        &f,
+        &registered.state,
+        m::public(&app),
+        72,
+        855000,
+        0
+    ));
+    let initial = State::parse(&f.app.config, &registered.state).unwrap();
+    let count = initial.records.len();
+    let evidence_count = initial.evidence.value().list(2048).unwrap().len();
+    let keys = initial.streams.keys();
+    let request = renewal(&f, &registered.state, &owner, &app, 855000, 880000);
+    let renewed = m::execute(&f, &registered.state, &request, &owner, 855000);
+    assert_eq!(m::code(&renewed), 0);
+    assert!(capability(
+        &f,
+        &renewed.state,
+        m::public(&app),
+        72,
+        855000,
+        0
+    ));
+    assert!(!capability(
+        &f,
+        &renewed.state,
+        m::public(&app),
+        72,
+        855000,
+        11
+    ));
+    let replay = m::execute(&f, &renewed.state, &request, &owner, 856000);
+    assert_eq!(m::code(&replay), 0);
+    assert_eq!(result_bytes(&renewed), result_bytes(&replay));
+    let request = renewal(&f, &replay.state, &owner, &app, 860000, 890000);
+    let second = m::execute(&f, &replay.state, &request, &owner, 860000);
+    assert_eq!(m::code(&second), 0);
+    let state = State::parse(&f.app.config, &second.state).unwrap();
+    assert_eq!(state.records.len(), count);
+    assert_eq!(
+        state.evidence.value().list(2048).unwrap().len(),
+        evidence_count
+    );
+    assert_eq!(state.streams.keys(), keys);
+    assert_eq!(
+        record(&f, &second.state, 127, m::public(&app)).generation,
+        3
+    );
+    f.app
+        .validate_checkpoint(&second.state, state.height)
+        .unwrap();
+    let request = withdraw(&f, &second.state, &owner, m::public(&app), 861000);
+    let withdrawn = m::execute(&f, &second.state, &request, &owner, 861000);
+    assert_eq!(m::code(&withdrawn), 0);
+    let request = renewal(&f, &withdrawn.state, &owner, &app, 862000, 895000);
+    let refused = m::execute(&f, &withdrawn.state, &request, &owner, 862000);
+    assert_ne!(m::code(&refused), 0);
+    assert!(!capability(
+        &f,
+        &refused.state,
+        m::public(&app),
+        72,
+        862000,
+        0
+    ));
+}

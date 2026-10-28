@@ -91,6 +91,15 @@ impl Entry {
                         "historical application acceptance was not current"
                     );
                 }
+                if let crate::authority_applications::Operation::Renew { consent, .. } =
+                    &application
+                {
+                    ensure!(
+                        current(self.at, consent.validity)
+                            && current(self.at, consent.acceptance_validity),
+                        "historical application renewal was not current"
+                    );
+                }
                 (
                     vec![
                         application
@@ -147,7 +156,8 @@ impl Entry {
                 && intent.minimum_policy_epoch == snapshot.epoch
                 && intent.minimum_policy_height == snapshot.height
                 && wire::digest(record) == self.created.digest
-                && (matches!(self.created.kind, 100 | 101 | 129) || self.created.generation == 1),
+                && (matches!(self.created.kind, 100 | 101 | 127 | 129)
+                    || self.created.generation == 1),
             "mutation evidence derivation or position differs"
         );
         let fields = wire::decode(record)?;
@@ -491,6 +501,20 @@ impl Evidence {
         height: u64,
         at: u64,
     ) -> Result<()> {
+        if created.kind == 127 && created.generation > 1 {
+            let intent = Intent::from_signed(signed)?;
+            let crate::authority_applications::Operation::Renew { consent, .. } =
+                crate::authority_applications::Operation::parse(&intent)?
+            else {
+                anyhow::bail!("application evidence replacement is not a renewal");
+            };
+            ensure!(
+                self.0.iter().any(|e| e.created == consent.admission)
+                    && consent.admission.generation.checked_add(1) == Some(created.generation),
+                "application evidence replacement skips its current predecessor"
+            );
+            self.0.retain(|e| e.created.index() != created.index());
+        }
         ensure!(
             !self.0.iter().any(|e| e.created.index() == created.index()
                 && (!matches!(created.kind, 100 | 101 | 129)

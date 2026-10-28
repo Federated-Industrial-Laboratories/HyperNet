@@ -58,11 +58,11 @@ erase plaintext or other bytes already retained by an authorised recipient.
 
 ## Persistence and bounds
 
-ApplicationAdmission and ApplicationWithdrawal are create-only records with
-exact signed mutation evidence. Application keys remain reserved after expiry
+Version 1 ApplicationAdmission and all ApplicationWithdrawal records are create-only.
+Explicit renewal replaces a version 2 admission and its current signed evidence. Application keys remain reserved after expiry
 or withdrawal. Streams are permanent; admission never resets a fenced stream.
-The authority supports 64 total requester streams, including root subjects and
-ordinary members, and 512 governance records. Capacity refusal creates no partial
+The authority supports 256 total requester streams, including root subjects and
+ordinary members, and 2048 governance records. Capacity refusal creates no partial
 admission, stream or mutation evidence. No expiry-based reclamation is performed.
 
 Owner listing returns the complete sorted metadata set without pagination or
@@ -80,3 +80,24 @@ from an uncertain outcome.
 operations. The independent HyperNetSuite application commands provide the local
 consent and lifecycle workflow. They do not start a model, provider or domain
 service on the application's behalf.
+
+## Same-rights renewal
+
+Renewal preserves the application key, owner, immutable grant, actions, scopes,
+limits, tier and exact parent. It replaces the admission's finite validity and
+increments its generation. The first explicit renewal migrates a version 1
+admission to version 2. Old registration bytes retain their original meaning.
+
+Fresh owner and application signatures approve each new validity interval of at
+most seven days. The owner must still have DelegateGrant through the same exact
+parent, and every current ancestor, tier, admission and revocation check applies.
+An expired application can renew while its parent remains valid. A version 2
+admission supplies its exact leaf grant's effective validity; it never extends
+another grant or changes the grant's rights. Withdrawal and revocation cannot
+be undone by renewal. A compromised application requires replacement, not renewal.
+
+The operation replaces one admission and its current consent evidence. It does
+not create another child grant or requester slot. Requester generations, sequence
+floors and unresolved requests remain intact. Retry the exact pending renewal
+before starting another owner operation. No unattended renewal permission is
+implied by a prior acceptance.

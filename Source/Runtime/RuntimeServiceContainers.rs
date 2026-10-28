@@ -501,6 +501,9 @@ pub(super) fn create(
             false,
             true,
         );
+        if let Some(target) = &p.application_target {
+            mount(p, &mut args, &target.directory, "/Application", false, true);
+        }
         if let Some(target) = &p.route_target {
             mount(
                 p,

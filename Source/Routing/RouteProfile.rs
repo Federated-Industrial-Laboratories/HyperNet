@@ -104,7 +104,7 @@ impl Profile {
             "route identity separation or privacy assurance differs"
         );
         ensure!(
-            matches!(self.protocol, 1..=6)
+            matches!(self.protocol, 1..=7)
                 && !self.relay_domain.is_empty()
                 && self.relay_domain.len() <= 255
                 && self

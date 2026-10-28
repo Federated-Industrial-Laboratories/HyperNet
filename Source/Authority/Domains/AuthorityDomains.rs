@@ -28,6 +28,8 @@ pub mod sealed_identity;
 pub mod sealed_publication;
 #[path = "AuthorityDomainSsh.rs"]
 pub mod ssh;
+#[path = "AuthorityStreams.rs"]
+pub mod streams;
 #[path = "AuthorityDomainTransfer.rs"]
 pub mod transfer;
 
@@ -48,7 +50,7 @@ pub(crate) fn id(value: &V) -> Result<Digest> {
 /// Domain references extend governance only with explicitly implemented record kinds.
 pub fn version(value: &V) -> Result<VersionRef> {
     let fields = value.array(4)?;
-    if !matches!(fields[0].uint()?, 104 | 107..=111 | 113 | 132..=171) {
+    if !matches!(fields[0].uint()?, 104 | 107..=111 | 113 | 132..=173) {
         return governance_version(value);
     }
     let reference = VersionRef {
@@ -148,6 +150,9 @@ impl Record {
             }
             150..=157 => {
                 federation::validate_record(kind, &f[7], network, incarnation, lookup, generation)?
+            }
+            172..=173 => {
+                streams::validate_record(kind, &f[7], network, incarnation, lookup, generation)?
             }
             169..=171 => {
                 backup::validate_record(kind, &f[7], network, incarnation, lookup, generation)?
@@ -279,6 +284,7 @@ impl State {
         }
         federation::validate_state(&state, partial)?;
         backup::validate_state(&state, partial)?;
+        streams::validate_state(&state, partial)?;
         sealed_identity::validate_state(&state, partial)?;
         Ok(state)
     }
@@ -399,6 +405,7 @@ impl State {
 pub enum Command {
     Backup(backup::Command),
     Route(routes::Command),
+    Stream(streams::Command),
     SealedIdentity(sealed_identity::Command),
     SealedPublication(sealed_publication::Command),
     Ssh(ssh::Command),
@@ -410,6 +417,11 @@ pub enum Command {
 impl From<backup::Command> for Command {
     fn from(c: backup::Command) -> Self {
         Self::Backup(c)
+    }
+}
+impl From<streams::Command> for Command {
+    fn from(c: streams::Command) -> Self {
+        Self::Stream(c)
     }
 }
 impl From<routes::Command> for Command {
@@ -475,6 +487,8 @@ impl Command {
         let name = fields.first().context("empty domain command")?.text()?;
         if name.starts_with("Backup") {
             Ok(Self::Backup(backup::Command::parse(value, n, i)?))
+        } else if name.starts_with("Stream") {
+            Ok(Self::Stream(streams::Command::parse(value, n, i)?))
         } else if name.starts_with("Route") {
             Ok(Self::Route(routes::Command::parse(value, n, i)?))
         } else if name.starts_with("SealedPublication") {
@@ -501,6 +515,7 @@ impl Command {
         match self {
             Self::Backup(c) => c.name(),
             Self::Route(c) => c.name(),
+            Self::Stream(c) => c.name(),
             Self::SealedPublication(c) => c.name(),
             Self::SealedIdentity(c) => c.name(),
             Self::Ssh(c) => c.name(),
@@ -514,6 +529,7 @@ impl Command {
         match self {
             Self::Backup(c) => c.value(),
             Self::Route(c) => c.value(),
+            Self::Stream(c) => c.value(),
             Self::SealedPublication(c) => c.value(),
             Self::SealedIdentity(c) => c.value(),
             Self::Ssh(c) => c.value(),
@@ -527,6 +543,7 @@ impl Command {
         match self {
             Self::Backup(c) => c.resource(),
             Self::Route(c) => c.resource(),
+            Self::Stream(c) => c.resource(),
             Self::SealedPublication(c) => c.resource(),
             Self::SealedIdentity(c) => c.resource(),
             Self::Ssh(c) => c.resource(),
@@ -540,6 +557,7 @@ impl Command {
         match self {
             Self::Backup(c) => c.mutation(),
             Self::Route(c) => c.mutation(),
+            Self::Stream(c) => c.mutation(),
             Self::SealedPublication(c) => c.mutation(),
             Self::SealedIdentity(c) => c.mutation(),
             Self::Ssh(c) => c.mutation(),
@@ -553,6 +571,7 @@ impl Command {
         match self {
             Self::Backup(c) => c.mutation_kind(),
             Self::Route(c) => c.mutation_kind(),
+            Self::Stream(c) => c.mutation_kind(),
             Self::Ssh(c) => {
                 if c.mutation() {
                     Some(
@@ -670,7 +689,9 @@ impl Operation {
     ) -> Result<Key> {
         match &self.command {
             Command::SealedPublication(_) | Command::SealedIdentity(_) => Ok(intent.requester),
-            Command::Ssh(_) | Command::Route(_) | Command::Backup(_) => Ok(intent.requester),
+            Command::Ssh(_) | Command::Route(_) | Command::Stream(_) | Command::Backup(_) => {
+                Ok(intent.requester)
+            }
             Command::Mail(c) => mail::expected_recipient(c, state, records, reserved, intent),
             Command::Page(c) => page::expected_recipient(c, state, records, reserved, intent),
             Command::Federation(c) => {
@@ -735,6 +756,9 @@ impl Operation {
         match &self.command {
             Command::Backup(c) => {
                 backup::evaluate(self, c, state, records, reserved, intent, at, replay, exact)
+            }
+            Command::Stream(c) => {
+                streams::evaluate(self, c, state, records, reserved, intent, at, replay, exact)
             }
             Command::Route(c) => {
                 routes::evaluate(self, c, state, records, reserved, intent, at, replay, exact)

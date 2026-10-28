@@ -21,7 +21,7 @@ sys.dont_write_bytecode = True
 import PackageTrust
 
 PRODUCT = 'HyperNet'
-VERSION = '0.8.0'
+VERSION = '0.9.0'
 NAMESPACE = 'HyperNetBundle1'
 PRINCIPAL = 'HyperNetPublisher'
 MAX_ARCHIVE = 512 * 1024 * 1024
@@ -513,7 +513,7 @@ def create(args):
                     'metadata': {'imageId': image_id, 'imageArchive': 'Images/HyperNetOci.tar',
                     'authoritySchema': 1, 'hostRuntime': binary_metadata(package / 'RootFs/HyperNet'),
                     'binaries': {name: digest_file(package / 'RootFs' / name) for name in ('HyperNet', 'HyperNetGate')},
-                    'prerequisites': ['Linux; package architecture must match the native processor', 'Python 3.11+, OpenSSH ssh-keygen Ed25519 SSHSIG, Bash, GNU coreutils, jq and flock', 'Rootless Podman with a maintained OCI runtime, nomap and subordinate UID/GID mappings', 'Delegated cgroup v2 CPU, memory and PID controllers; seccomp; Landlock ABI 6+', 'Confined GNU/Linux libraries and their loader are carried inside the OCI image', 'Native Bin/HyperNet requires the declared host GNU libc ABI, ELF loader and maintained shared libraries', 'An independently verified accepted bootstrap, appointed voter identity, pinned TLS inputs and signed healthy clock export are required for authority runtime setup', 'The build packager uses Debian-format library inventory; runtime hosts do not require dpkg']},
+                    'prerequisites': ['Linux; package architecture must match the native processor', 'Python 3.11+, OpenSSH ssh-keygen Ed25519 SSHSIG, Bash, GNU coreutils, jq and flock', 'Rootless Podman with a maintained OCI runtime, nomap and subordinate UID/GID mappings', 'Host slirp4netns in /usr/bin or /bin and its distribution dependencies for rootless service networking', 'Delegated cgroup v2 CPU, memory and PID controllers; seccomp; Landlock ABI 6+', 'Confined GNU/Linux libraries and their loader are carried inside the OCI image', 'Native Bin/HyperNet requires the declared host GNU libc ABI, ELF loader and maintained shared libraries', 'An independently verified accepted bootstrap, appointed voter identity, pinned TLS inputs and signed healthy clock export are required for authority runtime setup', 'The build packager uses Debian-format library inventory; runtime hosts do not require dpkg']},
                     'files': [{'path': name, 'size': path.stat().st_size, 'mode': file_mode(name), 'sha256': digest_file(path)} for name, path in sorted(files.items())]}
         validate_manifest(manifest)
         image_matches(manifest)

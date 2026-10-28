@@ -42,7 +42,7 @@ impl Fixture {
         Self::with_route_transport(separate, None)
     }
     fn with_route_transport(separate: bool, relay: Option<(u8, Vec<u8>)>) -> Self {
-        let f = deployment::Fixture::with_actions(vec![0, 6, 10, 11, 12, 13, 26]);
+        let f = deployment::Fixture::with_actions(vec![0, 6, 10, 11, 12, 13, 26, 29, 30]);
         let governance = Governance::parse(N, I, &f.records).unwrap();
         let root = governance
             .versions()
@@ -876,3 +876,6 @@ fn fresh_route_reads_match_ordered_checks_without_consuming_voucher() {
         3
     );
 }
+
+#[path = "ApplicationStreamsTests.rs"]
+mod application_stream_tests;

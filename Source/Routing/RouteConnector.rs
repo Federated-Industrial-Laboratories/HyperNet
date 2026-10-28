@@ -13,7 +13,10 @@ use std::{
     net::{SocketAddr, TcpStream},
     os::fd::{AsRawFd, FromRawFd},
 };
+#[path = "ApplicationStreamConnector.rs"]
+mod application_streams;
 struct Socket<'a> {
+    opportunistic: bool,
     socket: TcpStream,
     deadline: u64,
     operation_deadline: Option<u64>,
@@ -83,9 +86,11 @@ impl Socket<'_> {
             .remaining_bytes
             .checked_sub(n as u64)
             .ok_or_else(|| io::Error::other("private route byte admission exhausted"))?;
-        self.idle_deadline = boot_time_ms()
-            .map_err(io::Error::other)?
-            .saturating_add(self.idle_ms);
+        if n > 0 {
+            self.idle_deadline = boot_time_ms()
+                .map_err(io::Error::other)?
+                .saturating_add(self.idle_ms);
+        }
         self.check()?;
         Ok(())
     }
@@ -108,7 +113,12 @@ impl Read for Socket<'_> {
                     self.used(n)?;
                     return Ok(n);
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => self.ready(libc::POLLIN)?,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if self.opportunistic {
+                        return Err(e);
+                    }
+                    self.ready(libc::POLLIN)?;
+                }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(e),
             }
@@ -133,7 +143,12 @@ impl Write for Socket<'_> {
                     self.used(n)?;
                     return Ok(n);
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => self.ready(libc::POLLOUT)?,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if self.opportunistic {
+                        return Err(e);
+                    }
+                    self.ready(libc::POLLOUT)?;
+                }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(e),
             }
@@ -215,6 +230,7 @@ fn connect(address: SocketAddr, deadline: u64, cancelled: &dyn Fn() -> bool) -> 
         }
     };
     let pending = Socket {
+        opportunistic: false,
         socket,
         deadline,
         operation_deadline: None,
@@ -273,6 +289,7 @@ impl<'a> Session<'a> {
                 .context("private route deadline overflow")?,
         );
         let socket = Socket {
+            opportunistic: false,
             socket: connect(profile.relay_address, deadline, cancelled)?,
             deadline,
             operation_deadline: None,
@@ -412,6 +429,7 @@ mod tests {
         let (_peer, _) = listener.accept().unwrap();
         let now = boot_time_ms().unwrap();
         let mut stream = Socket {
+            opportunistic: false,
             socket,
             deadline: now + 60000,
             operation_deadline: Some(now),
@@ -435,6 +453,7 @@ mod tests {
         let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (_peer, _) = listener.accept().unwrap();
         let mut stream = Socket {
+            opportunistic: false,
             socket,
             deadline: 5000,
             operation_deadline: None,
@@ -477,6 +496,7 @@ mod tests {
         let check = || cancelled.load(Ordering::Acquire);
         let start = boot_time_ms().unwrap();
         let mut stream = Socket {
+            opportunistic: false,
             socket,
             deadline: start + 5000,
             operation_deadline: None,
@@ -506,6 +526,7 @@ mod tests {
         });
         let start = boot_time_ms().unwrap();
         let mut stream = Socket {
+            opportunistic: false,
             socket,
             deadline: start + 75,
             operation_deadline: None,

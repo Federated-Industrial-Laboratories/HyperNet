@@ -6,25 +6,34 @@ use crate::authority_read::{self as fresh, Query};
 impl Client<'_> {
     pub(crate) fn retry_read(error: anyhow::Error) -> anyhow::Error {
         use crate::route_runtime::ReadRetry;
-        if error.is::<transport::FreshReadUnavailable>() {
+        if error.is::<ReadRetry>() {
+            error
+        } else if error.is::<transport::FreshReadUnavailable>() {
             error.context(ReadRetry::FreshQuorumUnavailable)
         } else if error.is::<transport::HistoryOvertaken>() {
             error.context(ReadRetry::HistoryOvertaken)
+        } else if error.is::<authority_challenge::ChallengeExpired>() {
+            error.context(ReadRetry::ChallengeExpired)
+        } else if transport::transport_closed(&error) {
+            error.context(ReadRetry::TransportClosed)
         } else {
             error
         }
     }
 
-    pub(super) fn read_action(&mut self, command: routes::Command) -> Result<V> {
+    pub(super) fn read_action(&mut self, command: DomainCommand) -> Result<V> {
         ensure!(
             matches!(
                 command,
-                routes::Command::Lookup { .. } | routes::Command::VoucherContext { .. }
+                DomainCommand::Route(
+                    routes::Command::Lookup { .. } | routes::Command::VoucherContext { .. }
+                ) | DomainCommand::Stream(
+                    streams::Command::Inspect { .. } | streams::Command::Permit { .. }
+                )
             ),
             "fresh Route retry requires a read-only context operation"
         );
         let started = authority_challenge::boot_time_ms()?;
-        let command = DomainCommand::Route(command);
         self.permitted(&command)?;
         let descriptor = self.store.descriptor().clone();
         let operation = Operation {
@@ -149,6 +158,6 @@ impl Client<'_> {
                 authority_challenge::boot_time_ms()?.saturating_sub(started),
             );
         }
-        outcome
+        outcome.map_err(Self::retry_read)
     }
 }

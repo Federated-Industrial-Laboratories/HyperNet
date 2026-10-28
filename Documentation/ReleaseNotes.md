@@ -1,6 +1,61 @@
-# Linux 0.8.0
+# Linux release notes
 
 [Documentation](ReadMe.md) | [Project](../ReadMe.md)
+
+## 0.9.0 candidate
+
+Version 0.9.0 is the next Linux release candidate. These notes describe the
+candidate; they do not announce publication or replace the published 0.8.0
+artifacts and authentication instructions retained below.
+
+### Changes
+
+- Generic [application streams](ApplicationStreams.md) provide relay-only duplex
+  transport with separately verified application identity, exact service and
+  local socket bindings, owner/operator consent, cancellation and bounded
+  half-close handling. Protocol 7 carries application bytes without interpreting
+  HTTP, inference requests or model formats.
+- Installed endpoints can use a remote authority through the Suite's private
+  authority connector. The mapped ingress excludes application command sockets,
+  signing keys and requester state.
+- [Application renewal](Applications.md#same-rights-renewal) preserves identity
+  and rights through explicit owner and application consent. Reusable stream
+  slots bound retained session metadata without resetting generations or quotas.
+- [Segmented committed history](AuthorityReplica.md#segmented-committed-history)
+  retains authenticated prefixes on disk with bounded segments, catch-up buffers
+  and an explicit physical storage quota. Existing journals migrate on verified
+  open; capacity exhaustion remains a refusal.
+- Read-only authority transport can recover from a closed exchange within its
+  original deadline. Ordinary mutations retain their exact recovery path.
+
+### Candidate platform and validation
+
+The candidate uses native Ubuntu 24.04 x86_64 and GNU libc 2.39. Hosting requires
+rootless Podman, subordinate UID/GID mappings, delegated cgroup v2 controls,
+seccomp and Landlock ABI 6 or newer. Missing enforcement prevents activation.
+Native ARM, macOS, Windows and SELinux-enabled hosting remain unqualified.
+
+Signed installation and bounded native relay/authority/application workflows
+were exercised with separate application hosts and a remote relay. Application
+integration transferred and SHA256-verified 4,079,434,577 bytes in ten files,
+including pause/resume, cancellation and permission revocation. This is one
+bounded integration workload, not a throughput or long-running soak guarantee.
+Four authority replicas on one machine still share that machine's failures.
+Independent operator separation and security certification are not established.
+
+### Upgrade scope
+
+Protocol 7 requires matching Core and Suite support. Upgrade the authority
+committee together before creating new stream or renewal records; do not mix
+incompatible record semantics within a committee. The retained
+`HyperNet080Authority2` package contract does not make post-0.9 state readable by
+0.8. Install side by side through the accepted publisher and a fresh signed
+target policy, then use the documented stopped replacement workflow. Preserve
+package trust, complete journals/history, requester floors, identities and
+unresolved operations. Never reset those floors or substitute the old history
+format to force a downgrade. See [upgrade and recovery](UpgradeRecovery.md).
+
+## Linux 0.8.0 (published)
 
 HyperNet 0.8.0 is the first public Linux release. Download the native x86_64
 package from [GitHub Releases](https://github.com/Federated-Industrial-Laboratories/HyperNet/releases/tag/v0.8.0).
@@ -11,7 +66,7 @@ It serves reviewed Pages, encrypted Mail and Transfers, scoped search and
 separately consented OpenSSH services. Federation shares approved publications
 between independently accepted network identities.
 
-## Platform and release scope
+### Platform and release scope
 
 The packaged profile is native Ubuntu 24.04 x86_64 with GNU libc 2.39 or newer.
 Other Linux distributions need the exact ELF loader and libraries recorded in
@@ -36,7 +91,7 @@ a prior 1 MiB relay download took 12.246 seconds. Native administration is not
 included; use the documented CLI. Read the security and platform guides before
 planning an exposed deployment.
 
-## Download and authenticate
+### Download and authenticate
 
 Download all five package inputs from the release: `HyperNet-0.8.0-linux-x86_64.tar`,
 its `.sig`, `HyperNet-0.8.0-linux-x86_64.target.json`, its `.sig`, and `Publisher.pub`.
@@ -79,7 +134,7 @@ ssh-keygen -Y verify -f ReleaseSigners -I ReleasePublisher \
   -n HyperNetRelease1 -s SHA256SUMS.sig < SHA256SUMS
 ```
 
-## Fresh installation
+### Fresh installation
 
 Use a new private installation prefix. Initialise trust once per product;
 Core and Suite use separate trust directories even with the same publisher.
@@ -109,7 +164,7 @@ The signed target has a finite validity interval recorded in its `notBefore` and
 expiry or reset retained trust. Installation starts no network services and
 creates no membership. Keep profiles, keys, consent and data outside the prefix.
 
-## Existing installations
+### Existing installations
 
 The published generation-1 target is for fresh release trust. It cannot migrate
 an existing installation from a different publisher: root rotation must increase

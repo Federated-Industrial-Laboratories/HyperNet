@@ -137,7 +137,7 @@ impl RegisteredProfile {
                 && p.consent.id == p.deployment
                 && p.validity.0 < p.validity.1
                 && (1..=4096).contains(&p.maximum_connections)
-                && matches!((p.mode, p.protocol), (1, 0) | (2 | 3, 1..=6))
+                && matches!((p.mode, p.protocol), (1, 0) | (2 | 3, 1..=7))
                 && (p.mode == 3) == p.relay.is_some()
                 && (p.mode != 3) == p.address.is_some()
                 && p.relay != Some(p.identity.service),
@@ -258,12 +258,20 @@ pub struct Voucher {
     pub bytes: u64,
     pub expires: u64,
     pub creation: Digest,
+    pub baseline: Option<(u64, u64)>,
 }
 impl Voucher {
     pub fn parse(value: &V) -> Result<Self> {
-        let f = value.array(11)?;
+        let raw = value.list(14)?;
+        let (f, baseline) = if raw.len() == 14 {
+            ensure!(raw[0].uint()? == 2, "unsupported renewable voucher schema");
+            (&raw[1..12], Some((raw[12].uint()?, raw[13].uint()?)))
+        } else {
+            (value.array(11)?, None)
+        };
         let scope = f[6].array(2)?;
         let v = Self {
+            baseline,
             relay: version(&f[0])?,
             destination: version(&f[1])?,
             sponsor: key(&f[2])?,
@@ -282,17 +290,20 @@ impl Voucher {
                 && v.relay.id != v.destination.id
                 && v.grant.kind == 102
                 && v.possession != v.sponsor
-                && matches!(v.action, 0 | 1 | 10 | 15 | 16 | 18 | 19)
+                && matches!(v.action, 0 | 1 | 10 | 15 | 16 | 18 | 19 | 30)
                 && v.scope.0 <= 5
                 && (1..=4096).contains(&v.connections)
                 && (16384..=1024 * 1024 * 1024 * 1024).contains(&v.bytes)
-                && v.expires > 0,
+                && v.expires > 0
+                && v.baseline
+                    .is_none_or(|(count, bytes)| count.checked_add(v.connections).is_some()
+                        && bytes.checked_add(v.bytes).is_some()),
             "invalid route voucher"
         );
         Ok(v)
     }
     pub fn value(&self) -> V {
-        a(vec![
+        let mut fields = vec![
             reference(&self.relay),
             reference(&self.destination),
             b(&self.sponsor),
@@ -304,7 +315,12 @@ impl Voucher {
             V::Uint(self.bytes),
             V::Uint(self.expires),
             b(&self.creation),
-        ])
+        ];
+        if let Some((count, bytes)) = self.baseline {
+            fields.insert(0, V::Uint(2));
+            fields.extend([V::Uint(count), V::Uint(bytes)]);
+        }
+        a(fields)
     }
 }
 #[derive(Clone, Debug)]
@@ -379,8 +395,11 @@ pub fn validate_record(
             );
         }
         166 => {
-            Voucher::parse(payload)?;
-            ensure!(generation == 1, "route voucher cannot be rewritten");
+            let voucher = Voucher::parse(payload)?;
+            ensure!(
+                voucher.baseline.is_some() || generation == 1,
+                "legacy route voucher cannot be rewritten"
+            );
         }
         167 => {
             let u = Usage::parse(payload)?;
@@ -445,6 +464,9 @@ pub enum Command {
     VoucherContext {
         voucher: VersionRef,
     },
+    RenewContext {
+        voucher: VersionRef,
+    },
     Reader {
         envelope: Vec<u8>,
     },
@@ -468,8 +490,10 @@ impl Command {
                 let s = f[2].array(2)?;
                 let action = f[1].uint()?;
                 ensure!(
-                    matches!(action, 0 | 1 | 6 | 10 | 13 | 15 | 16 | 18 | 19 | 26)
-                        && s[0].uint()? <= 5,
+                    matches!(
+                        action,
+                        0 | 1 | 6 | 10 | 13 | 15 | 16 | 18 | 19 | 26 | 29 | 30
+                    ) && s[0].uint()? <= 5,
                     "unsupported route context"
                 );
                 Self::Context {
@@ -501,7 +525,8 @@ impl Command {
                 let s = f[6].array(2)?;
                 let budget = f[7].array(2)?;
                 ensure!(
-                    matches!(f[5].uint()?, 0 | 1 | 10 | 15 | 16 | 18 | 19) && s[0].uint()? <= 5,
+                    matches!(f[5].uint()?, 0 | 1 | 10 | 15 | 16 | 18 | 19 | 30)
+                        && s[0].uint()? <= 5,
                     "unsupported route capability"
                 );
                 Self::Issue {
@@ -523,14 +548,18 @@ impl Command {
                     envelope: f[1].bytes()?.to_vec(),
                 }
             }
-            "RouteVoucherContext" => {
+            name @ ("RouteVoucherContext" | "RouteRenewContext") => {
                 let f = value.array(2)?;
                 let voucher = version(&f[1])?;
                 ensure!(
                     voucher.kind == 166,
                     "route context requires a voucher reference"
                 );
-                Self::VoucherContext { voucher }
+                if name == "RouteRenewContext" {
+                    Self::RenewContext { voucher }
+                } else {
+                    Self::VoucherContext { voucher }
+                }
             }
             "RoutePermit" => {
                 let f = value.array(4)?;
@@ -579,6 +608,7 @@ impl Command {
             Self::Permit { .. } => "RoutePermit",
             Self::Reader { .. } => "RouteReaderPermit",
             Self::VoucherContext { .. } => "RouteVoucherContext",
+            Self::RenewContext { .. } => "RouteRenewContext",
             Self::InviteContext { .. } => "RouteInviteContext",
             Self::Invite { .. } => "RouteInvite",
             Self::CandidateContext { .. } => "RouteCandidateContext",
@@ -591,6 +621,7 @@ impl Command {
                 | Self::Lookup { .. }
                 | Self::CandidateContext { .. }
                 | Self::VoucherContext { .. }
+                | Self::RenewContext { .. }
                 | Self::Reader { .. }
                 | Self::InviteContext { .. }
         )
@@ -601,7 +632,9 @@ impl Command {
             Self::Register { profile } => profile.identity.service,
             Self::Lookup { service } | Self::Withdraw { service, .. } => *service,
             Self::Issue { id, .. } => *id,
-            Self::Permit { voucher, .. } | Self::VoucherContext { voucher } => voucher.id,
+            Self::Permit { voucher, .. }
+            | Self::VoucherContext { voucher }
+            | Self::RenewContext { voucher } => voucher.id,
             Self::Reader { envelope } => {
                 let (p, _) = wire::envelope(envelope, 1).expect("validated reader envelope");
                 wire::decode(&p)
@@ -666,7 +699,9 @@ impl Command {
                 V::Uint(*expires),
             ]),
             Self::Reader { envelope } => f.push(b(envelope)),
-            Self::VoucherContext { voucher } => f.push(reference(voucher)),
+            Self::VoucherContext { voucher } | Self::RenewContext { voucher } => {
+                f.push(reference(voucher))
+            }
             Self::Permit {
                 voucher,
                 connection,

@@ -33,6 +33,7 @@ pub(crate) mod timing;
 
 use crate::trust_wire::{self as wire, Value as V};
 use anyhow::{Context, Result, ensure};
+use archive::History;
 use ed25519_dalek::SigningKey;
 use journal::Journal;
 use records::{
@@ -647,6 +648,9 @@ impl Engine {
         }
         Ok(None)
     }
+    pub fn history_capacity(&self) -> Result<(u64, u64)> {
+        self.archive.capacity()
+    }
     fn active(&self) -> Result<()> {
         ensure!(
             !self.faulted,
@@ -655,7 +659,7 @@ impl Engine {
         self.journal.healthy()?;
         self.archive.healthy()?;
         ensure!(
-            self.archive.leaves().len() as u64 == self.snapshot.archive_size
+            self.archive.len() as u64 == self.snapshot.archive_size
                 && self.archive.tree_root() == self.snapshot.archive_root,
             "History publication was interrupted; reopen the exclusive signer journal"
         );
@@ -698,7 +702,7 @@ impl Engine {
         if effects.entered.is_some() {
             // The new view, retired signature floor and retained dependencies
             // reach durable storage together before any NewView is emitted.
-            self.compact_snapshot(next, None, self.archive.leaves(), true)?;
+            self.compact_snapshot(next, None, &self.archive, true)?;
         }
         let prepared = certificate(&self.configuration, next, &next.highest_prepare)?;
         let new_view = if let Some(view) = effects.entered.filter(|view| *view > prepared.view) {

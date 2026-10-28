@@ -119,6 +119,7 @@ pub fn derive_keys(state: &mut State) -> Result<()> {
         }
     }
     domains::backup::validate_state(state, true)?;
+    domains::streams::validate_state(state, true)?;
     domains::ssh::validate_state(state)?;
     domains::transfer::validate_state(state)?;
     domains::mail::validate_state(state)?;

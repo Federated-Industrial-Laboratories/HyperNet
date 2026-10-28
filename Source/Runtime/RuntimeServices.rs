@@ -13,12 +13,16 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
 };
+#[path = "RuntimeAuthorityConnector.rs"]
+mod authority_connector;
 #[path = "RuntimeServiceControl.rs"]
 pub(super) mod control;
 #[path = "RuntimeServiceEgress.rs"]
 pub(crate) mod egress;
 #[path = "RuntimeServiceEpoch.rs"]
 mod epoch;
+#[path = "RuntimeMappedControl.rs"]
+pub(crate) mod mapped;
 #[path = "RuntimeServicePreparation.rs"]
 pub(super) mod preparation;
 #[path = "RuntimeServiceSetup.rs"]
@@ -32,6 +36,9 @@ pub struct Location {
 }
 #[derive(Subcommand)]
 pub enum Command {
+    /// Verify private mapped control metadata inside the rootless parent namespace.
+    #[command(hide = true)]
+    MappedControlCheck(Location),
     Transition {
         #[command(subcommand)]
         command: super::transition::Command,
@@ -111,10 +118,14 @@ pub(super) struct Profile {
     pub(super) manifest: Manifest,
     pub(super) artifacts: BTreeMap<String, [u8; 32]>,
     pub(super) authority_control: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    authority_binding: Option<authority_connector::Binding>,
     pub(super) clock_directory: PathBuf,
     pub(super) selinux: bool,
     media_controls: BTreeMap<String, MediaMount>,
     route_target: Option<MediaMount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    application_target: Option<MediaMount>,
 }
 impl Profile {
     pub(super) fn role(&self) -> Result<&Role> {
@@ -125,7 +136,11 @@ impl Profile {
         Ok(&self.manifest.roles[0])
     }
     pub(super) fn validate(&self) -> Result<()> {
-        ensure!(self.version == 1, "unsupported installed service profile");
+        ensure!(
+            (self.version == 1 && self.authority_binding.is_none())
+                || (self.version == 2 && self.authority_binding.is_some()),
+            "unsupported installed service profile"
+        );
         self.manifest.validate()?;
         let role = self.role()?;
         ensure!(
@@ -190,10 +205,18 @@ impl Profile {
             files::safe_path(p)?;
             ensure!(p.is_absolute(), "absolute service path required");
         }
-        ensure!(
-            self.authority_control.ends_with("Launch/State/Control"),
-            "authority control must use its isolated installed directory"
-        );
+        if let Some(binding) = &self.authority_binding {
+            binding.check(&self.manifest)?;
+            ensure!(
+                self.authority_control.ends_with("Ingress"),
+                "authority connector must expose only its mapped Ingress directory"
+            );
+        } else {
+            ensure!(
+                self.authority_control.ends_with("Launch/State/Control"),
+                "authority control must use its isolated installed directory"
+            );
+        }
         let expected: &[&str] = match role.role {
             5 => &[
                 "Bootstrap.cbor",
@@ -270,10 +293,18 @@ impl Profile {
             "only a bridge can hold local media controls"
         );
         ensure!(
-            role.role == 5 || self.route_target.is_none(),
+            role.role == 5 || self.route_target.is_none() && self.application_target.is_none(),
             "only a route endpoint can mount an application socket"
         );
-        if let Some(target) = &self.route_target {
+        ensure!(
+            self.route_target.is_none() || self.application_target.is_none(),
+            "route has two local application bindings"
+        );
+        if let Some(target) = self
+            .route_target
+            .as_ref()
+            .or(self.application_target.as_ref())
+        {
             files::safe_path(&target.directory)?;
             ensure!(
                 target.directory.is_absolute(),
@@ -314,6 +345,13 @@ impl Profile {
     }
     pub(super) fn check_artifacts(&self) -> Result<()> {
         self.validate()?;
+        if let Some(binding) = &self.authority_binding {
+            ensure!(
+                authority_connector::Binding::read(&self.authority_control, &self.manifest)?
+                    == *binding,
+                "authority connector changed from exact local consent"
+            );
+        }
         ensure!(
             files::root(&self.root)? == self.root
                 && files::executable(&std::env::current_exe()?.canonicalize()?)?
@@ -351,9 +389,30 @@ impl Profile {
         if self.role()?.role == 5 {
             ensure!(
                 files::read(&self.root.join("Config/RouteBinding.json"), wire::MAXIMUM)?
-                    == serde_json::to_vec(&self.route_target)?,
+                    == serde_json::to_vec(
+                        &self
+                            .route_target
+                            .as_ref()
+                            .or(self.application_target.as_ref())
+                    )?,
                 "application socket binding differs from signed local consent"
             );
+            if let Some(target) = &self.application_target {
+                let configuration: crate::route_config::Configuration = serde_json::from_slice(
+                    &files::read(&self.root.join("Config/ServiceConfig.json"), 16384)?,
+                )?;
+                let application = configuration
+                    .application
+                    .context("application stream configuration absent")?;
+                crate::route_config::application_mount::validate_host(
+                    &target.directory,
+                    &application,
+                )?;
+                ensure!(
+                    target.profile_digest == hex::encode(application.binding.digest()?),
+                    "local application binding digest differs"
+                );
+            }
             if let Some(target) = &self.route_target {
                 let (installed, _) = load(&target.directory)?;
                 ensure!(
@@ -425,11 +484,12 @@ fn preview(p: &Profile, s: &State) -> Result<Value> {
         "profileDigest":p.digest()?,"localGeneration":p.manifest.generation,"manifest":p.manifest,"artifacts":p.artifacts,
         "role":match p.role()?.role{1=>"Page",2=>"Media",3=>"Mail",4=>"Transfer",5=>"PrivateRoute",7=>"Bridge",8=>"Ssh",_=>unreachable!()},"authentication":if p.role()?.role==8{"Native OpenSSH host key from exact signed SshProfile; generic manifest TLS metadata does not authenticate this listener"}else if p.role()?.role==7{"Pinned TLS1.3 counterpart bridges plus private local operator control; no direct reader route"}else if p.role()?.role==5{"Pinned TLS1.3 relay transport; inner TLS terminates at the exact consented final service"}else{"Private local control only; no remote reader route"},
         "tcpEgress":p.role()?.role==7,"isolatedEgressHelper":p.role()?.role==5,"mediaControls":p.media_controls,"authorityAccess":"Private control socket only","session":if p.manifest.session_mode==1{"Managed"}else{"Session"},"managedBootPolicy":p.manifest.session_mode==1,
-        "authorityControl":s.authority_control.as_ref().unwrap_or(&p.authority_control),"currentPermission":false,"initialised":s.initialised}),
+        "authorityControl":s.authority_control.as_ref().unwrap_or(&p.authority_control),"authorityConnector":p.authority_binding,"currentPermission":false,"initialised":s.initialised}),
     )
 }
 pub fn run(command: Command) -> Result<Value> {
     match command {
+        Command::MappedControlCheck(location) => mapped::inspect_mapped(&location.directory),
         Command::Transition { command } => super::transition::run(command, true),
         Command::Managed { command } => super::managed::run(command, true),
         Command::Diagnose(options) => super::diagnostics::run(options, diagnostic_snapshot),

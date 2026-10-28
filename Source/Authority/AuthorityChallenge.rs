@@ -16,6 +16,26 @@ pub const MAXIMUM_DURATION_MS: u64 = 5000;
 pub const FEDERATION_DURATION_MS: u64 = 15_000;
 pub const DELTA_MS: u64 = 250;
 
+/// The original recipient deadline elapsed; no authority survives this attempt.
+#[derive(Debug)]
+pub struct ChallengeExpired;
+impl std::fmt::Display for ChallengeExpired {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str("recipient challenge deadline expired")
+    }
+}
+impl std::error::Error for ChallengeExpired {}
+
+/// The authenticated upper validity bound elapsed; other clock/context failures remain distinct.
+#[derive(Debug)]
+pub struct ValidityExpired;
+impl std::fmt::Display for ValidityExpired {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str("authority effect is outside its conservative absolute validity interval")
+    }
+}
+impl std::error::Error for ValidityExpired {}
+
 /// Only finite, grant-free federation maintenance can use the longer profile.
 /// This selects a freshness ceiling; the domain still verifies the exact service authority.
 pub fn maximum_duration_ms(request: &SignedRequest) -> u64 {
@@ -316,13 +336,12 @@ impl Session {
             live.digest == challenge.digest
                 && live.intent == challenge.intent
                 && now.boot_ms >= live.issue_boot_ms
-                && now.boot_ms < live.deadline_boot_ms
                 && live.deadline_boot_ms
                     <= live
                         .issue_boot_ms
                         .checked_add(challenge.maximum_duration_ms)
                         .ok_or_else(|| anyhow::anyhow!("challenge deadline overflow"))?,
-            "challenge context or deadline is invalid"
+            "challenge context or clock progression is invalid"
         );
         let lower = now
             .wall_ms
@@ -333,9 +352,15 @@ impl Session {
             .checked_add(DELTA_MS)
             .ok_or_else(|| anyhow::anyhow!("wall clock overflow"))?;
         ensure!(
-            lower >= not_before_ms && upper < expires_at_ms.min(challenge.expires_at_ms),
-            "authority effect is outside its conservative absolute validity interval"
+            lower >= not_before_ms,
+            "authority effect precedes its conservative absolute validity interval"
         );
+        if now.boot_ms >= live.deadline_boot_ms {
+            return Err(ChallengeExpired.into());
+        }
+        if upper >= expires_at_ms.min(challenge.expires_at_ms) {
+            return Err(ValidityExpired.into());
+        }
         Ok(())
     }
     pub(crate) fn check(
@@ -465,6 +490,126 @@ mod tests {
                     .is::<crate::consensus_clock::ObservationExpired>()
             );
         }
+    }
+    #[test]
+    fn validity_expiry_never_hides_context_not_before_or_clock_mismatch() {
+        let session = Session::new().unwrap();
+        let challenge = Challenge {
+            client_nonce: [7; 32],
+            network: [1; 32],
+            incarnation: [2; 32],
+            recipient: [3; 32],
+            boot_id: session.boot_id,
+            nonce: [4; 32],
+            intent: [5; 32],
+            created_at_ms: 10000,
+            expires_at_ms: 15000,
+            maximum_duration_ms: 5000,
+            digest: [7; 32],
+        };
+        let live = Live {
+            digest: challenge.digest,
+            intent: challenge.intent,
+            issue_boot_ms: 100,
+            deadline_boot_ms: 5100,
+        };
+        let now = Observation {
+            wall_ms: 14900,
+            boot_ms: 5000,
+        };
+        assert!(
+            session
+                .check_live_at(&challenge, &live, 15000, 10000, now)
+                .unwrap_err()
+                .is::<ValidityExpired>()
+        );
+        for (not_before, boot, intent) in [
+            (15000, 5000, challenge.intent),
+            (15000, 5100, challenge.intent),
+            (10000, 99, challenge.intent),
+            (10000, 5000, [8; 32]),
+        ] {
+            let mut invalid = challenge.clone();
+            invalid.intent = intent;
+            let error = session
+                .check_live_at(
+                    &invalid,
+                    &live,
+                    15000,
+                    not_before,
+                    Observation {
+                        wall_ms: 14900,
+                        boot_ms: boot,
+                    },
+                )
+                .unwrap_err();
+            assert!(!error.is::<ValidityExpired>() && !error.is::<ChallengeExpired>());
+        }
+    }
+    #[test]
+    fn elapsed_challenge_never_hides_context_or_clock_mismatch() {
+        let mut session = Session::new().unwrap();
+        let challenge = Challenge {
+            client_nonce: [7; 32],
+            network: [1; 32],
+            incarnation: [2; 32],
+            recipient: [3; 32],
+            boot_id: session.boot_id,
+            nonce: [4; 32],
+            intent: [5; 32],
+            created_at_ms: 10000,
+            expires_at_ms: 15000,
+            maximum_duration_ms: 5000,
+            digest: [7; 32],
+        };
+        let mut live = Live {
+            digest: challenge.digest,
+            intent: challenge.intent,
+            issue_boot_ms: 100,
+            deadline_boot_ms: 5100,
+        };
+        let now = Observation {
+            wall_ms: 15000,
+            boot_ms: 5100,
+        };
+        assert!(
+            session
+                .check_live_at(&challenge, &live, 15000, 10000, now)
+                .unwrap_err()
+                .is::<ChallengeExpired>()
+        );
+        for field in 0..5 {
+            let mut invalid = challenge.clone();
+            match field {
+                0 => invalid.boot_id = [99; 32],
+                1 => invalid.digest = [99; 32],
+                2 => invalid.intent = [99; 32],
+                3 => invalid.maximum_duration_ms = 4999,
+                _ => live.issue_boot_ms = 5101,
+            }
+            assert!(
+                !session
+                    .check_live_at(&invalid, &live, 15000, 10000, now)
+                    .unwrap_err()
+                    .is::<ChallengeExpired>()
+            );
+        }
+        live.issue_boot_ms = 100;
+        session.challenges.insert(challenge.nonce, live);
+        assert!(
+            session
+                .check_at(&challenge, 15000, 10000, now)
+                .unwrap_err()
+                .is::<ChallengeExpired>()
+        );
+        assert_eq!(session.challenges.len(), 1);
+        session.challenges.clear();
+        assert!(
+            !session
+                .check_at(&challenge, 15000, 10000, now)
+                .unwrap_err()
+                .is::<ChallengeExpired>()
+        );
     }
     #[test]
     fn clock_error_budget_does_not_add_another_uncertainty_allowance() {

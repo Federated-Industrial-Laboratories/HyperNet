@@ -17,13 +17,17 @@ fn control(driver: &Driver, operation: u64, payload: &[u8]) -> Vec<u8> {
 }
 #[test]
 fn fresh_policy_quorum_uses_current_local_state_without_journal_or_stream_writes() {
-    policy_quorum(false);
+    policy_quorum(false, false);
 }
 #[test]
 fn fresh_read_delayed_shares_survive_retransmission_and_recollection_until_exact_expiry() {
-    policy_quorum(true);
+    policy_quorum(true, false);
 }
-fn policy_quorum(delayed: bool) {
+#[test]
+fn completed_fresh_read_capacity_recovers_for_the_same_original_challenge() {
+    policy_quorum(false, true);
+}
+fn policy_quorum(delayed: bool, capacity: bool) {
     let now = crate::consensus_clock::moment().unwrap();
     let fixture = crate::authority_application::tests::Fixture::at(now.wall_ms - 1000);
     let configuration = fixture.configuration().clone();
@@ -79,7 +83,7 @@ fn policy_quorum(delayed: bool) {
             &request,
             &fixture.requester,
             [67; 32],
-            5000,
+            if capacity { 3000 } else { 5000 },
             ClockHealth::new(now.wall_ms, now.boot_ms, now.boot_ms + 1000, 1)
                 .unwrap()
                 .frozen(),
@@ -238,6 +242,137 @@ fn policy_quorum(delayed: bool) {
         &configuration.descriptor().genesis().unwrap()
     );
     assert_eq!(verified.statement.evaluated_at_ms, initial.evaluated_at_ms);
+    if capacity {
+        // A completed certificate must remain recoverable after a lost response.
+        // Thirty-two real completed reads still occupy the finite collection budget.
+        for mailbox in &mailboxes {
+            while mailbox.try_pop().unwrap().is_some() {}
+        }
+        let mut issue = |nonce: u8| {
+            let now = crate::consensus_clock::moment().unwrap();
+            let signed = read::Request::sign(
+                configuration.descriptor().scope(),
+                &fixture.requester,
+                requester,
+                [nonce; 32],
+                0,
+                read::Query::PolicyContext,
+            )
+            .unwrap();
+            let challenge = session
+                .issue_read(
+                    &signed,
+                    &fixture.requester,
+                    [nonce; 32],
+                    5000,
+                    ClockHealth::new(now.wall_ms, now.boot_ms, now.boot_ms + 1000, 1)
+                        .unwrap()
+                        .frozen(),
+                )
+                .unwrap();
+            (signed, challenge)
+        };
+        let finish = |drivers: &mut Vec<Driver>, signed: &[u8], challenge: &[u8]| {
+            let id = read::read_id(signed, challenge).unwrap();
+            let submission = wire::encode(&V::Array(vec![
+                V::Bytes(signed.to_vec()),
+                V::Bytes(challenge.to_vec()),
+            ]))
+            .unwrap();
+            let reply = drivers[0].read_start(&submission).unwrap();
+            assert_eq!(
+                wire::decode(&reply).unwrap().array(10).unwrap()[3]
+                    .uint()
+                    .unwrap(),
+                0
+            );
+            for index in 1..4 {
+                let bytes = mailboxes[index].try_pop().unwrap().expect("fresh probe");
+                if index < 3 {
+                    let message =
+                        peer::decode(&configuration, configuration.voters[0], &bytes).unwrap();
+                    drivers[index]
+                        .receive(configuration.voters[0], message)
+                        .unwrap();
+                    let share = mailboxes[0].try_pop().unwrap().expect("fresh share");
+                    let message =
+                        peer::decode(&configuration, configuration.voters[index], &share).unwrap();
+                    drivers[0]
+                        .receive(configuration.voters[index], message)
+                        .unwrap();
+                }
+            }
+            let reply = drivers[0].read_poll(id).unwrap();
+            assert_eq!(
+                wire::decode(&reply).unwrap().array(10).unwrap()[3]
+                    .uint()
+                    .unwrap(),
+                1
+            );
+            reply
+        };
+        for nonce in 100..100 + MAX_PENDING as u8 - 1 {
+            let (signed, challenge) = issue(nonce);
+            finish(&mut drivers, &signed, &challenge);
+        }
+        assert_eq!(drivers[0].reads.len(), MAX_PENDING);
+        let (signed, original_challenge) = issue(200);
+        let exact = wire::encode(&V::Array(vec![
+            V::Bytes(signed.clone()),
+            V::Bytes(original_challenge.clone()),
+        ]))
+        .unwrap();
+        let unavailable = drivers[0].read_start(&exact).unwrap();
+        let unavailable = wire::decode(&unavailable).unwrap();
+        let fields = unavailable.array(10).unwrap();
+        assert_eq!(
+            (fields[3].uint().unwrap(), fields[4].uint().unwrap()),
+            (2, 2)
+        );
+        assert_eq!(drivers[0].reads.len(), MAX_PENDING);
+        let expires = crate::authority_proof::Challenge::from_signed(&challenge)
+            .unwrap()
+            .expires_at_ms;
+        let now = crate::consensus_clock::moment().unwrap().wall_ms;
+        std::thread::sleep(Duration::from_millis(
+            expires
+                .saturating_sub(crate::authority_challenge::DELTA_MS)
+                .saturating_add(1)
+                .saturating_sub(now),
+        ));
+        for directory in &directories {
+            runtime_clock(&directory.0);
+        }
+        let reply = finish(&mut drivers, &signed, &original_challenge);
+        let value = wire::decode(&reply).unwrap();
+        let fields = value.array(10).unwrap();
+        let node = fields[6].bytes().unwrap();
+        let ancestry = vec![node.to_vec()];
+        let verified = read::verify_response(
+            configuration.descriptor(),
+            &signed,
+            &original_challenge,
+            read::Response {
+                node,
+                certificate: fields[7].bytes().unwrap(),
+                result: fields[8].bytes().unwrap(),
+                ancestry: &ancestry,
+            },
+            |_, result, _| read::result_versions(result),
+        )
+        .unwrap();
+        assert_eq!(
+            verified.point().prefix(),
+            &configuration.descriptor().genesis().unwrap()
+        );
+        assert!(
+            verified.statement.expires_at_ms
+                <= crate::authority_proof::Challenge::from_signed(&original_challenge)
+                    .unwrap()
+                    .expires_at_ms
+        );
+        assert_eq!(drivers[0].reads.len(), MAX_PENDING);
+    }
     if delayed {
         // A forward wall correction must expire the old quorum even before its monotonic cap.
         let expired_wall = initial.expires_at_ms - crate::authority_challenge::DELTA_MS;

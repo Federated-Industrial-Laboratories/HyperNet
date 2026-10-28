@@ -37,6 +37,8 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 pub trait Channel: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Channel for T {}
 type Stream = Box<dyn Channel>;
+#[path = "ApplicationStreamRuntime.rs"]
+mod application_streams;
 static TIMING_SAMPLES: AtomicU64 = AtomicU64::new(0);
 const DISPATCH_MS: u64 = 100;
 const READ_RETRY_MS: u64 = 1000;
@@ -44,6 +46,8 @@ const READ_RETRY_MS: u64 = 1000;
 pub(crate) enum ReadRetry {
     FreshQuorumUnavailable,
     HistoryOvertaken,
+    ChallengeExpired,
+    TransportClosed,
 }
 impl std::fmt::Display for ReadRetry {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -114,6 +118,7 @@ impl std::error::Error for Phase {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FailureCode {
     ObservationExpired,
+    ChallengeExpired,
     FreshQuorumUnavailable,
     HistoryOvertaken,
     LocalReadClosed,
@@ -133,6 +138,9 @@ enum FailureCode {
 fn failure_code(error: &anyhow::Error) -> FailureCode {
     if error.is::<crate::consensus_clock::ObservationExpired>() {
         return FailureCode::ObservationExpired;
+    }
+    if error.is::<crate::authority_challenge::ChallengeExpired>() {
+        return FailureCode::ChallengeExpired;
     }
     if error.is::<crate::authority_local_transport::FreshReadUnavailable>() {
         return FailureCode::FreshQuorumUnavailable;
@@ -202,9 +210,12 @@ impl Timing {
     fn failure(self, stage: Phase, error: &anyhow::Error) {
         if let Some(sample) = self.sample {
             eprintln!(
-                "HyperNet private route failure: sample={sample} stage={stage:?} cause={:?} reason={:?} bootMs={:?}",
+                "HyperNet private route failure: sample={sample} stage={stage:?} cause={:?} reason={:?} freshReadCode={:?} bootMs={:?}",
                 error.downcast_ref::<Phase>(),
                 failure_code(error),
+                error
+                    .downcast_ref::<crate::authority_local_transport::FreshReadUnavailable>()
+                    .map(|e| e.code),
                 crate::authority_challenge::boot_time_ms().ok(),
             );
         }
@@ -481,6 +492,7 @@ struct Session {
     slot: Option<OwnedSemaphorePermit>,
     timing: Timing,
     frames: u8,
+    exporter: Digest,
 }
 impl Session {
     fn mark(&self, phase: Phase) {
@@ -996,7 +1008,7 @@ async fn relay(
                         timing
                     });
                     if crate::authority_local_transport::remaining(deadline).is_err() { incoming.diagnostics.refuse(Refusal::Deadline); timing.mark(Phase::AdmissionRefused); continue; }
-                    let admitted = admission_checked(client.admit(&opened.open, opened.signer, opened.connection, opened.binding, (started, deadline), timing))
+                    let admitted = clock_checked(client.admit(&opened.open, opened.signer, opened.connection, opened.binding, (started, deadline), timing))
                         .context(Phase::AdmissionAuthority)?;
                     active.check(guard).context(Phase::AdmissionCurrent)?;
                     let admission = match admitted {
@@ -1065,9 +1077,12 @@ async fn relay(
     }.await;
     if let Err(error) = &outcome {
         eprintln!(
-            "HyperNet private relay termination: phase={:?} reason={:?} bootMs={:?}",
+            "HyperNet private relay termination: phase={:?} reason={:?} freshReadCode={:?} bootMs={:?}",
             error.downcast_ref::<Phase>(),
             failure_code(error),
+            error
+                .downcast_ref::<crate::authority_local_transport::FreshReadUnavailable>()
+                .map(|e| e.code),
             crate::authority_challenge::boot_time_ms().ok()
         );
     }
@@ -1098,7 +1113,13 @@ async fn endpoint_incoming(
             stream.get_ref().1.alpn_protocol() == Some(route_tls::ALPN),
             "private endpoint protocol differs"
         );
+        let exporter = stream.get_ref().1.export_keying_material(
+            [0; 32],
+            crate::authority_domains::streams::protocol::EXPORTER,
+            None,
+        )?;
         Ok(Session {
+            exporter,
             stream: Box::new(stream),
             boundary,
             deadline: start.saturating_add(limits.duration_ms),
@@ -1173,7 +1194,13 @@ async fn attach(
             inner.get_ref().1.alpn_protocol() == Some(route_tls::ALPN),
             "attached endpoint protocol differs"
         );
+        let exporter = inner.get_ref().1.export_keying_material(
+            [0; 32],
+            crate::authority_domains::streams::protocol::EXPORTER,
+            None,
+        )?;
         Ok(Session {
+            exporter,
             stream: Box::new(inner),
             boundary,
             deadline: start
@@ -1448,6 +1475,9 @@ async fn endpoint(
     acceptor: TlsAcceptor,
     client: &mut Client<'_>,
 ) -> Result<()> {
+    if config.profile.protocol == crate::authority_domains::streams::PROTOCOL {
+        return application_streams::endpoint(config, guard, active, acceptor, client).await;
+    }
     let own = &config.profile;
     let capacity = usize::try_from(own.maximum_connections)?;
     let expiry = client.effect_deadline()?;
@@ -1596,24 +1626,14 @@ async fn endpoint(
     drain(&mut responses).await;
     outcome
 }
-fn admission_checked<T>(outcome: Result<T>) -> Result<Result<T>> {
-    match outcome {
-        // This read has its own bounded challenge. Failure denies this connection without
-        // revoking unrelated proofs; every existing gate retains its original expiry.
-        Err(error)
-            if error.is::<ReadRetry>()
-                && !error.is::<crate::consensus_clock::ObservationExpired>() =>
-        {
-            Ok(Err(error))
-        }
-        outcome => clock_checked(outcome),
-    }
-}
+// A failed connection read closes only that connection. Other gates retain their
+// exact expiry. An expired ordinary challenge requires exact requester recovery.
 fn clock_checked<T>(outcome: Result<T>) -> Result<Result<T>> {
     match outcome {
         Err(error)
             if error.is::<crate::consensus_clock::ObservationExpired>()
-                || error.is::<ReadRetry>() =>
+                || (error.is::<crate::authority_challenge::ChallengeExpired>()
+                    && !error.is::<ReadRetry>()) =>
         {
             Err(error)
         }
@@ -1704,11 +1724,16 @@ pub async fn run(config: Config, guard: &Guard, active: &Active) -> Result<()> {
                     crate::authority_challenge::boot_time_ms().ok()
                 );
             }
-            Err(error) if error.is::<ReadRetry>() => {
-                // No existing admission survives; a new read gets its own challenge and deadline.
+            Err(error)
+                if error.is::<ReadRetry>()
+                    || error.is::<crate::authority_challenge::ChallengeExpired>() =>
+            {
+                // No admission survives. Reopening retains the exact pending ordinary request;
+                // a fresh challenge cannot replace its sequence or restore a consumed admission.
                 eprintln!(
-                    "HyperNet private route authority: Suspended reason={:?} bootMs={:?}",
+                    "HyperNet private route authority: Suspended reason={:?} failure={:?} bootMs={:?}",
                     error.downcast_ref::<ReadRetry>(),
+                    failure_code(&error),
                     crate::authority_challenge::boot_time_ms().ok()
                 );
                 let resumed = wait_for_retry(

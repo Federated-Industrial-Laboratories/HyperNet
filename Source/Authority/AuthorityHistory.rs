@@ -7,7 +7,8 @@ use crate::{
 use anyhow::{Result, ensure};
 use sha2::{Digest as _, Sha256};
 
-pub const MAX_LEAVES: u64 = 131072;
+// Proof arithmetic bounds; replica byte quotas govern actual retention.
+pub const MAX_LEAVES: u64 = (1u64 << 63) - 1;
 const MAX_PATH: usize = 64;
 fn record(value: &V, kind: u64, size: usize) -> Result<&[V]> {
     let fields = value.array(size)?;

@@ -21,7 +21,7 @@ network; follow the deployment steps below after checking the release limits.
 | Check the Ada contract | GNATprove and its project tools, separately from the runtime compiler. |
 | Build the OCI image | Rootless Podman, Bash, GNU coreutils and Debian-format library ownership records (`dpkg-query`). |
 | Verify or install a signed bundle | Trusted bundle helpers, Python 3.11 or later, OpenSSH `ssh-keygen` with Ed25519 SSHSIG support, matching native architecture and host ABI. |
-| Run a host | Rootless Podman and OCI runtime, subordinate UID/GID mappings, delegated cgroup v2 CPU/memory/PID controllers, seccomp and Landlock ABI 6 or newer. |
+| Run a host | Rootless Podman and OCI runtime, `slirp4netns` in `/usr/bin` or `/bin`, subordinate UID/GID mappings, delegated cgroup v2 CPU/memory/PID controllers, seccomp and Landlock ABI 6 or newer. |
 | Prepare network identities | Maintained OpenSSL at `/usr/bin/openssl`, private persistent storage and independently authenticated peer information. |
 | Keep authority time | A separately pinned monitor and chrony configured with authenticated NTS sources. |
 | Use managed startup | A working Linux systemd user manager, explicit managed consent and user lingering. |
@@ -32,6 +32,10 @@ a native-manager shared-library dependency. Image libraries do not
 replace the host kernel or native manager dependencies. Current native development
 is on x86_64 Linux; consult [qualification](Qualification.md) for unverified platforms.
 A distribution name alone does not establish that confinement is available.
+Install the host distribution's `slirp4netns` package and its dependencies before
+starting outbound service helpers. The native manager uses a fixed system path;
+an executable available only through a custom shell path does not satisfy this
+requirement. Package qualification reports the detected helper version.
 
 ## Build a trusted checkout
 

@@ -2,7 +2,9 @@
 // A relay re-evaluates current certified permission and durably records connection admissions.
 use crate::{
     authority_challenge::{self, Session},
-    authority_domains::{self as domains, Command as DomainCommand, Operation, result, routes},
+    authority_domains::{
+        self as domains, Command as DomainCommand, Operation, result, routes, streams,
+    },
     authority_floor::Store,
     authority_local_transport as transport,
     authority_membership::{Reservations, reference},
@@ -132,9 +134,7 @@ impl<'a> Client<'a> {
         };
         out.check_cache()?;
         // Recover the exact retained request before any new connection can consume permission.
-        if let Some(pending) = out.pending()? {
-            out.action(pending)?;
-        }
+        out.recover()?;
         Ok(out)
     }
     fn check_cache(&self) -> Result<()> {
@@ -173,6 +173,21 @@ impl<'a> Client<'a> {
         Ok(())
     }
     fn permitted(&self, command: &DomainCommand) -> Result<()> {
+        if matches!(
+            command,
+            DomainCommand::Stream(
+                streams::Command::Inspect { .. }
+                    | streams::Command::Admit { .. }
+                    | streams::Command::Permit { .. }
+                    | streams::Command::Close { .. }
+            )
+        ) {
+            ensure!(
+                self.config.profile.protocol == streams::PROTOCOL,
+                "only application endpoints may admit streams"
+            );
+            return Ok(());
+        }
         ensure!(
             matches!(
                 command,
@@ -379,20 +394,20 @@ impl<'a> Client<'a> {
             .signed()
             .to_vec())
     }
-    pub fn pending(&self) -> Result<Option<routes::Command>> {
+    pub fn pending(&self) -> Result<Option<DomainCommand>> {
         self.store
             .resume_ordinary()?
             .map(|request| {
                 let operation = Operation::parse(&Intent::from_signed(request.signed())?)?;
                 self.permitted(&operation.command)?;
-                let DomainCommand::Route(command) = operation.command else {
-                    unreachable!()
-                };
-                Ok(command)
+                Ok(operation.command)
             })
             .transpose()
     }
     pub fn action(&mut self, command: routes::Command) -> Result<V> {
+        self.domain_action(DomainCommand::Route(command))
+    }
+    fn domain_action(&mut self, command: DomainCommand) -> Result<V> {
         self.active.check(self.guard)?;
         if let Some(deadline) = self.deadline {
             transport::remaining(deadline)?;
@@ -404,7 +419,11 @@ impl<'a> Client<'a> {
         if self.store.resume_ordinary()?.is_none()
             && matches!(
                 command,
-                routes::Command::Lookup { .. } | routes::Command::VoucherContext { .. }
+                DomainCommand::Route(
+                    routes::Command::Lookup { .. } | routes::Command::VoucherContext { .. }
+                ) | DomainCommand::Stream(
+                    streams::Command::Inspect { .. } | streams::Command::Permit { .. }
+                )
             )
         {
             return self.read_action(command);
@@ -413,7 +432,7 @@ impl<'a> Client<'a> {
             self.status()?;
         }
         let started = authority_challenge::boot_time_ms()?;
-        let signed = self.prepare(DomainCommand::Route(command))?;
+        let signed = self.prepare(command)?;
         let intent = Intent::from_signed(&signed)?;
         let operation = Operation::parse(&intent)?;
         let input_refs = operation.command.command_inputs();
@@ -566,8 +585,23 @@ impl<'a> Client<'a> {
         self.costs.own_ms.unwrap_or(0)
     }
     fn recover(&mut self) -> Result<()> {
-        if let Some(pending) = self.pending()? {
-            self.action(pending)?;
+        // A disclosure refusal is not an original outcome. Resolve it before
+        // selecting a retained command so status cannot turn it into new work.
+        if self.store.refusal_needs_status()? {
+            self.status()?;
+        }
+        if let Some(pending) = self.pending()?
+            && let Err(error) = self.domain_action(pending)
+        {
+            if self.store.refusal_needs_status()? {
+                self.status()?;
+                // Only authenticated terminal refusal releases this slot.
+                // An unknown outcome or an unconsumed Permit stays pending.
+                if self.pending()?.is_none() {
+                    return Ok(());
+                }
+            }
+            return Err(error);
         }
         Ok(())
     }
@@ -626,7 +660,7 @@ impl<'a> Client<'a> {
         timing: Timing,
     ) -> Result<Option<Admission>> {
         if let Some(pending) = self.pending()? {
-            self.action(pending)?;
+            self.domain_action(pending)?;
             return Ok(None);
         }
         ensure!(
@@ -791,6 +825,52 @@ impl<'a> Client<'a> {
         now.boot_ms
             .checked_add(remaining)
             .context("route effect deadline overflow")
+    }
+    pub fn stream_admit(&mut self, proof: streams::Proof) -> Result<VersionRef> {
+        self.recover()?;
+        self.domain_action(DomainCommand::Stream(streams::Command::Inspect {
+            proof: proof.clone(),
+        }))?;
+        let registered = streams::Service::parse(
+            &self.disk.context().0.record(172, proof.service.id)?.payload,
+            self.guard.manifest.network,
+            self.guard.manifest.incarnation,
+        )?;
+        ensure!(
+            registered.registration.envelope
+                == self
+                    .config
+                    .application
+                    .as_ref()
+                    .context("local application binding absent")?
+                    .registration,
+            "registered stream service differs from exact local consent"
+        );
+        let id = proof.id()?;
+        self.domain_action(DomainCommand::Stream(streams::Command::Admit { proof }))?;
+        Ok(self.disk.context().0.record(173, id)?.reference.clone())
+    }
+    pub fn stream_permit(&mut self, session: &VersionRef) -> Result<u64> {
+        self.recover()?;
+        self.domain_action(DomainCommand::Stream(streams::Command::Permit {
+            session: session.clone(),
+        }))?;
+        self.effect_deadline()
+    }
+    pub fn stream_close(&mut self, session: &VersionRef) -> Result<()> {
+        self.recover()?;
+        let r = self.disk.context().0.record(173, session.id)?.clone();
+        let current = streams::Session::parse(
+            &r.payload,
+            self.guard.manifest.network,
+            self.guard.manifest.incarnation,
+        )?;
+        if !current.retired && current.proof.generation == session.generation {
+            self.domain_action(DomainCommand::Stream(streams::Command::Close {
+                session: r.reference,
+            }))?;
+        }
+        Ok(())
     }
     pub fn reader(&mut self, envelope: &[u8]) -> Result<Vec<u8>> {
         self.recover()?;

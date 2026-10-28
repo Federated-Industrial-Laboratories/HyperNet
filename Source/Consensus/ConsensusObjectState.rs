@@ -150,6 +150,24 @@ impl Engine {
         };
         self.persist_published(next, &encoded)
     }
+    pub(super) fn publish_applied_history(
+        &mut self,
+        next: Snapshot,
+        history: &(impl archive::History + ?Sized),
+    ) -> Result<()> {
+        let publication = Self::publish_objects(&next).and_then(|encoded| {
+            self.archive.append_history(history)?;
+            Ok(encoded)
+        });
+        let encoded = match publication {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                self.faulted = true;
+                return Err(error);
+            }
+        };
+        self.persist_published(next, &encoded)
+    }
     pub(super) fn publish_objects(state: &Snapshot) -> Result<Vec<u8>> {
         let encoded = Self::object_budget(state, false)?;
         let store = objects(state)?;

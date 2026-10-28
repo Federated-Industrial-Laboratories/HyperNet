@@ -742,6 +742,12 @@ pub(super) fn evaluate(
             && let Some(record) = &selected.record
         {
             let mut records = state.records.clone();
+            if let authority_applications::Operation::Renew { consent, .. } = application {
+                records.retain(|bytes| {
+                    authority_applications::record_reference(bytes)
+                        .is_ok_and(|r| r.index() != consent.admission.index())
+                });
+            }
             records.push(record.clone());
             membership::sort_records(&mut records)?;
             if records.len() > crate::authority_capacity::MAX_RECORDS {
