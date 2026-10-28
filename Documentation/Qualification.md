@@ -3,10 +3,10 @@
 [Documentation](ReadMe.md) | [Project](../ReadMe.md)
 
 Support depends on measured kernel and runtime capabilities. A compiler pass or
-a distribution name is insufficient. The 0.9.0 candidate uses native Ubuntu 24.04
+a distribution name is insufficient. The 0.9.0 release uses native Ubuntu 24.04
 x86_64 with GNU libc 2.39 and the enforced kernel/runtime controls below. The
 published 0.8.0 release retains its separate historical evidence. See the
-[release notes](ReleaseNotes.md) for the candidate changes and measured scope.
+[release notes](ReleaseNotes.md) for the release changes and measured scope.
 Native AArch64, macOS and SELinux-enabled operation remain pending.
 Windows and arbitrary SSH shells are outside the current installed profile.
 

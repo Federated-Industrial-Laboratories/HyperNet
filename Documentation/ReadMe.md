@@ -2,7 +2,7 @@
 
 [Project](../ReadMe.md) | [Installation](Installation.md) | [Security](Security.md) | [HyperNetSuite](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite)
 
-[Linux 0.8.0 release and downloads](ReleaseNotes.md)
+[Linux 0.9.0 release and downloads](ReleaseNotes.md)
 
 These manuals cover the HyperNet infrastructure: network authority, consenting
 hosts, storage, routes and service operation. The separate
