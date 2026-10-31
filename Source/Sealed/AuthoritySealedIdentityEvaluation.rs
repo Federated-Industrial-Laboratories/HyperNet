@@ -125,6 +125,12 @@ impl Context<'_> {
             grant.kind == 102 && self.governance.versions().contains(grant),
             "recipient capability changed"
         );
+        if crate::trust_action_scope::collides(action) {
+            self.governance.require_action_purpose(
+                grant.id,
+                crate::trust_action_scope::ActionPurpose::SealedPublication,
+            )?;
+        }
         let permission = self.governance.current_capability(
             grant.id,
             &Requirement {

@@ -2,6 +2,20 @@
 
 [Documentation](ReadMe.md) | [Project](../ReadMe.md)
 
+## Permission scopes in 0.9.1
+
+Version 0.9.0 used action codes 29/30 for both application streams and sealed
+publication. Version 0.9.1 requires a matching resource purpose throughout the
+non-root grant chain, and refuses broad or mixed-purpose grants for these effects.
+An accepted bootstrap root may authorise a fresh precise chain; a broad delegated
+intermediary cannot obtain the other purpose by issuing a narrow child.
+
+Read [the migration guide](PermissionScopes.md) before upgrading. Existing broad
+application, service and sealed-review bindings may need new explicit consent or
+review. Upgrade the complete authority committee and corresponding endpoints and
+clients together. Signed historical records are retained; an old receipt is not
+current permission. Downgrading does not provide a safe permission recovery path.
+
 ## Report a vulnerability
 
 Report suspected security defects privately to contact@federatedindustrial.com.

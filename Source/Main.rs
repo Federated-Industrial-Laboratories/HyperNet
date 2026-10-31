@@ -139,6 +139,8 @@ mod ssh_service;
 mod store;
 #[path = "Transport/Transport.rs"]
 mod transport;
+#[path = "Protocol/TrustActionScope.rs"]
+mod trust_action_scope;
 #[path = "Protocol/TrustBootstrap.rs"]
 mod trust_bootstrap;
 #[path = "Protocol/TrustWire.rs"]

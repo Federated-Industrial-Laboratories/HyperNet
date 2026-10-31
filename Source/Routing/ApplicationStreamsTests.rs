@@ -91,7 +91,8 @@ fn setup() -> (Fixture, streams::Registration) {
     };
     registration.envelope = signed_twice(&registration.payload(N, I).unwrap(), &[5, 92]);
     registration = streams::Registration::parse(&registration.envelope, N, I).unwrap();
-    let grant = f.root.clone();
+    let grant =
+        deployment::scoped_grant(&mut f.records, &f.root, [232; 32], &[(3, registration.id)]);
     execute(
         &mut f,
         StreamCommand::Register {
@@ -118,7 +119,12 @@ fn proof(
             .reference
             .clone(),
         principal: public(5),
-        grant: f.root.clone(),
+        grant: Governance::parse(N, I, &f.records)
+            .unwrap()
+            .versions()
+            .into_iter()
+            .find(|r| r.kind == 102 && r.id == [232; 32])
+            .unwrap(),
         protocol: registration.protocol.clone(),
         slot: 0,
         generation,
@@ -348,6 +354,94 @@ fn application_stream_requires_current_grant_exact_service_and_local_context_non
     let mut substituted = binding;
     substituted.endpoint = public(160);
     assert!(streams::local::verify_context(&context, &substituted, [9; 32]).is_err());
+}
+
+#[test]
+fn application_stream_refuses_broad_mixed_and_sealed_grants() {
+    let (mut f, registration) = setup();
+    let precise = proof(&f, &registration, 1, 120).grant;
+    let mixed = deployment::scoped_grant(
+        &mut f.records,
+        &f.root,
+        [233; 32],
+        &[(2, registration.id), (3, registration.id)],
+    );
+    let sealed =
+        deployment::scoped_grant(&mut f.records, &f.root, [234; 32], &[(2, registration.id)]);
+    for grant in [f.root.clone(), mixed, sealed] {
+        for action in [streams::MANAGE, streams::CONNECT] {
+            let result = execute(
+                &mut f,
+                StreamCommand::Context {
+                    service: registration.id,
+                    action,
+                },
+                5,
+                Some(grant.clone()),
+                5000,
+                false,
+            )
+            .2;
+            assert_eq!(result.code, 3);
+        }
+        let mut p = proof(&f, &registration, 1, 120);
+        p.grant = grant;
+        p.envelope = wire::sign_envelope(&p.payload(N, I).unwrap(), &deployment::key(5)).unwrap();
+        assert_eq!(
+            execute(
+                &mut f,
+                StreamCommand::Admit { proof: p },
+                161,
+                None,
+                5000,
+                false
+            )
+            .2
+            .code,
+            3
+        );
+    }
+    for action in [streams::MANAGE, streams::CONNECT] {
+        assert_eq!(
+            execute(
+                &mut f,
+                StreamCommand::Context {
+                    service: registration.id,
+                    action
+                },
+                5,
+                Some(precise.clone()),
+                5000,
+                false
+            )
+            .2
+            .code,
+            0
+        );
+    }
+    // Historical service records still parse, but their broad management grant
+    // cannot authorise a new connection after the upgrade.
+    let mut legacy =
+        streams::Service::parse(&f.state.record(172, registration.id).unwrap().payload, N, I)
+            .unwrap();
+    legacy.grant = f.root.clone();
+    let next = Record::next(&f.state, 172, registration.id, legacy.value()).unwrap();
+    f.state.records.insert(next.reference.index(), next);
+    f.state = State::parse(&f.state.value(), N, I).unwrap();
+    let p = proof(&f, &registration, 1, 121);
+    assert_eq!(
+        execute(
+            &mut f,
+            StreamCommand::Admit { proof: p },
+            161,
+            None,
+            5000,
+            false
+        )
+        .2
+        .code,
+        3
+    );
 }
 
 #[test]

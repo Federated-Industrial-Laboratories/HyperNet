@@ -8,6 +8,16 @@ current offline target policy below; it never starts a runtime, reuses obsolete
 consent or changes an authority floor. Preserve existing software and state while
 preparing a new private prefix.
 
+## Permission hotfix 0.9.1
+
+Upgrade Core and Suite together and apply the
+[permission-scope migration](PermissionScopes.md). Broad and mixed-purpose grants
+no longer authorise stream or sealed-page effects. Existing signed records remain
+readable; a package update does not silently rewrite grants, admissions, service
+registrations or sealed reviews. Drain affected work and use the normal stopped
+replacement. Do not mix old and patched authority semantics or downgrade to regain
+broad permission.
+
 ## Offline update trust
 
 Use an independently authenticated copy of both `Tools/Bundle.py` and its adjacent

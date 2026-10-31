@@ -5,7 +5,7 @@ use crate::{
     authority_deployments::{Offer, Operation},
     authority_governance::Governance,
     authority_membership::{self as members, Reservations, reference},
-    authority_proof::{Challenge, Intent, Key, Scope, VersionRef},
+    authority_proof::{Challenge, Digest, Intent, Key, Scope, VersionRef},
     runtime_manifest::{
         AuthorityConfig, Clock, ConsentPolicy, Endpoint, Manifest, Placement, Role, Volume,
     },
@@ -24,6 +24,33 @@ fn b(value: &[u8]) -> V {
 }
 pub(crate) fn key(seed: u8) -> SigningKey {
     SigningKey::from_bytes(&[seed; 32])
+}
+pub(crate) fn scoped_grant(
+    records: &mut Vec<Vec<u8>>,
+    parent: &VersionRef,
+    id: Digest,
+    scopes: &[(u64, Digest)],
+) -> VersionRef {
+    let governance = Governance::parse(N, I, records).unwrap();
+    let value = wire::decode(governance.record_bytes(102, parent.id).unwrap()).unwrap();
+    let mut fields = value.array(17).unwrap().to_vec();
+    fields[6] = b(&id);
+    fields[10] = a(vec![V::Uint(29), V::Uint(30)]);
+    fields[11] = a(scopes
+        .iter()
+        .map(|(kind, id)| a(vec![V::Uint(*kind), b(id)]))
+        .collect());
+    fields[13] = reference(parent);
+    fields[14] = V::Uint(0);
+    fields[16] = snapshot(&[]);
+    records.push(wire::encode(&a(fields)).unwrap());
+    members::sort_records(records).unwrap();
+    Governance::parse(N, I, records)
+        .unwrap()
+        .versions()
+        .into_iter()
+        .find(|r| r.kind == 102 && r.id == id)
+        .unwrap()
 }
 fn public(seed: u8) -> Key {
     key(seed).verifying_key().to_bytes()

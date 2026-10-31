@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Display every public genesis capability and its exact record reference.
-use crate::trust_wire::{self as wire, Value};
+use crate::{
+    trust_action_scope::{self, ActionPurpose},
+    trust_wire::{self as wire, Value},
+};
 use anyhow::{Result, ensure};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -15,9 +18,12 @@ pub struct Reference {
     digest: String,
 }
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Action {
     code: u64,
     name: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope_requirement: Option<&'static str>,
 }
 #[derive(Clone, Serialize)]
 pub struct Scope {
@@ -153,7 +159,7 @@ fn limits(value: &Value) -> Result<Limits> {
         max_concurrent_operations: list[3].uint()?,
     })
 }
-fn actions(value: &Value) -> Result<Vec<Action>> {
+fn actions(value: &Value, scope_values: &Value) -> Result<Vec<Action>> {
     const NAMES: [&str; 32] = [
         "ReadPage",
         "SearchCatalogue",
@@ -188,15 +194,38 @@ fn actions(value: &Value) -> Result<Vec<Action>> {
         "FinaliseSealedPage",
         "RevealPublicMetadata",
     ];
+    let purpose = trust_action_scope::classify(scopes(scope_values)?.iter().map(|s| s.code));
     value
         .list(32)?
         .iter()
         .map(|value| {
             let code = value.uint()?;
-            let name = NAMES
+            let default_name = NAMES
                 .get(usize::try_from(code)?)
                 .ok_or_else(|| anyhow::anyhow!("unknown action code"))?;
-            Ok(Action { code, name })
+            let name = match (code, purpose) {
+                (29, Some(ActionPurpose::ApplicationStream)) => "ManageApplicationService",
+                (30, Some(ActionPurpose::ApplicationStream)) => "ConnectApplicationService",
+                (29, None) => "ReviewSealedPageOrManageApplicationService",
+                (30, None) => "FinaliseSealedPageOrConnectApplicationService",
+                _ => default_name,
+            };
+            let scope_requirement = trust_action_scope::collides(code).then_some(match purpose {
+                Some(ActionPurpose::ApplicationStream) => {
+                    "The terminal grant and every non-root ancestor must contain only Service scopes."
+                }
+                Some(ActionPurpose::SealedPublication) => {
+                    "The terminal grant and every non-root ancestor must contain only Object or Namespace scopes."
+                }
+                None => {
+                    "Direct use requires a purpose-specific terminal grant: only Service scopes for application streams, or only Object or Namespace scopes for sealed Pages. Network and mixed-purpose terminal scopes are refused, as are non-root ancestors with those scopes. Only an accepted bootstrap root may supply broad delegation authority."
+                }
+            });
+            Ok(Action {
+                code,
+                name,
+                scope_requirement,
+            })
         })
         .collect()
 }
@@ -282,7 +311,7 @@ pub fn describe(records: &Records, network: &[u8; 32], governance: &[u8]) -> Res
                 record: own_reference(bytes, record)?,
                 rank: record[7].uint()?,
                 label: record[8].text()?.into(),
-                allowed_actions: actions(&record[9])?,
+                allowed_actions: actions(&record[9], &record[10])?,
                 scopes: scopes(&record[10])?,
                 maximum_delegation_depth: record[11].uint()?,
                 limits: limits(&record[12])?,
@@ -296,7 +325,7 @@ pub fn describe(records: &Records, network: &[u8; 32], governance: &[u8]) -> Res
                 issuer: identifier(&record[7])?,
                 subject: identifier(&record[8])?,
                 tier: reference(&record[9])?,
-                actions: actions(&record[10])?,
+                actions: actions(&record[10], &record[11])?,
                 scopes: scopes(&record[11])?,
                 validity: Validity {
                     not_before_ms: validity[0].uint()?,
@@ -348,4 +377,70 @@ pub fn describe(records: &Records, network: &[u8; 32], governance: &[u8]) -> Res
         root_grants,
         recovery_policy,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scope_value(kinds: &[u64]) -> Value {
+        Value::Array(
+            kinds
+                .iter()
+                .map(|kind| Value::Array(vec![Value::Uint(*kind), Value::Bytes(vec![1; 32])]))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn action_names_follow_the_terminal_scope_purpose() {
+        let codes = Value::Array(vec![Value::Uint(29), Value::Uint(30)]);
+        let service = actions(&codes, &scope_value(&[3])).unwrap();
+        assert_eq!(service[0].name, "ManageApplicationService");
+        assert_eq!(service[1].name, "ConnectApplicationService");
+        assert!(
+            service[0]
+                .scope_requirement
+                .unwrap()
+                .contains("only Service")
+        );
+        let sealed = actions(&codes, &scope_value(&[1, 2])).unwrap();
+        assert_eq!(sealed[0].name, "ReviewSealedPage");
+        assert_eq!(sealed[1].name, "FinaliseSealedPage");
+        assert!(
+            sealed[0]
+                .scope_requirement
+                .unwrap()
+                .contains("Object or Namespace")
+        );
+    }
+
+    #[test]
+    fn broad_and_mixed_action_names_explain_both_uses_and_refusal() {
+        let codes = Value::Array(vec![Value::Uint(29), Value::Uint(30)]);
+        for kinds in [&[][..], &[0][..], &[0, 3][..], &[2, 3][..], &[4][..]] {
+            let described = actions(&codes, &scope_value(kinds)).unwrap();
+            assert_eq!(
+                described[0].name,
+                "ReviewSealedPageOrManageApplicationService"
+            );
+            assert_eq!(
+                described[1].name,
+                "FinaliseSealedPageOrConnectApplicationService"
+            );
+            for action in &described {
+                assert!(
+                    action
+                        .scope_requirement
+                        .unwrap()
+                        .contains("terminal scopes are refused")
+                );
+            }
+        }
+        let ordinary = actions(&Value::Array(vec![Value::Uint(9)]), &scope_value(&[0])).unwrap();
+        assert_eq!(
+            serde_json::to_value(&ordinary).unwrap(),
+            serde_json::json!([{"code":9,"name":"AdministerPolicy"}])
+        );
+    }
 }

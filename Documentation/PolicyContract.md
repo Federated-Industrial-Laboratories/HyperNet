@@ -186,7 +186,8 @@ actions/scopes are sets; validity is Validity; depth 0-8; limits is Limits.
 A null parent is allowed only for a root grant explicitly accepted by current
 governance. It is never inferred from rank or a missing parent lookup.
 
-Initial action codes are:
+The action registry below retains the historical sealed-page labels for 29/30.
+Those two codes require the scope-specific interpretation immediately below it:
 
 ```text
 0 ReadPage             1 SearchCatalogue       2 PublishPage
@@ -201,6 +202,16 @@ Initial action codes are:
 27 AcceptRecoveryPolicy 28 ApproveNetworkRecovery
 29 ReviewSealedPage   30 FinaliseSealedPage   31 RevealPublicMetadata
 ```
+
+Codes 29 and 30 are interpreted with the terminal grant's complete scope set.
+For Service-only grants (kind 3), they mean ManageApplicationService and
+ConnectApplicationService. For Object/Namespace-only grants (kinds 2/1), they
+retain ReviewSealedPage and FinaliseSealedPage. A Network-scoped or mixed-purpose
+terminal grant cannot execute either family. Only an accepted bootstrap root may remain broad as an ancestor of a
+reviewed precise child. Every non-root ancestor must have the same scope purpose;
+a narrow child cannot bypass an ambiguous intermediary. The operation still checks
+its exact resource, current tier, full chain and all other applicable policy.
+See [permission scopes and existing-network upgrade](PermissionScopes.md).
 
 No action grants another action implicitly. The same person's distinct keys are
 distinct subjects. In particular, membership, relay transit, voting, publication

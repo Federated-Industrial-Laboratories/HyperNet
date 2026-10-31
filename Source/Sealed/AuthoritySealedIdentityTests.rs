@@ -56,6 +56,7 @@ struct Fixture {
     records: Vec<Vec<u8>>,
     reserved: Reservations,
     grant: VersionRef,
+    reviewer: VersionRef,
 }
 impl Fixture {
     fn new() -> Self {
@@ -66,11 +67,14 @@ impl Fixture {
             .into_iter()
             .find(|r| r.kind == 102 && r.id == [23; 32])
             .unwrap();
+        let mut records = f.records;
+        let reviewer = deployment::scoped_grant(&mut records, &grant, [232; 32], &[(2, [87; 32])]);
         Self {
             state: State::empty(f.scope.network, f.scope.incarnation),
-            records: f.records,
+            records,
             reserved: f.reservations,
             grant,
+            reviewer,
         }
     }
     fn intent(
@@ -426,7 +430,7 @@ fn frozen_roster_rechecks_removal_at_commit() {
             scope: (2, [87; 32]),
         },
         5,
-        Some(f.grant.clone()),
+        Some(f.reviewer.clone()),
     );
     assert_ne!(d.code, 0);
     assert!(!f.state.records.contains_key(&(111, [87; 32])));
@@ -447,31 +451,37 @@ fn current_roster_commits_its_complete_dependency_snapshot() {
     let governance = Governance::parse(f.state.network, f.state.incarnation, &f.records).unwrap();
     let CurrentRoster { roots, devices, .. } =
         roster(&f.state, &governance, &audience, 5000, (2, [87; 32])).unwrap();
-    let d = f.run(
-        |s| Command::Freeze {
-            roster: record(signed(
-                111,
-                1,
-                None,
-                vec![
-                    b(&[87; 32]),
-                    V::Uint(1),
-                    V::Uint(1),
-                    reference(&audience.reference),
-                    a(roots.iter().map(|r| b(r)).collect()),
-                    a(devices
-                        .iter()
-                        .map(|(r, d, a_)| a(vec![b(r), b(d), b(a_)]))
-                        .collect()),
-                    s.clone(),
-                ],
-                5,
-            )),
-            scope: (2, [87; 32]),
-        },
-        5,
-        Some(f.grant.clone()),
+    let freeze = |s: &V| Command::Freeze {
+        roster: record(signed(
+            111,
+            1,
+            None,
+            vec![
+                b(&[87; 32]),
+                V::Uint(1),
+                V::Uint(1),
+                reference(&audience.reference),
+                a(roots.iter().map(|r| b(r)).collect()),
+                a(devices
+                    .iter()
+                    .map(|(r, d, a_)| a(vec![b(r), b(d), b(a_)]))
+                    .collect()),
+                s.clone(),
+            ],
+            5,
+        )),
+        scope: (2, [87; 32]),
+    };
+    assert_eq!(f.run(freeze, 5, Some(f.grant.clone())).code, 3);
+    assert!(!f.state.records.contains_key(&(111, [87; 32])));
+    let mixed = deployment::scoped_grant(
+        &mut f.records,
+        &f.grant,
+        [233; 32],
+        &[(2, [87; 32]), (3, [87; 32])],
     );
+    assert_eq!(f.run(freeze, 5, Some(mixed)).code, 3);
+    let d = f.run(freeze, 5, Some(f.reviewer.clone()));
     assert_eq!(d.code, 0);
     for kind in [107, 108, 109, 110] {
         assert!(d.dependencies.iter().any(|r| r.kind == kind));
