@@ -27,6 +27,22 @@ pub struct Guard {
     boot_deadline: u64,
     artifacts: BTreeMap<String, Digest>,
 }
+pub struct ApplicationClock {
+    pub kernel_boot: String,
+    consent_deadline: u64,
+    observation_deadline: u64,
+}
+impl ApplicationClock {
+    /// A renewable clock observation does not shorten a bounded operation's wait.
+    pub fn read_deadline(&self, original_deadline: u64) -> u64 {
+        original_deadline.min(self.consent_deadline)
+    }
+    /// A delivered assertion cannot outlive the observation verified at completion.
+    pub fn receipt_deadline(&self, original_deadline: u64) -> u64 {
+        self.read_deadline(original_deadline)
+            .min(self.observation_deadline)
+    }
+}
 fn artifact_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
@@ -237,6 +253,15 @@ impl Guard {
     }
     pub fn health(&self) -> Result<crate::authority_challenge::ClockHealth> {
         self.clock.health()
+    }
+    pub fn application_clock(&self) -> Result<ApplicationClock> {
+        let boot = self.clock.verified_boot()?;
+        self.check()?;
+        Ok(ApplicationClock {
+            kernel_boot: boot,
+            consent_deadline: self.boot_deadline,
+            observation_deadline: self.health()?.valid_until_boot_ms(),
+        })
     }
     pub(crate) fn check_configuration(&self) -> Result<()> {
         verify_artifacts(Path::new("/Config"), &self.artifacts)

@@ -3,6 +3,13 @@
 use super::*;
 use crate::authority_read::{self as fresh, Query};
 
+pub(super) struct Observation {
+    pub value: Option<V>,
+    pub statement: fresh::Statement,
+    pub disposition: Disposition,
+    pub code: u64,
+}
+
 impl Client<'_> {
     pub(crate) fn retry_read(error: anyhow::Error) -> anyhow::Error {
         use crate::route_runtime::ReadRetry;
@@ -22,6 +29,22 @@ impl Client<'_> {
     }
 
     pub(super) fn read_action(&mut self, command: DomainCommand) -> Result<V> {
+        let observation = self.read_observation(command, None)?;
+        ensure!(
+            observation.disposition == Disposition::Permit,
+            "Route maintenance refused with code {}",
+            observation.code
+        );
+        observation
+            .value
+            .context("fresh Route permit omitted verified context")
+    }
+
+    pub(super) fn read_observation(
+        &mut self,
+        command: DomainCommand,
+        challenge_ceiling: Option<u64>,
+    ) -> Result<Observation> {
         ensure!(
             matches!(
                 command,
@@ -59,21 +82,25 @@ impl Client<'_> {
         )?;
         let health = self.guard.health()?;
         let now = health.observe()?;
-        let duration =
-            self.deadline
-                .map_or(Ok(authority_challenge::MAXIMUM_DURATION_MS), |deadline| {
-                    Ok::<_, anyhow::Error>(
-                        transport::remaining(deadline)?
-                            .min(authority_challenge::MAXIMUM_DURATION_MS),
-                    )
-                })?;
-        let deadline = now
+        let maximum_deadline = now
             .boot_ms
-            .checked_add(duration)
+            .checked_add(authority_challenge::MAXIMUM_DURATION_MS)
             .context("Route read deadline overflow")?;
-        let challenge =
-            self.session
-                .issue_read(&signed, &self.config.key, nonce, duration, health)?;
+        let deadline = self
+            .deadline
+            .map_or(maximum_deadline, |original| original.min(maximum_deadline));
+        transport::remaining(deadline)?;
+        // The authority's uncertainty interval needs a full freshness window even
+        // for short caller waits. Neither transport nor local effects acquire it.
+        let challenge_ceiling = challenge_ceiling.unwrap_or(deadline);
+        let challenge = self.session.issue_read(
+            &signed,
+            &self.config.key,
+            nonce,
+            authority_challenge::MAXIMUM_DURATION_MS,
+            Some(challenge_ceiling),
+            health,
+        )?;
         let outcome = (|| {
             let (reply, history) = transport::exchange_read(
                 &descriptor,
@@ -121,11 +148,16 @@ impl Client<'_> {
             )
             .context("verify fresh Route authority context")?;
             let verified = history.attach_read(&self.store, verified)?;
+            let mut observation = Observation {
+                value: None,
+                statement: verified.statement.clone(),
+                disposition: verified.result.disposition,
+                code: verified.result.code,
+            };
             if verified.result.disposition != Disposition::Permit {
-                let code = verified.result.code;
                 self.store
                     .observe_read(verified, &mut self.session, self.guard.health()?, 0)?;
-                anyhow::bail!("Route maintenance refused with code {code}");
+                return Ok(observation);
             }
             let expiry = verified
                 .statement
@@ -147,7 +179,8 @@ impl Client<'_> {
                 },
             )?;
             self.last_expiry = expiry;
-            Ok(value)
+            observation.value = Some(value);
+            Ok(observation)
         })();
         if outcome.is_err() {
             self.session.discard(&challenge)?;

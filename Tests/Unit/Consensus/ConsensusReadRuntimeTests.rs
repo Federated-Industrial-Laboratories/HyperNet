@@ -84,6 +84,7 @@ fn policy_quorum(delayed: bool, capacity: bool) {
             &fixture.requester,
             [67; 32],
             if capacity { 3000 } else { 5000 },
+            None,
             ClockHealth::new(now.wall_ms, now.boot_ms, now.boot_ms + 1000, 1)
                 .unwrap()
                 .frozen(),
@@ -265,6 +266,7 @@ fn policy_quorum(delayed: bool, capacity: bool) {
                     &fixture.requester,
                     [nonce; 32],
                     5000,
+                    None,
                     ClockHealth::new(now.wall_ms, now.boot_ms, now.boot_ms + 1000, 1)
                         .unwrap()
                         .frozen(),

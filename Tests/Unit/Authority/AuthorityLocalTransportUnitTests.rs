@@ -54,7 +54,7 @@ fn fresh_read_capacity_reuses_exact_packet_and_original_deadline() {
         let health = ClockHealth::new(wall, boot, boot + 1000, 1).unwrap();
         let challenge = crate::authority_challenge::Session::new()
             .unwrap()
-            .issue_read(&signed, &key, [77; 32], 5000, health.frozen())
+            .issue_read(&signed, &key, [77; 32], 5000, None, health.frozen())
             .unwrap();
         let id = crate::authority_read::read_id(&signed, &challenge).unwrap();
         let expected = wire::encode(&a(vec![

@@ -163,6 +163,9 @@ impl ClockHealth {
         }
         self.observe_at(wall_time_ms()?, boot_time_ms()?)
     }
+    pub fn valid_until_boot_ms(&self) -> u64 {
+        self.valid_until_boot_ms
+    }
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Observation {
@@ -240,6 +243,7 @@ impl Session {
             recipient,
             client_nonce,
             duration_ms,
+            None,
             health,
         )
     }
@@ -252,9 +256,19 @@ impl Session {
         recipient: &SigningKey,
         client_nonce: Digest,
         duration_ms: u64,
+        absolute_deadline: Option<u64>,
         health: ClockHealth,
     ) -> Result<Vec<u8>> {
         let now = self.observation(health)?;
+        let duration_ms = match absolute_deadline {
+            Some(deadline) => duration_ms.min(
+                deadline
+                    .checked_sub(now.boot_ms)
+                    .filter(|remaining| *remaining > 0)
+                    .ok_or(ChallengeExpired)?,
+            ),
+            None => duration_ms,
+        };
         self.challenges
             .retain(|_, c| now.boot_ms < c.deadline_boot_ms);
         ensure!(

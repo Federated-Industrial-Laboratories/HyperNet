@@ -3,6 +3,20 @@
 use super::*;
 use crate::authority_domains::streams::{self, local, protocol as stream_protocol};
 use crate::authority_proof::VersionRef;
+use std::sync::atomic::AtomicBool;
+#[path = "ApplicationStreamChecks.rs"]
+mod checks;
+struct Forwarding {
+    deadline: u64,
+    established: AtomicBool,
+    finished: AtomicBool,
+}
+struct ForwardingCompletion(Arc<Forwarding>);
+impl Drop for ForwardingCompletion {
+    fn drop(&mut self) {
+        self.0.finished.store(true, Ordering::Release);
+    }
+}
 struct OpenedStream {
     session: Session,
     proof: streams::Proof,
@@ -10,9 +24,18 @@ struct OpenedStream {
 struct LiveStream {
     reference: VersionRef,
     gate: route_io::Gate,
-    deadline: u64,
     accepted_at: u64,
     retry_after: u64,
+    forwarding: Arc<Forwarding>,
+}
+impl LiveStream {
+    fn check_deadline(&self, now: u64) -> Option<u64> {
+        let deadline = self.forwarding.deadline.min(self.gate.expiry().ok()?);
+        (self.forwarding.established.load(Ordering::Acquire)
+            && !self.forwarding.finished.load(Ordering::Acquire)
+            && deadline > now)
+            .then_some(deadline)
+    }
 }
 impl Drop for LiveStream {
     fn drop(&mut self) {
@@ -71,8 +94,10 @@ async fn serve(
     key: ed25519_dalek::SigningKey,
     permission: route_io::Gate,
     endpoint_permission: route_io::Gate,
-    deadline: u64,
+    forwarding: Arc<Forwarding>,
 ) -> Result<()> {
+    let deadline = forwarding.deadline;
+    let _completion = ForwardingCompletion(forwarding.clone());
     let session = &mut opened.session;
     let binding = &application.binding;
     let local = tokio::select! {
@@ -106,6 +131,7 @@ async fn serve(
         session.idle_ms,
     )
     .await?;
+    forwarding.established.store(true, Ordering::Release);
     let limits = Limits {
         bytes: session.bytes.min(opened.proof.limits.bytes),
         duration_ms: crate::authority_local_transport::remaining(deadline)?,
@@ -143,16 +169,44 @@ pub(super) async fn endpoint(
         own.identity.service,
         streams::PROTOCOL,
     )?;
+    let mut attachment = None;
     let relay = if let Some((identity, address)) = &config.relay {
         let current = client.lookup(identity.service)?;
         ensure!(
             current.mode == 1 && current.identity == *identity && current.address == Some(*address),
             "application relay differs from local consent"
         );
+        attachment = Some(streams::control::Attachment {
+            relay_service: identity.service,
+            profile_digest: wire::digest(&current.envelope),
+        });
         Some((identity.clone(), config.dial(identity, *address)?))
     } else {
         None
     };
+    let privacy = streams::control::Privacy {
+        transport_protection: streams::control::TransportProtection::Tls13FinalService,
+        endpoint_mode: own.mode,
+        incoming_path: if relay.is_some() {
+            streams::control::IncomingPath::ApprovedAttachment
+        } else {
+            streams::control::IncomingPath::PublicListener
+        },
+        attachment,
+        physical_independence_verified: false,
+        profile_currentness_asserted: false,
+    };
+    let (check_queue, mut check_requests) = mpsc::channel(streams::control::MAXIMUM_PENDING);
+    let check_worker = guard.application_clock().ok().map(|clock| {
+        tokio::spawn(checks::run(
+            application.binding.clone(),
+            config.key.clone(),
+            clock.kernel_boot,
+            privacy,
+            check_queue,
+            permission.gate.clone(),
+        ))
+    });
     let mut listener = if own.mode == 2 {
         let listener = TcpListener::bind(SocketAddr::new(
             Ipv4Addr::UNSPECIFIED.into(),
@@ -206,8 +260,8 @@ pub(super) async fn endpoint(
             },
             _=std::future::ready(()),if renew.is_some()=>{
                 let id=renew.expect("selected stream renewal");let s=live.get_mut(&id).expect("selected live stream");
-                if now>=s.deadline {s.gate.close();s.retry_after=u64::MAX;continue;}
-                match clock_checked(client.before(s.deadline.min(now.saturating_add(own.limits.idle_ms)),|client|client.stream_permit(&s.reference)))? {
+                if now>=s.forwarding.deadline {s.gate.close();s.retry_after=u64::MAX;continue;}
+                match clock_checked(client.before(s.forwarding.deadline.min(now.saturating_add(own.limits.idle_ms)),|client|client.stream_permit(&s.reference)))? {
                     Ok(expiry)=>{s.gate.renew(expiry)?;s.accepted_at=crate::authority_challenge::boot_time_ms()?;s.retry_after=0;},
                     Err(error)=>{if error.is::<ReadRetry>() {s.retry_after=now.saturating_add(READ_RETRY_MS);} else {s.gate.close();s.retry_after=u64::MAX;}},
                 }
@@ -223,9 +277,10 @@ pub(super) async fn endpoint(
                         let now=crate::authority_challenge::boot_time_ms()?;
                         let deadline=opened.session.deadline.min(now.saturating_add(opened.proof.expires.saturating_sub(client.now()?))).min(now.saturating_add(opened.proof.limits.duration_ms));
                         let gate=route_io::Gate::with_signal(client.effect_deadline()?,demand.clone());
-                        live.insert(id,LiveStream {reference:reference.clone(),gate:gate.clone(),deadline,accepted_at:now,retry_after:0});
+                        let status=Arc::new(Forwarding {deadline,established:AtomicBool::new(false),finished:AtomicBool::new(false)});
+                        live.insert(id,LiveStream {reference:reference.clone(),gate:gate.clone(),accepted_at:now,retry_after:0,forwarding:status.clone()});
                         let application=application.clone();let key=config.key.clone();let endpoint_gate=permission.gate.clone();
-                        forwarding.spawn(async move {(id,serve(opened,reference,application,key,gate,endpoint_gate,deadline).await)});
+                        forwarding.spawn(async move {(id,serve(opened,reference,application,key,gate,endpoint_gate,status).await)});
                     }
                 }
             },
@@ -244,11 +299,19 @@ pub(super) async fn endpoint(
                     handshakes.spawn(hello(session,application.clone(),ready.clone(),permission.gate.clone()));
                 } else {retry_after=tokio::time::Instant::now()+Duration::from_millis(own.limits.idle_ms.min(1000));}
             },
+            Some(check)=check_requests.recv()=>{
+                let receipt=checks::evaluate(&check,&live,&permission.gate,client,guard,active);
+                if check.connected.load(Ordering::Acquire) && !check.cancelled.load(Ordering::Acquire) {let _=check.reply.send(receipt);}
+            },
             _=demand.notified()=>{},
             _=tick.tick()=>{},
         }
     }Ok(())}.await;
     permission.gate.close();
+    if let Some(worker) = check_worker {
+        worker.abort();
+        let _ = worker.await;
+    }
     for stream in live.values() {
         stream.gate.close();
     }
@@ -270,3 +333,7 @@ pub(super) async fn endpoint(
     }
     outcome
 }
+
+#[cfg(test)]
+#[path = "../../Tests/Unit/Routing/ApplicationStreamChecksTests.rs"]
+mod check_tests;
