@@ -2,6 +2,108 @@
 
 [Documentation](ReadMe.md) | [Project](../ReadMe.md)
 
+## Linux 0.10.0 application context and authority checks
+
+Version 0.10.0 adds explicit current-authority observations and transport context
+for native applications using HyperNet streams. Download the
+[Linux 0.10.0 release](https://github.com/Federated-Industrial-Laboratories/HyperNet/releases/tag/v0.10.0).
+Read the [application context contract](ApplicationChecks.md) before using these results
+at an application permission boundary.
+
+### Changes
+
+- A separate, endpoint-initiated `Checks.sock` channel provides fresh authority
+  checks for an exact active incoming stream. The signed result binds the service,
+  stream generation, application action digest, nonce and control instances.
+  The existing opaque payload channel and version 1 IPC contract remain compatible.
+- Typed results distinguish certified permission and refusal from unavailable,
+  expired and inactive checks. A busy requester does not fall back to an ordinary
+  authority mutation. Applications still enforce their own permissions and action
+  semantics; an observation is not a portable quorum proof or reusable grant.
+- Directional context separates final-service TLS 1.3 from relay-path evidence.
+  Public incoming endpoints report an unknown upstream relay path. Attached
+  endpoints can attest their approved attachment without claiming physical
+  operator independence or continuing profile currentness.
+- Checks allow 100 through 5,000 ms caller waits, with a one-second SDK default.
+  The authority challenge has a separate ceiling at the original companion start
+  plus five seconds. Current clock health, original caller and stream deadlines,
+  cancellation and local consent still bound every result.
+- One pending check per connection and four per companion bound the check queue.
+  The checks channel uses none of the existing 16 application connection slots.
+  These are implementation limits, not a concurrent-user or latency guarantee.
+- Matching Suite companions expose the opt-in version 2 API and Python SDK.
+  Missing check support leaves older payload workflows intact. No new policy
+  action number, authority evaluator or public control listener is introduced.
+
+### Qualification and limits
+
+The release target remains native Ubuntu 24.04 x86_64 with GNU libc 2.39. Native
+AArch64, Windows, macOS and SELinux-enabled hosting remain unqualified.
+Source-bound native feature validation exercised a confined attached endpoint,
+separate companion and retained authority route with four local authority
+replicas. It covered version 1 echo and a verified 1 MiB object, version 2 opaque
+payloads, exact session/action/nonce binding, default one-second and explicit
+five-second checks, receipt expiry, cancellation, closed streams and a certified
+refusal after grant revocation. Incoming attachment and outgoing nested-TLS facts
+were checked separately. The fixture was stopped and cleaned up after the run.
+
+This bounded workflow is not a throughput, soak, service-level or independent
+operator-separation guarantee. Release package and executable checks must name
+the actual 0.10.0 artifacts. Earlier graphics, terminal and larger-transfer results
+below retain their original executable identities; they are not repeated 0.10.0
+measurements. No independent security certification is claimed.
+
+### Upgrade scope
+
+Use matching 0.10.0 Core endpoints and Suite companions to obtain the new checks.
+Restart the companion and follow stopped service replacement with renewed local
+artifact consent; copying a new executable does not update an active runtime's
+accepted artifacts. Existing 0.9.1 payload-only peers remain compatible but cannot
+supply the new observation. No grant replacement is required solely for this
+additive feature.
+
+The 0.9.1 permission fix remains in force. When upgrading from 0.9.0, complete the
+[permission-scope migration](PermissionScopes.md), including the fully applied
+old-committee boundary, before using patched semantics. Preserve complete state,
+private identities, requester journals, package trust and all retained floors.
+The package state contract remains `HyperNet080Authority2`; its unchanged name does not
+authorise opening newer state with an older executable.
+
+### Package verification and installation
+
+Use `Tools/Bundle.py` and its adjacent `Tools/PackageTrust.py` from an
+independently authenticated `v0.10.0` checkout. Authenticate the publisher through
+[PublisherKey.txt](PublisherKey.txt). The generation-1 pin remains
+`6529f9e574e73409ec578c9e9a66e683fef6ae885704d22d75538781b4b43b1e`.
+A key downloaded beside a signature does not establish publisher identity.
+
+The release supplies `HyperNet-0.10.0-linux-x86_64.tar`, its `.sig`,
+`HyperNet-0.10.0-linux-x86_64.target.json`, its `.sig`, `Publisher.pub`,
+and signed checksums. The target uses sequence 6 and version floor 0.10.0.
+Retain the existing product trust directory for upgrades; never reset its floor.
+The Core package also carries the matching immutable OCI image. The
+`HyperNet-0.10.0-system-sources.tar.xz` companion archive supplies the source
+packages and patches for redistributed image libraries.
+
+With authenticated tools and existing product trust:
+
+```sh
+python3 /Trusted/HyperNet/Tools/Bundle.py Install \
+  --archive HyperNet-0.10.0-linux-x86_64.tar \
+  --signature HyperNet-0.10.0-linux-x86_64.tar.sig \
+  --public-key Publisher.pub \
+  --trust-directory "$HOME/.local/share/HyperNet/PackageTrust" \
+  --policy HyperNet-0.10.0-linux-x86_64.target.json \
+  --policy-signature HyperNet-0.10.0-linux-x86_64.target.json.sig \
+  --prefix "$HOME/.local/opt/HyperNet-0.10.0"
+python3 /Trusted/HyperNet/Tools/Bundle.py VerifyInstalled \
+  --prefix "$HOME/.local/opt/HyperNet-0.10.0" --public-key Publisher.pub
+```
+
+For first-install trust setup, follow [installation](Installation.md). Package
+installation does not activate a workload or renew network authority. Use
+[upgrade and recovery](UpgradeRecovery.md) before resuming an installed service.
+
 ## Linux 0.9.1 permission hotfix
 
 Version 0.9.1 restricts the overlapping action codes 29 and 30 to their explicit

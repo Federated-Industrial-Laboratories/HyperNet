@@ -2,7 +2,7 @@
 
 [Application streams](ApplicationStreams.md) | [Application access](Applications.md)
 
-The additive `checkAuthority-v2` capability lets a receiving application request
+Version 0.10.0 adds `checkAuthority-v2`, which lets a receiving application request
 a fresh authority observation for one exact, active incoming application stream.
 It requires matching Core and Suite builds that advertise this capability.
 Version 0.9.1 payload-only companions remain compatible; a missing check socket

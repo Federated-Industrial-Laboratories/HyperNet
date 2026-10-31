@@ -24,7 +24,7 @@ Include the runtime version, package and image digests, affected feature, native
 platform and a minimal synthetic reproduction when available. Review diagnostic
 exports before sharing them; private runtime logs can contain sensitive data.
 
-HyperNet 0.9.0 is a Linux release with no independent security certification. Maintainers may request additional private evidence and
+HyperNet 0.10.0 is a Linux release with no independent security certification. Maintainers may request additional private evidence and
 coordinate a fix. Signatures, passing tests and approval policy do not establish
 that software has no security defects.
 
