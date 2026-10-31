@@ -14,6 +14,12 @@ connection or weaker protocol fallback. Upgrade the authority committee together
 before registering new stream records. Do not operate a committee whose members
 interpret application renewal or stream records differently.
 
+Version 0.9.1 requires Service-only terminal grants for stream management and
+connection. Network and mixed-purpose grants refuse these operations. The legacy
+numbers 29/30 also identify sealed-page permissions under a separate, disjoint
+scope rule. Read [permission scopes](PermissionScopes.md) before upgrading an
+existing service or application; same-rights renewal cannot repair a broad grant.
+
 ## Permission boundaries
 
 A route voucher permits transit. An application capability permits use of one

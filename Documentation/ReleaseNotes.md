@@ -2,6 +2,67 @@
 
 [Documentation](ReadMe.md) | [Project](../ReadMe.md)
 
+## Linux 0.9.1 permission hotfix
+
+Version 0.9.1 restricts the overlapping action codes 29 and 30 to their explicit
+resource purpose throughout the non-root grant chain. Stream operations require
+Service-only terminal grants.
+Sealed-page operations require Object/Namespace-only terminal grants. Network
+and mixed-purpose terminal grants refuse both families. Review displays identify
+the scope-dependent meaning.
+
+Read [permission scopes and migration](PermissionScopes.md) before replacing
+0.9.0. Existing signed records keep their bytes. Existing precise grants remain
+eligible, while broad grants require deliberate scoped replacement and any
+associated admission, service or publication renewal described in that guide.
+In particular, application same-rights renewal cannot change a grant, a withdrawn
+application key cannot be reused, and an old sealed review is not rewritten by
+issuing a new grant. Upgrade the authority committee, endpoints and clients
+together; mixed permission semantics are unsupported. Before replacement, every
+voter must finish applying the same old-version committed boundary. The migration
+guide specifies the quiescence, certified inspection and stopped-journal checks;
+starting a lagging replica under the new permission rules is unsupported.
+
+Download the [Linux 0.9.1 release](https://github.com/Federated-Industrial-Laboratories/HyperNet/releases/tag/v0.9.1).
+The supported platform remains native Ubuntu 24.04 x86_64 with the existing
+library and runtime requirements. This hotfix does not qualify another platform,
+change the transport protocol, or provide an independent security assessment.
+
+### Package verification and installation
+
+Use the trusted tools from the exact `v0.9.1` checkout and independently
+authenticate the publisher using [PublisherKey.txt](PublisherKey.txt). The
+generation-1 publisher pin remains
+`6529f9e574e73409ec578c9e9a66e683fef6ae885704d22d75538781b4b43b1e`.
+A public key downloaded beside its signature does not establish publisher trust.
+
+The release contains `HyperNet-0.9.1-linux-x86_64.tar`, its signature,
+`HyperNet-0.9.1-linux-x86_64.target.json`, its signature, `Publisher.pub`,
+the corresponding source archive, and signed checksums. Verify those signatures
+and use the existing product trust directory for an upgrade. The new signed
+target uses sequence 5 and version floor 0.9.1; never reset a retained floor.
+
+With authenticated tools and existing product trust:
+
+```sh
+python3 /Trusted/HyperNet/Tools/Bundle.py Install \
+  --archive HyperNet-0.9.1-linux-x86_64.tar \
+  --signature HyperNet-0.9.1-linux-x86_64.tar.sig \
+  --public-key Publisher.pub \
+  --trust-directory "$HOME/.local/share/HyperNet/PackageTrust" \
+  --policy HyperNet-0.9.1-linux-x86_64.target.json \
+  --policy-signature HyperNet-0.9.1-linux-x86_64.target.json.sig \
+  --prefix "$HOME/.local/opt/HyperNet-0.9.1"
+python3 /Trusted/HyperNet/Tools/Bundle.py VerifyInstalled \
+  --prefix "$HOME/.local/opt/HyperNet-0.9.1" --public-key Publisher.pub
+```
+
+For a first installation, initialise product trust through
+[the installation guide](Installation.md). Installation does not activate a
+runtime or alter network authority. Follow the stopped replacement and permission
+migration procedures before resuming affected work.
+
+
 ## Linux 0.9.0
 
 Version 0.9.0 adds reusable application streams for services that need private,

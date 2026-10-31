@@ -341,5 +341,5 @@ pub fn verify_history(
 }
 
 #[cfg(test)]
-#[path = "AuthorityHistoryTests.rs"]
+#[path = "../../Tests/Unit/Authority/AuthorityHistoryTests.rs"]
 mod tests;

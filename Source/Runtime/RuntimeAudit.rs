@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Bounded signed lifecycle events with explicitly pinned independent head witnesses.
 #[cfg(test)]
-#[path = "RuntimeAuditTests.rs"]
+#[path = "../../Tests/Unit/Runtime/RuntimeAuditTests.rs"]
 mod tests;
 #[path = "RuntimeAuditWitness.rs"]
 mod witness;

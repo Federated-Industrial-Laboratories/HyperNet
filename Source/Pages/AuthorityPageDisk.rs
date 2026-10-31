@@ -657,5 +657,5 @@ impl Disk {
 }
 
 #[cfg(test)]
-#[path = "AuthorityPageDiskTests.rs"]
+#[path = "../../Tests/Unit/Pages/AuthorityPageDiskTests.rs"]
 mod tests;

@@ -139,6 +139,8 @@ mod ssh_service;
 mod store;
 #[path = "Transport/Transport.rs"]
 mod transport;
+#[path = "Protocol/TrustActionScope.rs"]
+mod trust_action_scope;
 #[path = "Protocol/TrustBootstrap.rs"]
 mod trust_bootstrap;
 #[path = "Protocol/TrustWire.rs"]
@@ -336,5 +338,5 @@ fn main() {
 }
 
 #[cfg(test)]
-#[path = "Authority/Deployments/AuthorityDeploymentTests.rs"]
+#[path = "../Tests/Unit/Authority/Deployments/AuthorityDeploymentTests.rs"]
 mod authority_deployment_tests;

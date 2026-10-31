@@ -208,10 +208,7 @@ impl PreparedRequest {
     pub fn signed(&self) -> &[u8] {
         &self.signed
     }
-    #[cfg(test)]
-    pub fn digest(&self) -> Digest {
-        self.request.digest()
-    }
+
     pub fn expected_metadata(&self) -> Option<&[u8]> {
         self.expected.as_deref()
     }
@@ -311,10 +308,7 @@ impl Store {
             poisoned: false,
         })
     }
-    #[cfg(test)]
-    pub fn initial_descriptor(&self) -> &TrustDescriptor {
-        &self.initial_descriptor
-    }
+
     pub fn descriptor(&self) -> &TrustDescriptor {
         &self.descriptor
     }
@@ -368,10 +362,7 @@ impl Store {
         );
         Ok(())
     }
-    #[cfg(test)]
-    pub(crate) fn profile_directory(&self) -> &File {
-        &self.directory
-    }
+
     pub fn stream_metadata(&self) -> Result<Option<proof::OwnStreamMetadata>> {
         self.stored.tracker.metadata()
     }
@@ -611,18 +602,7 @@ impl Store {
         self.check_history(&result)?;
         self.advance(&result, self.stored.wall_floor_ms)
     }
-    /// The lower bound is an independent credential start, or zero when none applies.
-    /// The original live challenge already establishes causal issuance through BOOTTIME.
-    #[cfg(test)]
-    pub fn accept(
-        &mut self,
-        result: VerifiedResult,
-        session: &mut Session,
-        health: ClockHealth,
-        not_before_ms: u64,
-    ) -> Result<DurablePermit> {
-        self.accept_with_clock(result, session, &mut || Ok(health), not_before_ms)
-    }
+
     pub fn accept_with_clock(
         &mut self,
         result: VerifiedResult,
@@ -846,25 +826,7 @@ impl DurablePermit {
             false,
         )
     }
-    #[cfg(test)]
-    pub fn perform<T>(
-        self,
-        store: &mut Store,
-        session: &mut Session,
-        health: ClockHealth,
-        requested_effect: u64,
-        check_current_restrictions: impl FnMut(&proof::Restrictions) -> Result<()>,
-        effect: impl FnOnce(&OperationResult, &Store) -> Result<T>,
-    ) -> Result<T> {
-        self.perform_with_clock(
-            store,
-            session,
-            &mut || Ok(health),
-            requested_effect,
-            check_current_restrictions,
-            effect,
-        )
-    }
+
     pub fn perform_with_clock<T>(
         self,
         store: &mut Store,
@@ -884,25 +846,7 @@ impl DurablePermit {
             false,
         )
     }
-    #[cfg(test)]
-    pub fn perform_once<T>(
-        self,
-        store: &mut Store,
-        session: &mut Session,
-        health: ClockHealth,
-        requested_effect: u64,
-        check_current_restrictions: impl FnMut(&proof::Restrictions) -> Result<()>,
-        effect: impl FnOnce(&OperationResult, &Store) -> Result<T>,
-    ) -> Result<T> {
-        self.perform_once_with_clock(
-            store,
-            session,
-            &mut || Ok(health),
-            requested_effect,
-            check_current_restrictions,
-            effect,
-        )
-    }
+
     pub fn perform_once_with_clock<T>(
         self,
         store: &mut Store,
@@ -990,8 +934,11 @@ impl DurablePermit {
 }
 // Whole, internally consistent local snapshot rollback requires an independently current anchor.
 #[cfg(test)]
-#[path = "AuthorityFloorTests.rs"]
+#[path = "../../Tests/Unit/Authority/AuthorityFloorTests.rs"]
 pub(crate) mod tests;
 
 #[path = "AuthorityRemoteReceipt.rs"]
 mod remote_receipt;
+
+#[cfg(test)]
+include!("../../Tests/Support/Authority/AuthorityFloor.rs");

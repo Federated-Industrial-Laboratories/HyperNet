@@ -525,5 +525,5 @@ impl Disk {
     }
 }
 #[cfg(test)]
-#[path = "AuthorityTransferDiskTests.rs"]
+#[path = "../../Tests/Unit/Transfers/AuthorityTransferDiskTests.rs"]
 mod tests;

@@ -270,5 +270,5 @@ impl Guard {
 }
 
 #[cfg(test)]
-#[path = "RuntimeServiceAuthorizationTests.rs"]
+#[path = "../../Tests/Unit/Runtime/RuntimeServiceAuthorizationTests.rs"]
 mod tests;

@@ -758,7 +758,7 @@ pub fn run(command: Command) -> Result<()> {
 }
 
 #[cfg(test)]
-#[path = "AuthorityReplicaTests.rs"]
+#[path = "../../Tests/Unit/Authority/AuthorityReplicaTests.rs"]
 pub(crate) mod tests;
 
 #[path = "AuthorityReplicaLiveStatus.rs"]

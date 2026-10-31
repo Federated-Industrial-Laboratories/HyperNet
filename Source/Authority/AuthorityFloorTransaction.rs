@@ -686,5 +686,5 @@ pub(super) fn publish(
 }
 
 #[cfg(test)]
-#[path = "AuthorityFloorTransactionTests.rs"]
+#[path = "../../Tests/Unit/Authority/AuthorityFloorTransactionTests.rs"]
 mod tests;

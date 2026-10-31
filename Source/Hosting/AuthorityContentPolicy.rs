@@ -44,20 +44,7 @@ impl ContentPolicy {
         p.admission_bytes()?;
         Ok(p)
     }
-    #[cfg(test)]
-    pub fn value(&self) -> V {
-        a(vec![
-            V::Uint(self.metadata_bytes),
-            V::Uint(self.data_bytes),
-            V::Uint(self.staging_bytes),
-            V::Uint(self.quarantine_bytes),
-            V::Uint(self.maximum_objects),
-            V::Bool(self.opaque),
-            b(&self.failure_domain),
-            a(self.reviewers.iter().map(|r| b(r)).collect()),
-            V::Bool(self.search),
-        ])
-    }
+
     pub fn admission_bytes(&self) -> Result<u64> {
         // Payload rounding and per-file filesystem overhead are reserved separately from logical bytes.
         self.maximum_objects
@@ -67,3 +54,6 @@ impl ContentPolicy {
             .context("content storage admission overflow")
     }
 }
+
+#[cfg(test)]
+include!("../../Tests/Support/Hosting/AuthorityContentPolicy.rs");

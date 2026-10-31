@@ -27,6 +27,9 @@ if len(os.fsencode(path / ('S' + '0' * 16) / 'Control.sock')) >= 108:
     raise SystemExit('Test directory is too long for Unix sockets; set HYPERNET_TEST_DIRECTORY to a shorter private path')
 PYTHON
 cargo fmt --manifest-path "$root/Cargo.toml" -- --check
+# Include files retain module scope and are not discovered by cargo fmt.
+shopt -s globstar
+rustfmt --edition 2024 --check "$root"/Tests/**/*.rs
 cargo clippy --manifest-path "$root/Cargo.toml" --release --locked --all-targets --jobs "$jobs" -- -D warnings
 cargo test --manifest-path "$root/Cargo.toml" --release --locked --jobs "$jobs"
 for script in "$root"/Tools/*.sh; do

@@ -20,15 +20,7 @@ impl Repair {
             .as_ref()
             .map(|(id, refs)| Message::RepairRequest(*id, refs.clone()))
     }
-    #[cfg(test)]
-    pub(super) fn retained_counts(&self) -> (usize, usize, usize, usize) {
-        (
-            self.wanted.len(),
-            self.staged.len(),
-            self.goals.len(),
-            self.pivots,
-        )
-    }
+
     fn new(view: u64) -> Self {
         Self {
             view,
@@ -388,3 +380,6 @@ fn dependencies(config: &Configuration, item: &Item) -> Result<Vec<Reference>> {
         _ => anyhow::bail!("Unsupported dependency kind"),
     })
 }
+
+#[cfg(test)]
+include!("../../Tests/Support/Consensus/ConsensusDriverRepair.rs");

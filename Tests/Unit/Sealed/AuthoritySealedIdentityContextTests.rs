@@ -428,7 +428,7 @@ fn recipient_roster_freeze_requires_current_member_and_binds_its_expiry() {
         )),
         scope: (2, [87; 32]),
     };
-    let frozen = f.run(freeze, 5, Some(f.grant.clone()));
+    let frozen = f.run(freeze, 5, Some(f.reviewer.clone()));
     assert_eq!(frozen.code, 0);
     assert_eq!(frozen.expires_ms, 10000);
     assert!(
@@ -447,7 +447,7 @@ fn recipient_roster_freeze_requires_current_member_and_binds_its_expiry() {
         update_member(&mut f, expires, revoked);
         let governance = Governance::parse([20; 32], [21; 32], &f.records).unwrap();
         assert!(roster(&f.state, &governance, &audience, 5000, (2, [87; 32])).is_err());
-        assert_eq!(f.run(freeze, 5, Some(f.grant.clone())).code, 17);
+        assert_eq!(f.run(freeze, 5, Some(f.reviewer.clone())).code, 17);
         assert_eq!(
             f.state.record(109, admission.id).unwrap().reference,
             admission

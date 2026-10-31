@@ -261,6 +261,198 @@ fn setup(f: &Fixture, candidate: &SigningKey) -> (Vec<u8>, Vec<u8>) {
     (delegated.state, envelope)
 }
 #[test]
+fn broad_roots_issue_explicit_purpose_grants_without_rewriting_legacy_authority() {
+    use crate::trust_action_scope::ActionPurpose;
+    for (scope_kinds, purpose) in [
+        (vec![3], Some(ActionPurpose::ApplicationStream)),
+        (vec![1, 2], Some(ActionPurpose::SealedPublication)),
+        (vec![0], None),
+        (vec![1, 3], None),
+        (vec![0, 3], None),
+    ] {
+        let f = Fixture::with_actions(1000, vec![0, 10, 11, 12, 25, 29, 30]);
+        let candidate = key(80);
+        let initial = State::parse(&f.app.config, &f.initial).unwrap();
+        let (prior, envelope) = setup(&f, &candidate);
+        let request = admit(&f, &prior, &envelope, 10000);
+        let admitted = execute(&f, &prior, &request, &f.requester, 10000);
+        assert_eq!(code(&admitted), 0);
+        let mut child = child(&f, public(&candidate), 72).array(8).unwrap().to_vec();
+        child[3] = array(vec![V::Uint(29), V::Uint(30)]);
+        child[4] = array(
+            scope_kinds
+                .iter()
+                .map(|kind| {
+                    array(vec![
+                        V::Uint(*kind),
+                        b(if *kind == 0 {
+                            &f.app.config.scope.network
+                        } else {
+                            &[88; 32]
+                        }),
+                    ])
+                })
+                .collect(),
+        );
+        let request = delegate(&f, &admitted.state, array(child), 12000);
+        let delegated = execute(&f, &admitted.state, &request, &f.requester, 12000);
+        assert_eq!(code(&delegated), 0);
+        f.app.validate_checkpoint(&delegated.state, 3).unwrap();
+        let restored = State::parse(&f.app.config, &delegated.state).unwrap();
+        let gov = Governance::parse(
+            f.app.config.scope.network,
+            f.app.config.scope.incarnation,
+            &restored.records,
+        )
+        .unwrap();
+        for family in [
+            ActionPurpose::ApplicationStream,
+            ActionPurpose::SealedPublication,
+        ] {
+            assert_eq!(
+                gov.require_action_purpose([72; 32], family).is_ok(),
+                purpose == Some(family)
+            );
+            assert!(gov.require_action_purpose(f.grant, family).is_err());
+        }
+        let requested_scope = if purpose == Some(ActionPurpose::SealedPublication) {
+            2
+        } else {
+            *scope_kinds.first().unwrap()
+        };
+        assert!(
+            gov.current_capability(
+                [72; 32],
+                &crate::authority_governance::Requirement {
+                    subject: public(&candidate),
+                    actions: &[29, 30],
+                    scope: (
+                        requested_scope,
+                        if requested_scope == 0 {
+                            f.app.config.scope.network
+                        } else {
+                            [88; 32]
+                        }
+                    ),
+                    namespace: Some([88; 32]),
+                    usage: [0, 1, 0, 1],
+                    evaluated_at_ms: 12000,
+                    expected: &[],
+                }
+            )
+            .is_ok()
+        );
+        let original = Governance::parse(
+            f.app.config.scope.network,
+            f.app.config.scope.incarnation,
+            &initial.records,
+        )
+        .unwrap();
+        assert_eq!(
+            gov.record_bytes(102, f.grant).unwrap(),
+            original.record_bytes(102, f.grant).unwrap()
+        );
+        assert_eq!(
+            gov.record_bytes(100, f.app.config.scope.network).unwrap(),
+            original
+                .record_bytes(100, f.app.config.scope.network)
+                .unwrap()
+        );
+    }
+}
+
+#[test]
+fn broad_intermediate_grants_cannot_launder_shared_actions_into_a_scoped_child() {
+    use crate::trust_action_scope::ActionPurpose;
+    for family in [1, 2, 3] {
+        let f = Fixture::with_actions(1000, vec![0, 10, 11, 12, 25, 29, 30]);
+        let candidate = key(80);
+        let (prior, envelope) = setup(&f, &candidate);
+        let request = admit(&f, &prior, &envelope, 10000);
+        let admitted = execute(&f, &prior, &request, &f.requester, 10000);
+        assert_eq!(code(&admitted), 0);
+        let mut parent = child(&f, public(&candidate), 72).array(8).unwrap().to_vec();
+        parent[3] = array(vec![V::Uint(11), V::Uint(29), V::Uint(30)]);
+        parent[6] = V::Uint(1);
+        let request = delegate(&f, &admitted.state, array(parent), 12000);
+        let delegated = execute(&f, &admitted.state, &request, &f.requester, 12000);
+        assert_eq!(code(&delegated), 0);
+        let parent = reader(&f, &delegated.state, 72);
+        let mut narrowed = child(&f, public(&candidate), 73).array(8).unwrap().to_vec();
+        narrowed[3] = array(vec![V::Uint(29), V::Uint(30)]);
+        narrowed[4] = array(vec![array(vec![V::Uint(family), b(&[88; 32])])]);
+        let mut parameters = vec![
+            V::Uint(200),
+            V::Uint(1),
+            V::Text("AuthorityDelegateGrant".into()),
+            reference(&parent),
+            array(narrowed),
+            snapshot(&f, &delegated.state, &[]),
+        ];
+        let provisional = signed(
+            &f,
+            &delegated.state,
+            &candidate,
+            "AuthorityDelegateGrant",
+            [73; 32],
+            array(parameters.clone()),
+            vec![],
+        );
+        let intent = Intent::from_signed(&provisional).unwrap();
+        let state = State::parse(&f.app.config, &delegated.state).unwrap();
+        let decision = Mutation::parse(&intent)
+            .unwrap()
+            .prepare(&state.records, &state.reservations, &intent, 14000, false)
+            .unwrap();
+        assert_eq!(decision.code, 0);
+        parameters[5] = snapshot(&f, &delegated.state, &decision.dependencies);
+        let request = signed(
+            &f,
+            &delegated.state,
+            &candidate,
+            "AuthorityDelegateGrant",
+            [73; 32],
+            array(parameters),
+            decision.dependencies,
+        );
+        let narrowed = execute(&f, &delegated.state, &request, &candidate, 14000);
+        assert_eq!(code(&narrowed), 0);
+        f.app.validate_checkpoint(&narrowed.state, 4).unwrap();
+        let state = State::parse(&f.app.config, &narrowed.state).unwrap();
+        let gov = Governance::parse(
+            f.app.config.scope.network,
+            f.app.config.scope.incarnation,
+            &state.records,
+        )
+        .unwrap();
+        // The ordinary attenuation is legal. It cannot remove the ambiguous
+        // intermediate grant from the effect's current authority chain.
+        assert!(
+            gov.current_capability(
+                [73; 32],
+                &crate::authority_governance::Requirement {
+                    subject: public(&candidate),
+                    actions: &[29, 30],
+                    scope: (family, [88; 32]),
+                    namespace: None,
+                    usage: [0, 1, 0, 1],
+                    evaluated_at_ms: 14000,
+                    expected: &[],
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            gov.require_action_purpose([73; 32], ActionPurpose::ApplicationStream)
+                .is_err()
+        );
+        assert!(
+            gov.require_action_purpose([73; 32], ActionPurpose::SealedPublication)
+                .is_err()
+        );
+    }
+}
+#[test]
 fn admission_is_atomic_audited_and_replay_preserves_a_fenced_candidate() {
     let f = Fixture::with_actions(1000, vec![0, 10, 11, 12, 25]);
     let candidate = key(80);

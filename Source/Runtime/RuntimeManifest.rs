@@ -800,5 +800,5 @@ impl Manifest {
 }
 
 #[cfg(test)]
-#[path = "RuntimeManifestTests.rs"]
+#[path = "../../Tests/Unit/Runtime/RuntimeManifestTests.rs"]
 pub(crate) mod tests;

@@ -238,17 +238,7 @@ impl Engine {
         }
         Ok(())
     }
-    #[cfg(test)]
-    pub fn install_checkpoint(
-        &mut self,
-        proof: &[u8],
-        state: &[u8],
-        leaves: &(impl archive::History + ?Sized),
-        validate: impl FnOnce(&[u8], u64) -> Result<()>,
-        expired_before: Option<u64>,
-    ) -> Result<()> {
-        self.install_checkpoint_with_inputs(proof, state, leaves, &[], validate, expired_before)
-    }
+
     pub fn install_checkpoint_with_inputs(
         &mut self,
         proof: &[u8],
@@ -760,5 +750,8 @@ impl Engine {
 }
 
 #[cfg(test)]
-#[path = "ConsensusCheckpointTests.rs"]
+#[path = "../../Tests/Unit/Consensus/ConsensusCheckpointTests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+include!("../../Tests/Support/Consensus/ConsensusCheckpoint.rs");

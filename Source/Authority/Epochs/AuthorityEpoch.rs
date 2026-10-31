@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Committee succession has one exact declaration and preserves prior application history.
-#[cfg(test)]
-use crate::authority_membership::reference;
+
 use crate::{
     authority_membership::{Snapshot, version},
     authority_proof::{Digest, Intent, Key, Scope, VersionRef},
@@ -124,44 +123,6 @@ impl Declaration {
     pub fn digest(&self) -> Digest {
         wire::digest(&self.bytes)
     }
-    #[cfg(test)]
-    pub fn parameters(&self) -> Result<Vec<u8>> {
-        wire::encode(&a(vec![
-            V::Uint(200),
-            V::Uint(1),
-            V::Text("Reconfigure".into()),
-            b(&self.bytes),
-        ]))
-    }
-    #[cfg(test)]
-    pub fn create(
-        scope: Scope,
-        requester: Key,
-        grant: Digest,
-        snapshot: Snapshot,
-        nominations: Vec<Nomination>,
-    ) -> Result<Self> {
-        let bytes = wire::encode(&a(vec![
-            V::Uint(49),
-            V::Uint(1),
-            scope.value(),
-            V::Uint(scope.epoch.checked_add(1).context("epoch overflow")?),
-            b(&requester),
-            b(&grant),
-            snapshot.value,
-            a(nominations
-                .iter()
-                .map(|n| {
-                    a(vec![
-                        b(&n.voter),
-                        reference(&n.profile),
-                        reference(&n.consent),
-                    ])
-                })
-                .collect()),
-        ]))?;
-        Self::parse(&bytes)
-    }
 }
 #[derive(Clone, Debug)]
 pub struct Terminal {
@@ -236,20 +197,20 @@ impl Origin {
 
 #[path = "AuthorityEpochProof.rs"]
 mod proof;
-#[cfg(test)]
-pub(crate) use proof::noop;
+
 pub use proof::{ValidatedActivation, ValidatedTerminal, verify_activation, verify_terminal};
 pub(crate) use proof::{descriptor, genesis, ready_statement};
 
 #[path = "AuthorityEpochAssembly.rs"]
 mod assembly;
 pub use assembly::terminal_checkpoint;
-#[cfg(test)]
-pub use assembly::{assemble_checkpoint, assemble_handoff, assemble_ready};
 
 #[path = "AuthorityEpochArchive.rs"]
 pub mod archive;
 
 #[cfg(test)]
-#[path = "AuthorityEpochTests.rs"]
+#[path = "../../../Tests/Unit/Authority/Epochs/AuthorityEpochTests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+include!("../../../Tests/Support/Authority/Epochs/AuthorityEpoch.rs");

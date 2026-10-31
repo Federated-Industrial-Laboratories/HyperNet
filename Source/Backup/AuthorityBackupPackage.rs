@@ -29,18 +29,7 @@ impl Package {
         );
         Ok(p)
     }
-    #[cfg(test)]
-    pub fn encode(&self) -> Result<Vec<u8>> {
-        wire::encode_bounded(
-            &a(vec![
-                V::Uint(201),
-                V::Uint(1),
-                V::Text("BackupPackage".into()),
-                b(&self.profile.envelope),
-                b(&self.archive.envelope),
-                b(&self.ciphertext),
-            ]),
-            PACKAGE_LIMIT,
-        )
-    }
 }
+
+#[cfg(test)]
+include!("../../Tests/Support/Backup/AuthorityBackupPackage.rs");

@@ -386,5 +386,5 @@ pub fn verify_acceptance(
     Ok(())
 }
 #[cfg(test)]
-#[path = "AuthorityRecoveryTests.rs"]
+#[path = "../../Tests/Unit/Authority/AuthorityRecoveryTests.rs"]
 pub(crate) mod tests;

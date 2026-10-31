@@ -163,5 +163,5 @@ pub fn response_inputs(_intent: &Intent, _value: &V) -> Result<Vec<Reference>> {
 }
 
 #[cfg(test)]
-#[path = "../../Federation/AuthorityFederationTests.rs"]
+#[path = "../../../Tests/Unit/Federation/AuthorityFederationTests.rs"]
 mod tests;

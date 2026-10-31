@@ -258,5 +258,5 @@ pub(super) fn run(options: Options, collect: impl FnOnce(&Path) -> Snapshot) -> 
 }
 
 #[cfg(test)]
-#[path = "RuntimeDiagnosticsTests.rs"]
+#[path = "../../Tests/Unit/Runtime/RuntimeDiagnosticsTests.rs"]
 mod tests;

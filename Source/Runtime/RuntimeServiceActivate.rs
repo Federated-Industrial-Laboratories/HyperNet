@@ -333,5 +333,5 @@ pub fn activate(guard: &Guard) -> Result<Active> {
 }
 
 #[cfg(test)]
-#[path = "RuntimeServiceActivateTests.rs"]
+#[path = "../../Tests/Unit/Runtime/RuntimeServiceActivateTests.rs"]
 mod tests;

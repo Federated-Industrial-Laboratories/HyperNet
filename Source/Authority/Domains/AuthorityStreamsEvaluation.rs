@@ -36,6 +36,10 @@ impl Context<'_> {
             grant.kind == 102 && self.governance.versions().contains(grant),
             "stream capability is stale"
         );
+        self.governance.require_action_purpose(
+            grant.id,
+            crate::trust_action_scope::ActionPurpose::ApplicationStream,
+        )?;
         let d = self.governance.current_capability(
             grant.id,
             &Requirement {

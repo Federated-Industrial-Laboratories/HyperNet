@@ -982,22 +982,7 @@ impl Engine {
         self.persist(next)?;
         Ok(signed)
     }
-    #[cfg(test)]
-    pub fn prepare(
-        &mut self,
-        proposal: &[u8],
-        command: &[u8],
-        admit_time: impl FnOnce(u64) -> Result<()>,
-        validate_intent: impl FnOnce(&[u8], u64) -> Result<()>,
-    ) -> Result<Vec<u8>> {
-        self.prepare_with_inputs(
-            proposal,
-            command,
-            &crate::authority_objects::Resolved::default(),
-            admit_time,
-            validate_intent,
-        )
-    }
+
     pub fn prepare_with_inputs(
         &mut self,
         proposal: &[u8],
@@ -1703,13 +1688,16 @@ fn validate_execution(
 }
 
 #[cfg(test)]
-#[path = "ConsensusTests.rs"]
+#[path = "../../Tests/Unit/Consensus/ConsensusTests.rs"]
 pub(crate) mod tests;
 
 #[cfg(test)]
-#[path = "ConsensusStorageTests.rs"]
+#[path = "../../Tests/Unit/Consensus/ConsensusStorageTests.rs"]
 mod storage_tests;
 
 #[cfg(test)]
-#[path = "ConsensusTransactionTests.rs"]
+#[path = "../../Tests/Unit/Consensus/ConsensusTransactionTests.rs"]
 mod transaction_tests;
+
+#[cfg(test)]
+include!("../../Tests/Support/Consensus/Consensus.rs");

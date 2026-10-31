@@ -610,6 +610,40 @@ impl Governance {
         );
         self.evaluate(grant, request, false)
     }
+    /// Every non-root link preserves one purpose. An accepted bootstrap root may
+    /// delegate precise authority, but broad intermediate grants cannot launder it.
+    pub fn require_action_purpose(
+        &self,
+        grant: Digest,
+        purpose: crate::trust_action_scope::ActionPurpose,
+    ) -> Result<()> {
+        let mut cursor = grant;
+        let mut seen = BTreeSet::new();
+        for depth in 0..=8 {
+            ensure!(seen.insert(cursor), "grant chain cycle");
+            let current = self.record(102, cursor)?;
+            let root = current.fields[13] == V::Null;
+            if depth == 0 || !root {
+                let declared = scopes(&current.fields[11], self.network)?;
+                ensure!(
+                    crate::trust_action_scope::classify(declared.iter().map(|s| s.0))
+                        == Some(purpose),
+                    "shared action requires one resource family throughout its non-root grant chain"
+                );
+            }
+            if root {
+                ensure!(
+                    self.record(100, self.network)?.fields[15]
+                        .list(16)?
+                        .contains(&V::Bytes(cursor.to_vec())),
+                    "grant root is not accepted by current governance"
+                );
+                return Ok(());
+            }
+            cursor = reference(&current.fields[13])?.id;
+        }
+        anyhow::bail!("grant chain exceeds its depth bound")
+    }
     pub fn revoked_chain(&self, grant: Digest) -> Result<bool> {
         let mut seen = BTreeSet::new();
         let mut cursor = grant;
@@ -800,5 +834,5 @@ fn conservative(t: u64, span: (u64, u64)) -> bool {
 }
 
 #[cfg(test)]
-#[path = "AuthorityGovernanceTests.rs"]
+#[path = "../../../Tests/Unit/Authority/Governance/AuthorityGovernanceTests.rs"]
 mod tests;

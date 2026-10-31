@@ -207,5 +207,5 @@ pub fn verify_successor(
 }
 
 #[cfg(test)]
-#[path = "AuthoritySealedIdentityTests.rs"]
+#[path = "../../Tests/Unit/Sealed/AuthoritySealedIdentityTests.rs"]
 mod tests;

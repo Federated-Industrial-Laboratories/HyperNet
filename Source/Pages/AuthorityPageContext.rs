@@ -66,6 +66,16 @@ impl Evaluation<'_> {
             grant.kind == 102 && self.governance.versions().contains(grant),
             "Page capability is stale"
         );
+        if actions
+            .iter()
+            .copied()
+            .any(crate::trust_action_scope::collides)
+        {
+            self.governance.require_action_purpose(
+                grant.id,
+                crate::trust_action_scope::ActionPurpose::SealedPublication,
+            )?;
+        }
         let cap = self.governance.current_capability(
             grant.id,
             &Requirement {

@@ -16,12 +16,7 @@ pub(super) struct ServedCheckpoint {
     state: Vec<u8>,
     deadline: Instant,
 }
-#[cfg(test)]
-impl ServedCheckpoint {
-    pub(super) fn expires_at(&self) -> Instant {
-        self.deadline
-    }
-}
+
 pub(super) struct Transfer {
     proof: Vec<u8>,
     digest: Digest,
@@ -36,10 +31,6 @@ pub(super) struct Transfer {
 impl Transfer {
     pub(super) fn pending_message(&self) -> &Message {
         &self.pending
-    }
-    #[cfg(test)]
-    pub(super) fn expires_at(&self) -> Instant {
-        self.deadline
     }
 }
 impl Driver {
@@ -504,3 +495,6 @@ impl Driver {
         }
     }
 }
+
+#[cfg(test)]
+include!("../../Tests/Support/Consensus/ConsensusDriverCheckpoint.rs");

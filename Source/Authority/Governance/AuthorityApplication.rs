@@ -956,31 +956,31 @@ fn refusal(action: &str, code: u64) -> Result<Vec<u8>> {
 }
 
 #[cfg(test)]
-#[path = "AuthorityApplicationTests.rs"]
+#[path = "../../../Tests/Unit/Authority/Governance/AuthorityApplicationTests.rs"]
 pub(crate) mod tests;
 
 #[cfg(test)]
-#[path = "../AuthorityTransactionTests.rs"]
+#[path = "../../../Tests/Unit/Authority/AuthorityTransactionTests.rs"]
 mod transaction_tests;
 
 #[cfg(test)]
-#[path = "AuthorityApplicationStreamTests.rs"]
+#[path = "../../../Tests/Unit/Authority/Governance/AuthorityApplicationStreamTests.rs"]
 mod stream_tests;
 
 #[cfg(test)]
-#[path = "AuthorityApplicationStateTests.rs"]
+#[path = "../../../Tests/Unit/Authority/Governance/AuthorityApplicationStateTests.rs"]
 mod state_tests;
 
 #[cfg(test)]
-#[path = "AuthorityMembershipTests.rs"]
+#[path = "../../../Tests/Unit/Authority/Governance/AuthorityMembershipTests.rs"]
 mod membership_tests;
 
 #[cfg(test)]
-#[path = "AuthorityApplicationsTests.rs"]
+#[path = "../../../Tests/Unit/Authority/Governance/AuthorityApplicationsTests.rs"]
 mod applications_tests;
 
 #[cfg(test)]
-#[path = "../Deployments/AuthorityDeploymentApplicationTests.rs"]
+#[path = "../../../Tests/Unit/Authority/Deployments/AuthorityDeploymentApplicationTests.rs"]
 mod deployment_tests;
 
 /// A terminal flag is meaningful only inside a fully validated authority state.
@@ -1034,17 +1034,17 @@ pub(crate) fn successor_state(
 }
 
 #[cfg(test)]
-#[path = "../../Mail/AuthorityMailApplicationTests.rs"]
+#[path = "../../../Tests/Unit/Mail/AuthorityMailApplicationTests.rs"]
 mod mail_application_tests;
 
 #[cfg(test)]
-#[path = "../../Pages/AuthorityPageApplicationTests.rs"]
+#[path = "../../../Tests/Unit/Pages/AuthorityPageApplicationTests.rs"]
 mod page_application_tests;
 
 #[cfg(test)]
-#[path = "AuthorityTierTests.rs"]
+#[path = "../../../Tests/Unit/Authority/Governance/AuthorityTierTests.rs"]
 mod tier_tests;
 
 #[cfg(test)]
-#[path = "AuthorityPolicyApplicationTests.rs"]
+#[path = "../../../Tests/Unit/Authority/Governance/AuthorityPolicyApplicationTests.rs"]
 mod policy_tests;

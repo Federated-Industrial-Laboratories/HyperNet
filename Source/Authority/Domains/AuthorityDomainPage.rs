@@ -130,7 +130,8 @@ fn identity(label: &str, fields: Vec<V>) -> Result<Digest> {
 }
 
 #[cfg(test)]
-#[path = "../../Pages/AuthorityPageTests.rs"]
+#[path = "../../../Tests/Unit/Pages/AuthorityPageTests.rs"]
 mod tests;
+
 #[cfg(test)]
-pub(crate) use tests::complete_content;
+include!("../../../Tests/Support/Authority/Domains/AuthorityDomainPage.rs");

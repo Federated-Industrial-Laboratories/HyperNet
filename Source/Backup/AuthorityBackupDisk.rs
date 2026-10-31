@@ -377,5 +377,5 @@ impl Disk {
 }
 
 #[cfg(test)]
-#[path = "AuthorityBackupDiskTests.rs"]
+#[path = "../../Tests/Unit/Backup/AuthorityBackupDiskTests.rs"]
 mod tests;

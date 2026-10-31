@@ -587,5 +587,5 @@ impl<'a> Client<'a> {
 }
 
 #[cfg(test)]
-#[path = "AuthorityPageClientTests.rs"]
+#[path = "../../Tests/Unit/Pages/AuthorityPageClientTests.rs"]
 mod tests;

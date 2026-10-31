@@ -5,7 +5,7 @@
 <p align="center">Permissioned networks for pages, private communication and shared services.</p>
 
 <p align="center">
-  <a href="https://github.com/Federated-Industrial-Laboratories/HyperNet/releases/tag/v0.9.0">Linux 0.9.0</a> |
+  <a href="https://github.com/Federated-Industrial-Laboratories/HyperNet/releases/tag/v0.9.1">Linux 0.9.1</a> |
   <a href="Documentation/Installation.md">Install</a> |
   <a href="Documentation/Hosting.md">Host</a> |
   <a href="Documentation/ReadMe.md">Documentation</a> |
@@ -28,12 +28,16 @@ provides the separate native graphical browser, terminal viewer and command-line
 clients. Reading a Page does not require running a host or authority replica.
 
 > [!NOTE]
-> **Linux 0.9.0** is qualified on native Ubuntu x86_64 within the documented limits.
+> **Linux 0.9.1** is qualified on native Ubuntu x86_64 within the documented limits.
 > Other Linux distributions depend on compatible libraries and the required
 > kernel and runtime capabilities. AArch64, macOS and SELinux-enabled operation
 > remain unqualified. This release has no independent security certification.
 > Read the [release notes](Documentation/ReleaseNotes.md) and
 > [deployment limits](Documentation/Qualification.md) before choosing a deployment.
+
+Version 0.9.1 fixes overlapping stream and sealed-page permission scopes.
+Read [the migration guide](Documentation/PermissionScopes.md) before upgrading;
+network-wide grants no longer authorise those effects.
 
 ## Capabilities
 
@@ -75,7 +79,7 @@ identities and restricted grants; they do not receive a user's private keys.
 
 ## Install
 
-Download the [Linux 0.9.0 release](https://github.com/Federated-Industrial-Laboratories/HyperNet/releases/tag/v0.9.0)
+Download the [Linux 0.9.1 release](https://github.com/Federated-Industrial-Laboratories/HyperNet/releases/tag/v0.9.1)
 or build from source. For a signed package, follow the
 [package installation guide](Documentation/Packages.md): verification requires
 independently accepted publisher trust and the current signed update policy.
@@ -135,7 +139,7 @@ for permissions and recovery.
 
 ## Documentation and development
 
-The [release notes](Documentation/ReleaseNotes.md) describe the 0.9.0 scope and
+The [release notes](Documentation/ReleaseNotes.md) describe the 0.9.1 scope and
 known limits. The [documentation index](Documentation/ReadMe.md) provides reading routes for
 operators, authors and application developers, plus the complete reference library.
 [Source layout](Documentation/SourceLayout.md) maps implementation modules.

@@ -14,7 +14,7 @@ use anyhow::{Context, Result, ensure};
 const MAX_CONTEXT_BYTES: usize = 32768;
 const MAX_CONTEXT_RECORDS: usize = 64;
 #[cfg(test)]
-#[path = "AuthorityDiscoveryTests.rs"]
+#[path = "../../Tests/Unit/Authority/AuthorityDiscoveryTests.rs"]
 mod discovery_tests;
 #[derive(Clone)]
 pub(super) struct ContextCursor {

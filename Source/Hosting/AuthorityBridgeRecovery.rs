@@ -294,5 +294,5 @@ pub fn run(config: &Config, guard: &Guard, expected_bytes: Option<&[u8]>) -> Res
 }
 
 #[cfg(test)]
-#[path = "AuthorityBridgeRecoveryTests.rs"]
+#[path = "../../Tests/Unit/Hosting/AuthorityBridgeRecoveryTests.rs"]
 mod tests;
