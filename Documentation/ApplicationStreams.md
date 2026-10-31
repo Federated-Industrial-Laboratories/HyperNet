@@ -57,8 +57,11 @@ The companion exposes two separate private interfaces:
 
 - `Control.sock` serves the local application's connect, accept, status and cancel
   requests. It belongs to the native application's account.
-- `Ingress/Control.sock` accepts only the confined endpoint's connections.
+- `Ingress/Control.sock` accepts only the confined endpoint's payload connections.
   `Ingress/Binding.json` identifies the exact service and local binding.
+- Matching capability-enabled companions also expose `Ingress/Checks.sock` for
+  [fresh local authority checks](ApplicationChecks.md). This optional control
+  channel does not consume an application slot or change the payload protocol.
 
 The installed rootless endpoint maps only `Ingress` to `/Application`. It cannot
 reach the SDK command socket, requester profile, signing keys or target map.

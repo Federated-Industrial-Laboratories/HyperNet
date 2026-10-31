@@ -107,6 +107,7 @@ pub(crate) enum Phase {
     EndpointRenewalStart,
     EndpointRenewalComplete,
     EndpointRenewalRefused,
+    ApplicationCheckRefused,
 }
 impl std::fmt::Display for Phase {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

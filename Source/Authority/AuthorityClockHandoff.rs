@@ -30,6 +30,18 @@ pub enum Source {
     },
 }
 impl Source {
+    /// Only the application check protocol shares absolute boot deadlines.
+    /// Existing payload workflows do not acquire this additional requirement.
+    pub fn verified_boot(&self) -> Result<String> {
+        unshifted_clock()?;
+        self.health()?.observe()?;
+        match self {
+            Self::Signed { kernel_boot, .. } if kernel_boot != "CurrentHost" => {
+                Ok(kernel_boot.clone())
+            }
+            _ => clock::kernel_boot(),
+        }
+    }
     pub fn health(&self) -> Result<ClockHealth> {
         match self {
             Self::Private { path } => crate::authority_clock_monitor::health(path),
@@ -91,6 +103,9 @@ pub(super) fn read_private_observation(path: &Path) -> Result<Vec<u8>> {
 
 fn unshifted_clock() -> Result<()> {
     let bytes = std::fs::read_to_string("/proc/self/timens_offsets")?;
+    zero_offsets(&bytes)
+}
+fn zero_offsets(bytes: &str) -> Result<()> {
     ensure!(
         bytes.len() <= 256,
         "time namespace report exceeds its bound"

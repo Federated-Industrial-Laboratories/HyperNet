@@ -2,6 +2,20 @@
 // Unit tests for AuthorityClockHandoff.
 use super::*;
 #[test]
+fn application_deadlines_require_both_unshifted_namespace_clocks() {
+    zero_offsets("monotonic 0 0\nboottime 0 0\n").unwrap();
+    for report in [
+        "monotonic 1 0\nboottime 0 0\n",
+        "monotonic 0 0\nboottime 0 1\n",
+        "monotonic 0 0\n",
+        "boottime 0 0\nmonotonic 0 0\n",
+        "monotonic 0 0\nboottime 0 0\nextra 0 0\n",
+    ] {
+        assert!(zero_offsets(report).is_err());
+    }
+    assert!(zero_offsets(&" ".repeat(257)).is_err());
+}
+#[test]
 fn signed_clock_expiry_only_recovers_otherwise_valid_observations() {
     let key = SigningKey::from_bytes(&[62; 32]);
     let boot = "12345678-1234-1234-1234-123456789abc";

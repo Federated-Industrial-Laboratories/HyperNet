@@ -381,6 +381,7 @@ impl Session {
         recipient: &SigningKey,
         client_nonce: Digest,
         duration_ms: u64,
+        absolute_deadline: Option<u64>,
         health: ClockHealth,
     ) -> Result<Vec<u8>> {
         let read = Request::from_signed(request)?;
@@ -397,6 +398,7 @@ impl Session {
             recipient,
             client_nonce,
             duration_ms,
+            absolute_deadline,
             health,
         )
     }

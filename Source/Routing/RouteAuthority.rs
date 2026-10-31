@@ -857,6 +857,64 @@ impl<'a> Client<'a> {
         }))?;
         self.effect_deadline()
     }
+    /// No recovery or ordinary request fallback is permitted on the companion check path.
+    pub fn check_stream(
+        &mut self,
+        session: &VersionRef,
+        caller_started_boot_ms: u64,
+    ) -> Result<(streams::control::Authority, bool, u64)> {
+        self.active.check(self.guard)?;
+        ensure!(
+            self.store.resume_ordinary()?.is_none() && self.store.resume_fence()?.is_none(),
+            "fresh application authority requester is busy"
+        );
+        let observation = self.read_observation(
+            DomainCommand::Stream(streams::Command::Permit {
+                session: session.clone(),
+            }),
+            Some(
+                caller_started_boot_ms
+                    .checked_add(authority_challenge::MAXIMUM_DURATION_MS)
+                    .context("application challenge ceiling overflow")?,
+            ),
+        )?;
+        ensure!(
+            observation.disposition != Disposition::Pending,
+            "fresh application authority is pending"
+        );
+        let statement = observation.statement;
+        let health = self.guard.health()?;
+        let now = health.observe()?;
+        let remaining = statement
+            .expires_at_ms
+            .saturating_sub(authority_challenge::DELTA_MS)
+            .checked_sub(now.wall_ms)
+            .context("fresh application authority expired")?;
+        let mut deadline = now
+            .boot_ms
+            .saturating_add(remaining)
+            .min(health.valid_until_boot_ms());
+        if let Some(caller) = self.deadline {
+            deadline = deadline.min(caller);
+        }
+        let permitted = observation.disposition == Disposition::Permit;
+        if permitted {
+            deadline = deadline.min(self.effect_deadline()?);
+        }
+        let authority = streams::control::Authority {
+            network: statement.scope.network,
+            incarnation: statement.scope.incarnation,
+            configuration: statement.scope.configuration,
+            epoch: statement.scope.epoch,
+            height: statement.height,
+            state: statement.state,
+            statement_digest: wire::digest(&statement.encode()?),
+            evaluated_at_ms: statement.evaluated_at_ms,
+            expires_at_ms: statement.expires_at_ms,
+            code: observation.code,
+        };
+        Ok((authority, permitted, deadline))
+    }
     pub fn stream_close(&mut self, session: &VersionRef) -> Result<()> {
         self.recover()?;
         let r = self.disk.context().0.record(173, session.id)?.clone();

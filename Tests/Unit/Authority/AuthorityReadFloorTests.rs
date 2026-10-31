@@ -37,7 +37,7 @@ impl Read {
         )
         .unwrap();
         let challenge = session
-            .issue_read(&request, &signer, [97; 32], 5000, sample)
+            .issue_read(&request, &signer, [97; 32], 5000, None, sample)
             .unwrap();
         let versions = [100, 114]
             .into_iter()

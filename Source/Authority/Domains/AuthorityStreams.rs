@@ -6,6 +6,8 @@ use crate::route_profile::Limits;
 mod evaluation;
 pub use evaluation::evaluate;
 pub(crate) use evaluation::evaluate_read;
+#[path = "ApplicationStreamControl.rs"]
+pub mod control;
 #[path = "ApplicationStreamBinding.rs"]
 pub mod local;
 #[path = "ApplicationStreamProtocol.rs"]

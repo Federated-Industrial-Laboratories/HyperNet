@@ -2,7 +2,7 @@
 
 [Project](../ReadMe.md) | [Installation](Installation.md) | [Security](Security.md) | [HyperNetSuite](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite)
 
-[Linux 0.9.1 release and downloads](ReleaseNotes.md)
+[Linux 0.10.0 release and downloads](ReleaseNotes.md)
 
 [0.9.1 permission scopes and migration](PermissionScopes.md)
 
@@ -34,6 +34,7 @@ cover the graphical browser, terminal viewer, mail and client commands.
 | [Service runtime](ServiceRuntime.md) | Import, activate, supervise and recover a separately consented service. |
 | [Clock observation](AuthorityClock.md) | Authenticated time sources, signed observations and clock failure handling. |
 | [Application streams](ApplicationStreams.md) | Reusable authenticated duplex streams, local SDK binding and finite session lifecycle. |
+| [Application authority checks](ApplicationChecks.md) | Exact-session observations, bounded caller deadlines and directional transport facts. |
 | [Private routes](PrivateRoutes.md) | Relays, application endpoints, outbound attachments and privacy limits. |
 | [Network policies](NetworkPolicies.md) | Participation, privacy, publication and recovery-custody policy changes. |
 | [Tier administration](Tiers.md) | Explicit grants and policy history; tier labels do not grant authority. |
