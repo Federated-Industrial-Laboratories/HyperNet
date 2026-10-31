@@ -108,7 +108,10 @@ impl Fixture {
             let reviewer = matches!(
                 &command,
                 DomainCommand::SealedPublication(
-                    Command::Prepare { .. } | Command::Stage { .. } | Command::Context { .. }
+                    Command::Prepare { .. }
+                        | Command::Stage { .. }
+                        | Command::Commit { .. }
+                        | Command::Context { .. }
                 ) | DomainCommand::Page(page::Command::Content(
                     page::content::Command::Receipt { .. }
                 ))
