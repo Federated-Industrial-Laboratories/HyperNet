@@ -108,5 +108,5 @@ pub(super) fn recover(t: &mut Transaction) -> Result<()> {
 }
 
 #[cfg(test)]
-#[path = "RuntimeTransitionArtifactsTests.rs"]
+#[path = "../../Tests/Unit/Runtime/RuntimeTransitionArtifactsTests.rs"]
 mod tests;

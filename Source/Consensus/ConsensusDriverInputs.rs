@@ -96,7 +96,7 @@ pub(super) fn executed_inputs(
 }
 
 #[cfg(test)]
-#[path = "ConsensusDriverInputTests.rs"]
+#[path = "../../Tests/Unit/Consensus/ConsensusDriverInputTests.rs"]
 mod tests;
 
 pub(super) struct Flight {

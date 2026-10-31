@@ -241,5 +241,5 @@ impl SignedRequest {
 }
 
 #[cfg(test)]
-#[path = "AuthorityRequestTests.rs"]
+#[path = "../../Tests/Unit/Authority/AuthorityRequestTests.rs"]
 mod tests;

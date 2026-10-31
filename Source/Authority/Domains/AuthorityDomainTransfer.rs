@@ -32,21 +32,6 @@ pub struct Profile {
     pub envelope: Vec<u8>,
 }
 impl Profile {
-    #[cfg(test)]
-    pub fn payload(&self) -> Result<Vec<u8>> {
-        wire::encode(&a(vec![
-            V::Uint(200),
-            V::Uint(1),
-            V::Text("AuthorityTransferProfile".into()),
-            b(&self.manifest.encode()?),
-            b(&self.service),
-            self.endpoint.as_ref().map_or(V::Null, |v| b(v)),
-            b(&self.volume),
-            V::Uint(self.state_bytes),
-            V::Uint(self.maximum_payload),
-            V::Uint(self.maximum_lifetime_ms),
-        ]))
-    }
     pub fn parse(envelope: &[u8], network: Digest, incarnation: Digest) -> Result<Self> {
         ensure!(
             envelope.len() <= (crate::runtime_manifest::MAXIMUM + 1024),
@@ -175,25 +160,6 @@ pub struct Offer {
     pub envelope: Vec<u8>,
 }
 impl Offer {
-    #[cfg(test)]
-    pub fn payload(&self) -> Result<Vec<u8>> {
-        wire::encode(&a(vec![
-            V::Uint(200),
-            V::Uint(1),
-            V::Text("AuthorityTransferOffer".into()),
-            b(&self.network),
-            b(&self.incarnation),
-            b(&self.id),
-            b(&self.sender),
-            b(&self.recipient),
-            V::Text(self.encryption_key.clone()),
-            V::Uint(self.payload_bytes),
-            b(&self.payload_digest),
-            V::Uint(self.file_bytes),
-            V::Text(self.label.clone()),
-            V::Uint(self.expires),
-        ]))
-    }
     pub fn parse(envelope: &[u8], n: Digest, i: Digest) -> Result<Self> {
         ensure!(envelope.len() <= 2048, "transfer offer exceeds its bound");
         let (bytes, signatures) = wire::envelope(envelope, 1)?;
@@ -409,5 +375,8 @@ pub fn disk_header_bytes() -> u64 {
 }
 
 #[cfg(test)]
-#[path = "../../Transfers/AuthorityTransferTests.rs"]
+#[path = "../../../Tests/Unit/Transfers/AuthorityTransferTests.rs"]
 mod tests;
+
+#[cfg(test)]
+include!("../../../Tests/Support/Authority/Domains/AuthorityDomainTransfer.rs");

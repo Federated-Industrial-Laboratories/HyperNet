@@ -816,17 +816,7 @@ impl Decision {
         self.state = None;
     }
 }
-#[cfg(test)]
-pub fn evaluate(
-    state: &State,
-    records: &[Vec<u8>],
-    reserved: &Reservations,
-    intent: &Intent,
-    at: u64,
-    replay: bool,
-) -> Result<Decision> {
-    Operation::parse(intent)?.prepare(state, records, reserved, intent, at, replay, true)
-}
+
 pub fn response_inputs(
     intent: &Intent,
     value: &V,
@@ -843,7 +833,7 @@ pub(crate) fn sorted(references: &mut Vec<VersionRef>) -> Result<()> {
     validate_versions(references, 64)
 }
 #[cfg(test)]
-#[path = "AuthorityDomainTests.rs"]
+#[path = "../../../Tests/Unit/Authority/Domains/AuthorityDomainTests.rs"]
 mod tests;
 
 pub fn retained_inputs(state: &State) -> Result<Vec<crate::authority_objects::Reference>> {
@@ -853,3 +843,6 @@ pub fn retained_inputs(state: &State) -> Result<Vec<crate::authority_objects::Re
     refs.dedup();
     Ok(refs)
 }
+
+#[cfg(test)]
+include!("../../../Tests/Support/Authority/Domains/AuthorityDomains.rs");

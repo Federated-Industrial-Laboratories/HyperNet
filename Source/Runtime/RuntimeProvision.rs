@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Prepare identities, certificates and replica inputs without starting a workload.
 #[cfg(test)]
-#[path = "RuntimeProvisionTests.rs"]
+#[path = "../../Tests/Unit/Runtime/RuntimeProvisionTests.rs"]
 mod tests;
 #[path = "RuntimeProvisionTls.rs"]
 mod tls;

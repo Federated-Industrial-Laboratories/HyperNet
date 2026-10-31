@@ -159,5 +159,5 @@ fn media_operation(intent: &crate::authority_proof::Intent) -> Result<()> {
 }
 
 #[cfg(test)]
-#[path = "AuthorityRemoteReceiptTests.rs"]
+#[path = "../../Tests/Unit/Authority/AuthorityRemoteReceiptTests.rs"]
 mod tests;

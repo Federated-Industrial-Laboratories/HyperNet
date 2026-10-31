@@ -428,17 +428,7 @@ impl Streams {
             _ => Classification::Fresh,
         })
     }
-    /// The containing application commits this receipt and its permitted effect in one state.
-    /// Authority and exact-snapshot checks use the original state before this retirement.
-    #[cfg(test)]
-    pub fn record(
-        &mut self,
-        request: &Request,
-        proposed_result: &[u8],
-        capacity_refusal: &[u8],
-    ) -> Result<Recorded> {
-        self.record_reserved(request, proposed_result, capacity_refusal, &BTreeSet::new())
-    }
+
     pub fn validate_reserve(&self, operators: &BTreeSet<Key>) -> Result<()> {
         ensure!(
             operators.iter().all(|key| self.entries.contains_key(key))
@@ -680,7 +670,7 @@ impl Streams {
 }
 
 #[cfg(test)]
-#[path = "AuthorityStreamsTests.rs"]
+#[path = "../../Tests/Unit/Authority/AuthorityStreamsTests.rs"]
 mod tests;
 
 fn reserved_charge(key: &Key, stream: &Stream, operators: &BTreeSet<Key>) -> Result<usize> {
@@ -690,3 +680,6 @@ fn reserved_charge(key: &Key, stream: &Stream, operators: &BTreeSet<Key>) -> Res
         0
     }))
 }
+
+#[cfg(test)]
+include!("../../Tests/Support/Authority/AuthorityStreams.rs");

@@ -818,5 +818,5 @@ pub(crate) fn evaluate(
 }
 
 #[cfg(test)]
-#[path = "AuthorityPageContentTests.rs"]
+#[path = "../../Tests/Unit/Pages/AuthorityPageContentTests.rs"]
 mod tests;

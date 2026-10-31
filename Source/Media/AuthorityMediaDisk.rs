@@ -528,5 +528,5 @@ impl Disk {
 }
 
 #[cfg(test)]
-#[path = "AuthorityMediaDiskTests.rs"]
+#[path = "../../Tests/Unit/Media/AuthorityMediaDiskTests.rs"]
 mod tests;

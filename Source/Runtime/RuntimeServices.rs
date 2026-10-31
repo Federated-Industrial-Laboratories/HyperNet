@@ -601,7 +601,7 @@ fn store_route(bridge: &Manifest, store: &Manifest, key: [u8; 32]) -> Result<()>
     Ok(())
 }
 #[cfg(test)]
-#[path = "RuntimeServiceRouteTests.rs"]
+#[path = "../../Tests/Unit/Runtime/RuntimeServiceRouteTests.rs"]
 mod route_tests;
 
 fn route_target(route: &Manifest, target: &Manifest) -> Result<()> {

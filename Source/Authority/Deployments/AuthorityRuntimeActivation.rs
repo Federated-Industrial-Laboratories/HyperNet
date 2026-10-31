@@ -83,18 +83,7 @@ impl Operation {
     pub fn snapshot(&self) -> &Snapshot {
         &self.snapshot
     }
-    #[cfg(test)]
-    pub fn prepare(
-        &self,
-        records: &[Vec<u8>],
-        reservations: &Reservations,
-        intent: &Intent,
-        recipient: Key,
-        at: u64,
-        replay: bool,
-    ) -> Result<Decision> {
-        self.evaluate(records, reservations, intent, recipient, at, replay, false)
-    }
+
     pub fn authorise(
         &self,
         records: &[Vec<u8>],
@@ -224,7 +213,7 @@ impl Operation {
 }
 
 #[cfg(test)]
-#[path = "AuthorityRuntimeActivationTests.rs"]
+#[path = "../../../Tests/Unit/Authority/Deployments/AuthorityRuntimeActivationTests.rs"]
 mod tests;
 
 #[path = "AuthorityActivationRequest.rs"]
@@ -234,3 +223,6 @@ pub use request::Request;
 #[path = "AuthorityActivationReceipt.rs"]
 mod receipt;
 pub use receipt::{RECEIPT_LIMIT, Receipt};
+
+#[cfg(test)]
+include!("../../../Tests/Support/Authority/Deployments/AuthorityRuntimeActivation.rs");

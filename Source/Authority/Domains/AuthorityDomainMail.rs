@@ -279,5 +279,5 @@ pub fn validate_state(state: &State) -> Result<()> {
 }
 
 #[cfg(test)]
-#[path = "../../Mail/AuthorityMailTests.rs"]
+#[path = "../../../Tests/Unit/Mail/AuthorityMailTests.rs"]
 pub(crate) mod tests;

@@ -3,7 +3,7 @@
 use super::*;
 
 #[cfg(test)]
-#[path = "AuthorityFederationAdmissionTests.rs"]
+#[path = "../../Tests/Unit/Federation/AuthorityFederationAdmissionTests.rs"]
 mod admission_tests;
 
 pub(super) fn exported(

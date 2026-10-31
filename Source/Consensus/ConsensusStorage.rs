@@ -382,14 +382,7 @@ impl Store {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
-    #[cfg(test)]
-    pub(super) fn sync_counts(&self) -> (usize, usize) {
-        use std::sync::atomic::Ordering;
-        (
-            self.file_syncs.load(Ordering::Relaxed),
-            self.directory_syncs.load(Ordering::Relaxed),
-        )
-    }
+
     /// Call only after the current journal and every referenced object validate.
     pub fn collect(&self, retained: &BTreeSet<String>) -> Result<()> {
         let mut count = 0usize;
@@ -441,3 +434,6 @@ impl Store {
         Ok(())
     }
 }
+
+#[cfg(test)]
+include!("../../Tests/Support/Consensus/ConsensusStorage.rs");

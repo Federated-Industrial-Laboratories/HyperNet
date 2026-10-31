@@ -18,7 +18,10 @@ associated admission, service or publication renewal described in that guide.
 In particular, application same-rights renewal cannot change a grant, a withdrawn
 application key cannot be reused, and an old sealed review is not rewritten by
 issuing a new grant. Upgrade the authority committee, endpoints and clients
-together; mixed permission semantics are unsupported.
+together; mixed permission semantics are unsupported. Before replacement, every
+voter must finish applying the same old-version committed boundary. The migration
+guide specifies the quiescence, certified inspection and stopped-journal checks;
+starting a lagging replica under the new permission rules is unsupported.
 
 Download the [Linux 0.9.1 release](https://github.com/Federated-Industrial-Laboratories/HyperNet/releases/tag/v0.9.1).
 The supported platform remains native Ubuntu 24.04 x86_64 with the existing
@@ -37,7 +40,7 @@ The release contains `HyperNet-0.9.1-linux-x86_64.tar`, its signature,
 `HyperNet-0.9.1-linux-x86_64.target.json`, its signature, `Publisher.pub`,
 the corresponding source archive, and signed checksums. Verify those signatures
 and use the existing product trust directory for an upgrade. The new signed
-target uses sequence 4 and version floor 0.9.1; never reset a retained floor.
+target uses sequence 5 and version floor 0.9.1; never reset a retained floor.
 
 With authenticated tools and existing product trust:
 

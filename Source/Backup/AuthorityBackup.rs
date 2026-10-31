@@ -216,26 +216,7 @@ impl Archive {
         );
         Ok(p)
     }
-    #[cfg(test)]
-    pub fn payload(&self, n: Digest, i: Digest) -> Result<Vec<u8>> {
-        wire::encode(&a(vec![
-            V::Uint(200),
-            V::Uint(1),
-            V::Text("BackupArchive".into()),
-            b(&n),
-            b(&i),
-            b(&self.id),
-            b(&self.owner),
-            reference(&self.destination),
-            reference(&self.placement),
-            a(self.assets.iter().map(reference).collect()),
-            b(&self.digest),
-            V::Uint(self.bytes),
-            V::Uint(self.created_ms),
-            V::Uint(self.expires_ms),
-            V::Bool(self.opaque),
-        ]))
-    }
+
     pub fn admitted(&self, p: &Profile, now: u64) -> Result<()> {
         ensure!(
             self.destination.id == p.id
@@ -320,5 +301,8 @@ pub fn validate_state(state: &State, partial: bool) -> Result<()> {
 }
 
 #[cfg(test)]
-#[path = "AuthorityBackupTests.rs"]
+#[path = "../../Tests/Unit/Backup/AuthorityBackupTests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+include!("../../Tests/Support/Backup/AuthorityBackup.rs");

@@ -134,10 +134,7 @@ impl TrustDescriptor {
     pub fn scope(&self) -> &Scope {
         &self.scope
     }
-    #[cfg(test)]
-    pub fn voters(&self) -> &[Key; 4] {
-        &self.voters
-    }
+
     pub fn genesis(&self) -> Result<Prefix> {
         let bytes = wire::encode(&V::Array(vec![
             V::Uint(14),
@@ -208,8 +205,7 @@ mod request;
 pub use request::{Intent, SignedRequest};
 #[path = "AuthorityStreamProof.rs"]
 mod stream_proof;
-#[cfg(test)]
-pub use stream_proof::initial_generation_id;
+
 pub use stream_proof::{CompletionMetadata, FenceOutcome, OwnStreamMetadata, StreamResponse};
 pub(crate) fn validate_stream_response(
     request: &SignedRequest,
@@ -653,21 +649,6 @@ impl ActionValidation {
         result.updates = updates;
         Ok(result)
     }
-    /// A complete owner application list carries only bounded lifecycle metadata.
-    #[cfg(test)]
-    pub fn application_list(generations: Vec<VersionRef>) -> Result<Self> {
-        validate_versions(&generations, 192)?;
-        ensure!(
-            generations
-                .iter()
-                .all(|v| matches!(v.kind, 102 | 127 | 128)),
-            "application list contains an unsupported record kind"
-        );
-        Ok(Self {
-            generations,
-            updates: Vec::new(),
-        })
-    }
 }
 pub struct VerifiedResult {
     pub(crate) point: CertifiedPoint,
@@ -875,5 +856,8 @@ pub fn verify_response(
 }
 
 #[cfg(test)]
-#[path = "AuthorityProofTests.rs"]
+#[path = "../../Tests/Unit/Authority/AuthorityProofTests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+include!("../../Tests/Support/Authority/AuthorityProof.rs");

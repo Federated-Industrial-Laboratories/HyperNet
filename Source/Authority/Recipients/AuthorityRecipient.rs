@@ -446,18 +446,7 @@ impl Store {
         );
         self.advance(&result, self.stored.wall_floor_ms)
     }
-    /// The lower bound is an independent credential start, or zero when none applies.
-    /// The original live challenge already establishes causal issuance through BOOTTIME.
-    #[cfg(test)]
-    pub fn accept(
-        &mut self,
-        result: VerifiedResult,
-        session: &mut Session,
-        health: ClockHealth,
-        not_before_ms: u64,
-    ) -> Result<Permit> {
-        self.accept_with_clock(result, session, &mut || Ok(health), not_before_ms)
-    }
+
     pub fn accept_with_clock(
         &mut self,
         result: VerifiedResult,
@@ -645,5 +634,8 @@ impl Permit {
 }
 
 #[cfg(test)]
-#[path = "AuthorityRecipientTests.rs"]
+#[path = "../../../Tests/Unit/Authority/Recipients/AuthorityRecipientTests.rs"]
 mod tests;
+
+#[cfg(test)]
+include!("../../../Tests/Support/Authority/Recipients/AuthorityRecipient.rs");

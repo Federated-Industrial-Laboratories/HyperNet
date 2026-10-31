@@ -100,15 +100,7 @@ impl Engine {
         }
         Ok(result)
     }
-    /// Only a complete quorum-certified dependency closure can publish repaired objects.
-    #[cfg(test)]
-    pub fn repair_import(
-        &mut self,
-        requested: &[Reference],
-        items: &[Item],
-    ) -> Result<Vec<Vec<u8>>> {
-        self.repair_import_with_inputs(requested, items, |_| Ok(vec![]))
-    }
+
     pub fn repair_import_with_inputs(
         &mut self,
         requested: &[Reference],
@@ -256,3 +248,6 @@ impl Engine {
         Ok(Vec::new())
     }
 }
+
+#[cfg(test)]
+include!("../../Tests/Support/Consensus/ConsensusRepair.rs");

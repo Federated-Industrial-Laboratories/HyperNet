@@ -97,15 +97,7 @@ impl Placement {
         );
         Ok(p)
     }
-    #[cfg(test)]
-    pub fn value(&self) -> V {
-        a(vec![
-            a(self.hosts.iter().map(|d| b(d)).collect()),
-            a(self.volumes.iter().map(|d| b(d)).collect()),
-            a(self.backups.iter().map(|d| b(d)).collect()),
-            V::Uint(self.copies),
-        ])
-    }
+
     /// A user restriction can reduce destinations but cannot add an unconsented location.
     pub fn within(&self, parent: &Self) -> bool {
         self.hosts.iter().all(|d| parent.hosts.contains(d))
@@ -348,5 +340,8 @@ pub fn validate_record(kind: u64, value: &V, lookup: Digest) -> Result<()> {
 }
 
 #[cfg(test)]
-#[path = "AuthoritySealedPublicationTests.rs"]
+#[path = "../../Tests/Unit/Sealed/AuthoritySealedPublicationTests.rs"]
 mod tests;
+
+#[cfg(test)]
+include!("../../Tests/Support/Sealed/AuthoritySealedPublication.rs");

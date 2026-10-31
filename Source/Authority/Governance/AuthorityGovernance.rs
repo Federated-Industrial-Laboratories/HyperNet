@@ -834,5 +834,5 @@ fn conservative(t: u64, span: (u64, u64)) -> bool {
 }
 
 #[cfg(test)]
-#[path = "AuthorityGovernanceTests.rs"]
+#[path = "../../../Tests/Unit/Authority/Governance/AuthorityGovernanceTests.rs"]
 mod tests;

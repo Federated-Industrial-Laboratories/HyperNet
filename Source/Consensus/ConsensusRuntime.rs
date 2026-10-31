@@ -1708,10 +1708,10 @@ fn request_eligible_at(command: &[u8]) -> Result<u64> {
 }
 
 #[cfg(test)]
-#[path = "ConsensusInspectionTests.rs"]
+#[path = "../../Tests/Unit/Consensus/ConsensusInspectionTests.rs"]
 mod inspection_tests;
 #[cfg(test)]
-#[path = "ConsensusRuntimeTests.rs"]
+#[path = "../../Tests/Unit/Consensus/ConsensusRuntimeTests.rs"]
 pub(crate) mod tests;
 
 fn diagnostic(stage: &str, view: u64, kind: u64, error: &anyhow::Error) {

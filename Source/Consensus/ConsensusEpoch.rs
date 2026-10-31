@@ -377,23 +377,7 @@ impl Engine {
             &prepared.history,
         )
     }
-    #[cfg(test)]
-    pub fn prepare_epoch(
-        directory: &Path,
-        predecessor: Configuration,
-        key: SigningKey,
-        terminal_state: &[u8],
-        terminal: &crate::authority_epoch::ValidatedTerminal,
-    ) -> Result<Self> {
-        Self::prepare_epoch_with_objects(
-            directory,
-            predecessor,
-            key,
-            terminal_state,
-            terminal,
-            None,
-        )
-    }
+
     pub fn prepare_epoch_with_objects(
         directory: &Path,
         predecessor: Configuration,
@@ -561,3 +545,6 @@ impl Engine {
         )?))
     }
 }
+
+#[cfg(test)]
+include!("../../Tests/Support/Consensus/ConsensusEpoch.rs");

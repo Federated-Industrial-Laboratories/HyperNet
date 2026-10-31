@@ -99,11 +99,37 @@ review statement or publication. Already disclosed plaintext cannot be retracted
 
 ## Coordinated upgrade
 
-Stop affected application work and drain active streams. Upgrade the complete
-authority committee and the corresponding Core endpoints and Suite clients
-before resuming protected operations. Old binaries retain the earlier broad
-interpretation; a mixed authority committee is unsupported even though the wire
-encoding and protocol number are unchanged.
+Stop new ordered mutations from clients, services and automation, and drain active
+streams. Resolve pending mutations through their retained status and recovery
+workflow, including an explicit fence where required, while the complete authority
+committee still runs 0.9.0. Finish every voter's old-version catch-up before replacing
+any binary.
+
+Use a fresh Suite `authority-inspection inspect` result to verify the final quorum
+state. Check each voter's `authority-replica live-status`, then stop the complete
+committee and retain each final `Stopped` result. Use `authority-replica status`
+with that voter's independently retained minimum generation to inspect its stopped
+journal. Every voter must report `appliedHeight == committedHeight`, and those
+heights must match across the committee. Retain the certified inspection and all
+stopped results together with the complete current journals, state objects,
+history and independent generation floors. A local status alone does not prove
+quorum readiness.
+
+If any voter is behind or has committed but unapplied commands, do not start it
+with 0.9.1. Complete catch-up and application using the intact old-version committee,
+then repeat the stopped checks. Do not initialise a replacement journal, lower a
+floor or substitute an older backup to obtain matching heights.
+
+This boundary is required because committed but unapplied commands are executed
+by the running version. An old broad-grant command could succeed under 0.9.0 and
+refuse under 0.9.1. Fully applied state is retained without re-executing its past
+effects; preserving signed bytes alone does not make a pending old suffix safe.
+An automatic checkpoint cutover or mixed-version replay is not provided.
+
+Once these checks pass, upgrade the complete authority committee and corresponding
+Core endpoints and Suite clients before resuming protected operations. Old binaries
+retain the earlier broad interpretation; a mixed authority committee is unsupported
+even though the wire encoding and protocol number are unchanged.
 
 Use independently authenticated signed packages and the normal stopped,
 side-by-side replacement process. Retain profiles, keys, requester floors,

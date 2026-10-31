@@ -47,5 +47,5 @@ impl Engine {
 }
 
 #[cfg(test)]
-#[path = "ConsensusReadTests.rs"]
+#[path = "../../Tests/Unit/Consensus/ConsensusReadTests.rs"]
 mod tests;

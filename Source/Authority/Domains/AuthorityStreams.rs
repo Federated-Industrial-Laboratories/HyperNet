@@ -15,14 +15,6 @@ pub const CONNECT: u64 = 30;
 pub const PROTOCOL: u64 = 7;
 pub const SLOTS: u64 = 16;
 
-#[cfg(test)]
-pub fn limits_value(l: Limits) -> V {
-    a(vec![
-        V::Uint(l.bytes),
-        V::Uint(l.duration_ms),
-        V::Uint(l.idle_ms),
-    ])
-}
 pub fn limits(v: &V) -> Result<Limits> {
     let f = v.array(3)?;
     let l = Limits {
@@ -58,10 +50,7 @@ impl Registration {
     pub fn parse(bytes: &[u8], n: Digest, i: Digest) -> Result<Self> {
         Self::parse_inner(bytes, n, i, true)
     }
-    #[cfg(test)]
-    pub fn parse_offer(bytes: &[u8], n: Digest, i: Digest) -> Result<Self> {
-        Self::parse_inner(bytes, n, i, false)
-    }
+
     fn parse_inner(bytes: &[u8], n: Digest, i: Digest, accepted: bool) -> Result<Self> {
         let (payload, signatures) = wire::envelope(bytes, 2)?;
         let value = wire::decode(&payload)?;
@@ -108,25 +97,6 @@ impl Registration {
             "application service requires exact owner and operator consent"
         );
         Ok(out)
-    }
-    #[cfg(test)]
-    pub fn payload(&self, n: Digest, i: Digest) -> Result<Vec<u8>> {
-        wire::encode(&a(vec![
-            V::Uint(200),
-            V::Uint(1),
-            V::Text("ApplicationStreamService".into()),
-            b(&n),
-            b(&i),
-            b(&self.id),
-            reference(&self.route),
-            b(&self.owner),
-            b(&self.operator),
-            V::Text(self.protocol.clone()),
-            b(&self.binding),
-            limits_value(self.limits),
-            V::Uint(SLOTS),
-            a(vec![V::Uint(self.validity.0), V::Uint(self.validity.1)]),
-        ]))
     }
 }
 #[derive(Clone, Debug)]
@@ -211,27 +181,7 @@ impl Proof {
         );
         Ok(out)
     }
-    #[cfg(test)]
-    pub fn payload(&self, n: Digest, i: Digest) -> Result<Vec<u8>> {
-        wire::encode(&a(vec![
-            V::Uint(200),
-            V::Uint(1),
-            V::Text("ApplicationStreamOpen".into()),
-            b(&n),
-            b(&i),
-            reference(&self.service),
-            b(&self.principal),
-            reference(&self.grant),
-            V::Text(self.protocol.clone()),
-            V::Uint(self.slot),
-            V::Uint(self.generation),
-            b(&self.nonce),
-            b(&self.challenge),
-            b(&self.exporter),
-            limits_value(self.limits),
-            V::Uint(self.expires),
-        ]))
-    }
+
     pub fn id(&self) -> Result<Digest> {
         slot_id(self.service.id, self.principal, self.slot)
     }
@@ -432,36 +382,8 @@ impl Command {
 }
 
 #[cfg(test)]
-mod offer_tests {
-    use super::*;
-    #[test]
-    fn owner_offer_never_substitutes_for_operator_acceptance() {
-        let owner = ed25519_dalek::SigningKey::from_bytes(&[71; 32]);
-        let operator = ed25519_dalek::SigningKey::from_bytes(&[72; 32]);
-        let mut r = Registration {
-            id: [3; 32],
-            route: VersionRef {
-                kind: 165,
-                id: [4; 32],
-                generation: 1,
-                digest: [5; 32],
-            },
-            owner: owner.verifying_key().to_bytes(),
-            operator: operator.verifying_key().to_bytes(),
-            protocol: "example/1".into(),
-            binding: [6; 32],
-            limits: Limits {
-                bytes: 1048576,
-                duration_ms: 60000,
-                idle_ms: 10000,
-            },
-            validity: (1, 100000),
-            envelope: vec![],
-        };
-        r.envelope = wire::sign_envelope(&r.payload([1; 32], [2; 32]).unwrap(), &owner).unwrap();
-        assert!(Registration::parse_offer(&r.envelope, [1; 32], [2; 32]).is_ok());
-        assert!(Registration::parse(&r.envelope, [1; 32], [2; 32]).is_err());
-        r.envelope = wire::sign_envelope(&r.payload([1; 32], [2; 32]).unwrap(), &operator).unwrap();
-        assert!(Registration::parse_offer(&r.envelope, [1; 32], [2; 32]).is_err());
-    }
-}
+#[path = "../../../Tests/Unit/Authority/Domains/AuthorityStreamsOfferTests.rs"]
+mod offer_tests;
+
+#[cfg(test)]
+include!("../../../Tests/Support/Authority/Domains/AuthorityStreams.rs");

@@ -861,5 +861,5 @@ impl Disk {
 }
 
 #[cfg(test)]
-#[path = "AuthorityContentDiskTests.rs"]
+#[path = "../../Tests/Unit/Hosting/AuthorityContentDiskTests.rs"]
 mod tests;

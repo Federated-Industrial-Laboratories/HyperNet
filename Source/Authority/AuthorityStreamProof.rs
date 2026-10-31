@@ -51,14 +51,7 @@ pub enum StreamResponse {
         metadata: OwnStreamMetadata,
     },
 }
-impl StreamResponse {
-    #[cfg(test)]
-    pub fn metadata(&self) -> &OwnStreamMetadata {
-        match self {
-            Self::Status(metadata) | Self::Fence { metadata, .. } => metadata,
-        }
-    }
-}
+impl StreamResponse {}
 fn completion(value: &V, retired: u64) -> Result<Option<CompletionMetadata>> {
     if *value == V::Null {
         return Ok(None);
@@ -313,5 +306,8 @@ pub(super) fn validate(
 }
 
 #[cfg(test)]
-#[path = "AuthorityStreamProofTests.rs"]
+#[path = "../../Tests/Unit/Authority/AuthorityStreamProofTests.rs"]
 mod tests;
+
+#[cfg(test)]
+include!("../../Tests/Support/Authority/AuthorityStreamProof.rs");

@@ -1775,48 +1775,17 @@ pub async fn run(config: Config, guard: &Guard, active: &Active) -> Result<()> {
 }
 
 #[cfg(test)]
-#[path = "RouteTests.rs"]
+#[path = "../../Tests/Unit/Routing/RouteTests.rs"]
 mod tests;
 
 #[cfg(test)]
-#[path = "RouteAcceptTests.rs"]
+#[path = "../../Tests/Unit/Routing/RouteAcceptTests.rs"]
 mod accept_tests;
 
 #[cfg(test)]
-#[path = "RouteClockTests.rs"]
+#[path = "../../Tests/Unit/Routing/RouteClockTests.rs"]
 mod clock_tests;
 
 #[cfg(test)]
-mod diagnostic_tests {
-    use super::*;
-    #[test]
-    fn private_route_failure_codes_preserve_typed_causes_without_error_text() {
-        for (kind, code) in [
-            (
-                std::io::ErrorKind::UnexpectedEof,
-                FailureCode::UnexpectedEof,
-            ),
-            (std::io::ErrorKind::TimedOut, FailureCode::Timeout),
-            (
-                std::io::ErrorKind::ConnectionReset,
-                FailureCode::ConnectionReset,
-            ),
-        ] {
-            let error = anyhow::Error::new(std::io::Error::new(kind, "untrusted peer detail"))
-                .context(Phase::AttachmentReady);
-            assert_eq!(failure_code(&error), code);
-            assert_eq!(
-                format!("{:?}", error.downcast_ref::<Phase>().unwrap()),
-                "AttachmentReady"
-            );
-            assert!(!format!("{:?}", failure_code(&error)).contains("untrusted"));
-        }
-        let error = anyhow::Error::new(crate::consensus_clock::ObservationExpired)
-            .context(Phase::AdmissionClock);
-        assert_eq!(failure_code(&error), FailureCode::ObservationExpired);
-        assert_eq!(
-            failure_code(&anyhow::anyhow!("private detail")),
-            FailureCode::Other
-        );
-    }
-}
+#[path = "../../Tests/Unit/Routing/RouteRuntimeDiagnosticTests.rs"]
+mod diagnostic_tests;
