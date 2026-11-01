@@ -1403,6 +1403,21 @@ impl EndpointPermission {
         }
         Ok(())
     }
+    fn prepare_check(
+        &mut self,
+        deadline: u64,
+        budget: u64,
+        refresh: impl FnOnce(u64) -> Result<u64>,
+    ) -> Result<()> {
+        crate::authority_local_transport::remaining(deadline)?;
+        if self.gate.expiry()? < deadline {
+            // A queued check can arrive before the normal renewal timer is due.
+            // Renew once before its read; the newly certified expiry still bounds it.
+            self.renew(deadline, refresh)
+        } else {
+            self.prepare(deadline, budget, refresh)
+        }
+    }
     fn before_action(&mut self, client: &mut Client<'_>, deadline: u64) -> Result<()> {
         // A bridge frame uses the same scheduling margin; its own Reader proof remains mandatory.
         self.current(client, deadline)

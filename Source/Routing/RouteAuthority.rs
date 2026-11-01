@@ -857,7 +857,7 @@ impl<'a> Client<'a> {
         }))?;
         self.effect_deadline()
     }
-    /// No recovery or ordinary request fallback is permitted on the companion check path.
+    /// The fresh read never recovers or falls back to an ordinary request.
     pub fn check_stream(
         &mut self,
         session: &VersionRef,
