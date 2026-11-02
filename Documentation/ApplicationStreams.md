@@ -148,13 +148,27 @@ old session, or after its original absolute expiry. A client close alone cannot
 reopen a slot while old endpoint bytes might remain live. Restart never restores
 spent allowance or revives a closed generation.
 
-Endpoint and live-session renewal take priority over completed-stream cleanup.
+The endpoint rotates eight work classes: endpoint renewal, session renewal,
+authority checks, completed handshakes, attached arrivals, public arrivals,
+completed forwarding and cleanup. A continuously ready class receives a turn
+within eight work dispatches. Due sessions are ordered by their last renewal
+turn; new arrivals and serviced sessions cannot overtake older due sessions.
+With at most C active sessions, each continuously due session receives a renewal
+turn within 8*C work dispatches. These are dispatch bounds, not latency promises:
+each authority operation still has its original deadline and recovery contract.
+
 One completed stream can wait for measured renewal and action headroom. Its local
 gate closes immediately. The single held cleanup record counts against relay
 attachment replenishment. Public listeners retain their existing queued/admitted
 session limit and separately bounded parser pool, plus at most one closed-session
-cleanup record. Cleanup retains its first deadline; it does not extend a session
-or certified permission. An expired or failed cleanup emits a bounded category diagnostic.
+cleanup record. Cleanup preparation visits the endpoint gate and each session
+present at completion at most once, then attempts the exact close. Later arrivals
+cannot restart that pass. With C sessions at completion, cleanup receives its
+close attempt within 8*(C+2) work dispatches, or reaches its original deadline
+sooner. Cleanup retains its first deadline; it does not extend a session or
+certified permission. Gates still stop traffic at certified expiry, and expired
+or disconnected checks cannot obtain fresh authority. An expired or failed
+cleanup emits a bounded category diagnostic.
 An uncertain close remains the exact pending requester operation. It must resolve
 under the existing recovery rules before later authority work can proceed; this
 scheduling order cannot guarantee availability while that mutation is unresolved.

@@ -26,6 +26,7 @@ struct LiveStream {
     gate: route_io::Gate,
     accepted_at: u64,
     retry_after: u64,
+    renewal_turn: u64,
     forwarding: Arc<Forwarding>,
 }
 impl LiveStream {
@@ -76,13 +77,23 @@ impl Drop for LiveStream {
 struct PendingClose {
     reference: VersionRef,
     deadline: u64,
+    own_renewals: u64,
+    renewal_turn: u64,
 }
 impl PendingClose {
-    fn completed(stream: LiveStream, now: u64, idle_ms: u64) -> Self {
+    fn completed(
+        stream: LiveStream,
+        now: u64,
+        idle_ms: u64,
+        own_renewals: u64,
+        renewal_turn: u64,
+    ) -> Self {
         stream.gate.close();
         Self {
             reference: stream.reference.clone(),
             deadline: now.saturating_add(idle_ms),
+            own_renewals,
+            renewal_turn,
         }
     }
     fn finish(self, client: &mut Client<'_>, diagnostics: &mut u8) {
@@ -104,12 +115,113 @@ impl PendingClose {
         }
     }
 }
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Maintenance {
     Own,
     Stream(Digest),
     Close,
     Wait,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Dispatch {
+    Own,
+    Stream,
+    Check,
+    Handshake,
+    Incoming,
+    Public,
+    Forwarding,
+    Close,
+}
+const DISPATCH: [Dispatch; 8] = [
+    Dispatch::Own,
+    Dispatch::Stream,
+    Dispatch::Check,
+    Dispatch::Handshake,
+    Dispatch::Incoming,
+    Dispatch::Public,
+    Dispatch::Forwarding,
+    Dispatch::Close,
+];
+#[derive(Default)]
+struct Schedule {
+    next: usize,
+    renewal_turn: u64,
+}
+impl Schedule {
+    async fn next<T>(
+        &mut self,
+        mut ready: impl FnMut(Dispatch, &mut std::task::Context<'_>) -> std::task::Poll<T>,
+    ) -> T {
+        tokio::task::consume_budget().await;
+        // A ready queue must not look empty merely because another class spent
+        // the task's cooperative budget. Only this finite selector is unbudgeted.
+        tokio::task::unconstrained(std::future::poll_fn(|cx| {
+            self.poll(|class| ready(class, cx))
+        }))
+        .await
+    }
+    // No ready class waits through more than one eight-class rotation. Polling
+    // consumes only the selected existing queue entry; there is no staging queue.
+    fn poll<T>(
+        &mut self,
+        mut ready: impl FnMut(Dispatch) -> std::task::Poll<T>,
+    ) -> std::task::Poll<T> {
+        for offset in 0..DISPATCH.len() {
+            let index = (self.next + offset) % DISPATCH.len();
+            if let std::task::Poll::Ready(event) = ready(DISPATCH[index]) {
+                self.next = (index + 1) % DISPATCH.len();
+                return std::task::Poll::Ready(event);
+            }
+        }
+        std::task::Poll::Pending
+    }
+    fn renewed(&mut self) -> Result<u64> {
+        self.renewal_turn = self
+            .renewal_turn
+            .checked_add(1)
+            .context("application renewal turn exhausted")?;
+        Ok(self.renewal_turn)
+    }
+}
+enum Event {
+    Maintenance(Maintenance),
+    Forwarding(std::result::Result<(Digest, Result<()>), tokio::task::JoinError>),
+    Handshake(std::result::Result<Result<OpenedStream>, tokio::task::JoinError>),
+    Incoming(std::result::Result<Result<Session>, tokio::task::JoinError>),
+    Public(Queued<Session>),
+    Check(checks::Check),
+}
+fn event<T>(
+    polled: std::task::Poll<Option<T>>,
+    map: impl FnOnce(T) -> Event,
+) -> std::task::Poll<Event> {
+    match polled {
+        std::task::Poll::Ready(Some(value)) => std::task::Poll::Ready(map(value)),
+        _ => std::task::Poll::Pending,
+    }
+}
+fn due_stream(
+    live: &BTreeMap<Digest, LiveStream>,
+    now: u64,
+    budget: u64,
+    through_turn: u64,
+) -> Option<Digest> {
+    live.iter()
+        .filter(|(_, stream)| {
+            !stream.forwarding.finished.load(Ordering::Acquire)
+                && stream.renewal_turn <= through_turn
+                && now >= stream.retry_after
+                && now
+                    >= refresh_at(
+                        stream.gate.expiry().unwrap_or(0),
+                        budget,
+                        Some(stream.accepted_at),
+                    )
+        })
+        // New arrivals and serviced streams join behind every older eligible stream.
+        .min_by_key(|(id, stream)| (stream.renewal_turn, **id))
+        .map(|(id, _)| *id)
 }
 fn occupied(
     incoming: usize,
@@ -127,25 +239,26 @@ fn maintenance(
     own_budget: u64,
     action_budget: u64,
 ) -> Result<Maintenance> {
-    // Reserve one measured action before selecting cleanup. These costs only
-    // schedule work; no certified gate or original close deadline is extended.
+    // Cleanup prepares each existing gate at most once. The captured turn
+    // excludes new arrivals and already serviced streams without another queue.
+    // Repeatedly waiting for all gates to be fresh can starve cleanup under load.
     let close_budget = close
         .filter(|close| now < close.deadline)
         .map_or(0, |_| action_budget);
-    if permission.refresh_due(now, own_budget.saturating_add(close_budget))? {
+    if close.is_some_and(|close| now >= close.deadline) {
+        return Ok(Maintenance::Close);
+    }
+    if close.is_none_or(|close| close.own_renewals == permission.renewals)
+        && permission.refresh_due(now, own_budget.saturating_add(close_budget))?
+    {
         return Ok(Maintenance::Own);
     }
-    if let Some(id) = live.iter().find_map(|(id, stream)| {
-        (!stream.forwarding.finished.load(Ordering::Acquire)
-            && now >= stream.retry_after
-            && now
-                >= refresh_at(
-                    stream.gate.expiry().unwrap_or(0),
-                    action_budget.saturating_add(close_budget),
-                    Some(stream.accepted_at),
-                ))
-        .then_some(*id)
-    }) {
+    if let Some(id) = due_stream(
+        live,
+        now,
+        action_budget.saturating_add(close_budget),
+        close.map_or(u64::MAX, |close| close.renewal_turn),
+    ) {
         return Ok(Maintenance::Stream(id));
     }
     Ok(if close.is_some() {
@@ -343,6 +456,7 @@ pub(super) async fn endpoint(
     let mut live: BTreeMap<Digest, LiveStream> = BTreeMap::new();
     let mut closing: Option<PendingClose> = None;
     let mut cleanup_diagnostics = 0;
+    let mut schedule = Schedule::default();
     let mut tick = tokio::time::interval(Duration::from_millis(DISPATCH_MS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -356,34 +470,56 @@ pub(super) async fn endpoint(
             }
         }
         let now=crate::authority_challenge::boot_time_ms()?;
-        let maintenance=maintenance(now,&permission,&live,closing.as_ref(),client.own_renewal_budget_ms(),client.operation_budget_ms())?;
+        let close_budget=closing.as_ref().filter(|close|now<close.deadline).map_or(0,|_|client.operation_budget_ms());
+        let own_due=permission.refresh_due(now,client.own_renewal_budget_ms().saturating_add(close_budget))?;
+        let stream_due=due_stream(&live,now,client.operation_budget_ms().saturating_add(close_budget),u64::MAX);
+        let close_work=closing.as_ref().map(|close|maintenance(now,&permission,&live,Some(close),client.own_renewal_budget_ms(),client.operation_budget_ms())).transpose()?;
         let public=listener.is_some();
-        let (listener_tasks,listener_requests)=listener.as_mut().map(|l|(&mut l.tasks,&mut l.requests)).unzip();
-        tokio::select! {
+        let (listener_tasks,mut listener_requests)=listener.as_mut().map(|l|(&mut l.tasks,&mut l.requests)).unzip();
+        let next=tokio::select! {
             biased;
             _=tokio::signal::ctrl_c()=>break,
             _=terminate.recv()=>break,
-            _=std::future::ready(()),if maintenance==Maintenance::Own=>{
+            stopped=async {listener_tasks.expect("enabled listener").join_next().await},if public=>{stopped.context("application listener stopped")???;anyhow::bail!("application listener stopped");},
+            next=schedule.next(|class,cx|match class {
+                Dispatch::Own if own_due=>std::task::Poll::Ready(Event::Maintenance(Maintenance::Own)),
+                Dispatch::Stream if stream_due.is_some()=>std::task::Poll::Ready(Event::Maintenance(Maintenance::Stream(stream_due.expect("due stream")))),
+                Dispatch::Check=>event(check_requests.poll_recv(cx),Event::Check),
+                Dispatch::Handshake if !handshakes.is_empty()=>event(handshakes.poll_join_next(cx),Event::Handshake),
+                Dispatch::Incoming if !incoming.is_empty()=>event(incoming.poll_join_next(cx),Event::Incoming),
+                Dispatch::Public if public=>event(listener_requests.as_mut().expect("enabled listener").poll_recv(cx),Event::Public),
+                Dispatch::Forwarding if !forwarding.is_empty() && closing.is_none()=>event(forwarding.poll_join_next(cx),Event::Forwarding),
+                Dispatch::Close if close_work.is_some()=>std::task::Poll::Ready(Event::Maintenance(close_work.expect("held cleanup"))),
+                _=>std::task::Poll::Pending,
+            })=>next,
+            _=demand.notified()=>continue,
+            _=tick.tick()=>continue,
+        };
+        match next {
+            Event::Maintenance(Maintenance::Own)=>{
                 permission.refresh(client,now.saturating_add(own.limits.idle_ms))?;active.check(guard)?;
             },
-            _=std::future::ready(()),if matches!(maintenance,Maintenance::Stream(_))=>{
-                let Maintenance::Stream(id)=maintenance else {unreachable!("selected stream renewal")};let s=live.get_mut(&id).expect("selected live stream");
+            Event::Maintenance(Maintenance::Stream(id))=>{
+                let s=live.get_mut(&id).expect("selected live stream");
+                s.renewal_turn=schedule.renewed()?;
                 if now>=s.forwarding.deadline {s.gate.close();s.retry_after=u64::MAX;continue;}
-                match clock_checked(client.before(s.forwarding.deadline.min(now.saturating_add(own.limits.idle_ms)),|client|client.stream_permit(&s.reference)))? {
+                let deadline=s.forwarding.deadline.min(now.saturating_add(own.limits.idle_ms));
+                match clock_checked(client.before(deadline,|client|client.stream_permit(&s.reference)))? {
                     Ok(expiry)=>{s.gate.renew(expiry)?;s.accepted_at=crate::authority_challenge::boot_time_ms()?;s.retry_after=0;},
                     Err(error)=>{if error.is::<ReadRetry>() {s.retry_after=now.saturating_add(READ_RETRY_MS);} else {s.gate.close();s.retry_after=u64::MAX;}},
                 }
             },
-            _=std::future::ready(()),if maintenance==Maintenance::Close=>{
+            Event::Maintenance(Maintenance::Close)=>{
                 closing.take().expect("selected stream cleanup").finish(client,&mut cleanup_diagnostics);
             },
-            result=forwarding.join_next(),if !forwarding.is_empty() && closing.is_none()=>{
-                if let Some(Ok((id,_result)))=result && let Some(stream)=live.remove(&id) {
-                    closing=Some(PendingClose::completed(stream,crate::authority_challenge::boot_time_ms()?,own.limits.idle_ms));
+            Event::Maintenance(Maintenance::Wait)=>unreachable!("held cleanup always has work"),
+            Event::Forwarding(result)=>{
+                if let Ok((id,_result))=result && let Some(stream)=live.remove(&id) {
+                    closing=Some(PendingClose::completed(stream,crate::authority_challenge::boot_time_ms()?,own.limits.idle_ms,permission.renewals,schedule.renewal_turn));
                 }
             },
-            result=handshakes.join_next(),if !handshakes.is_empty()=>{
-                if let Some(Ok(Ok(opened)))=result {
+            Event::Handshake(result)=>{
+                if let Ok(Ok(opened))=result {
                     let id=opened.proof.id()?;
                     if live.contains_key(&id) {continue;}
                     permission.current(client,opened.session.deadline)?;
@@ -394,33 +530,28 @@ pub(super) async fn endpoint(
                         let deadline=opened.session.deadline.min(now.saturating_add(opened.proof.expires.saturating_sub(client.now()?))).min(now.saturating_add(opened.proof.limits.duration_ms));
                         let gate=route_io::Gate::with_signal(client.effect_deadline()?,demand.clone());
                         let status=Arc::new(Forwarding {deadline,established:AtomicBool::new(false),finished:AtomicBool::new(false)});
-                        live.insert(id,LiveStream {reference:reference.clone(),gate:gate.clone(),accepted_at:now,retry_after:0,forwarding:status.clone()});
+                        live.insert(id,LiveStream {reference:reference.clone(),gate:gate.clone(),accepted_at:now,retry_after:0,renewal_turn:schedule.renewed()?,forwarding:status.clone()});
                         let application=application.clone();let key=config.key.clone();let endpoint_gate=permission.gate.clone();
                         forwarding.spawn(async move {(id,serve(opened,reference,application,key,gate,endpoint_gate,status).await)});
                     }
                 }
             },
-            stopped=async {listener_tasks.expect("enabled listener").join_next().await},if public=>{stopped.context("application listener stopped")???;anyhow::bail!("application listener stopped");},
-            request=async {listener_requests.expect("enabled listener").recv().await},if public=>{
-                if let Some(Queued {mut request,slot,deadline,started,..})=request {
-                    if crate::authority_local_transport::remaining(deadline).is_err(){continue;}
-                    request.deadline=request.deadline.min(started.saturating_add(own.limits.duration_ms));request.slot=Some(slot);
-                    permission.current(client,deadline)?;active.check(guard)?;
-                    handshakes.spawn(hello(request,application.clone(),ready.clone(),permission.gate.clone()));
-                }
+            Event::Public(Queued {mut request,slot,deadline,started,..})=>{
+                if crate::authority_local_transport::remaining(deadline).is_err(){continue;}
+                request.deadline=request.deadline.min(started.saturating_add(own.limits.duration_ms));request.slot=Some(slot);
+                permission.current(client,deadline)?;active.check(guard)?;
+                handshakes.spawn(hello(request,application.clone(),ready.clone(),permission.gate.clone()));
             },
-            result=incoming.join_next(),if !incoming.is_empty()=>{
-                if let Some(Ok(Ok(session)))=result {
+            Event::Incoming(result)=>{
+                if let Ok(Ok(session))=result {
                     permission.current(client,session.deadline)?;active.check(guard)?;
                     handshakes.spawn(hello(session,application.clone(),ready.clone(),permission.gate.clone()));
                 } else {retry_after=tokio::time::Instant::now()+Duration::from_millis(own.limits.idle_ms.min(1000));}
             },
-            Some(check)=check_requests.recv()=>{
+            Event::Check(check)=>{
                 let receipt=checks::evaluate(&check,&mut live,&mut permission,client,guard,active);
                 if check.connected.load(Ordering::Acquire) && !check.cancelled.load(Ordering::Acquire) {let _=check.reply.send(receipt);}
             },
-            _=demand.notified()=>{},
-            _=tick.tick()=>{},
         }
     }Ok(())}.await;
     permission.gate.close();

@@ -14,12 +14,163 @@ fn prepared_stream(expiry: u64, deadline: u64) -> LiveStream {
         gate: route_io::Gate::new(expiry),
         accepted_at: crate::authority_challenge::boot_time_ms().unwrap(),
         retry_after: 0,
+        renewal_turn: 0,
         forwarding: Arc::new(Forwarding {
             deadline,
             established: AtomicBool::new(true),
             finished: AtomicBool::new(false),
         }),
     }
+}
+
+#[tokio::test]
+async fn ready_checks_and_admissions_receive_turns_during_continuous_maintenance() {
+    use std::task::Poll;
+    let (_, _, ready, request) = fixture();
+    let (sender, mut checks) = mpsc::channel(control::MAXIMUM_PENDING);
+    let (reply, _receipt) = tokio::sync::oneshot::channel();
+    sender
+        .send(checks::Check {
+            request: request.clone(),
+            ready: Arc::new(ready),
+            connected: Arc::new(AtomicBool::new(true)),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            reply,
+        })
+        .await
+        .unwrap();
+    let mut admissions = JoinSet::new();
+    let (completed, completion) = tokio::sync::oneshot::channel();
+    admissions.spawn(async move {
+        completed.send(()).unwrap();
+        17
+    });
+    tokio::time::timeout(Duration::from_secs(1), completion)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut schedule = Schedule::default();
+    // Force Tokio's queue/JoinSet polls to reach their cooperative boundary.
+    // The selector must still give real queued work its promised turn.
+    for _ in 0..128 {
+        if !tokio::task::coop::has_budget_remaining() {
+            break;
+        }
+        tokio::task::consume_budget().await;
+    }
+    assert!(!tokio::task::coop::has_budget_remaining());
+    let mut seen_check = false;
+    let mut seen_admission = false;
+    let mut turns = Vec::new();
+    for _ in 0..DISPATCH.len() {
+        let selected = schedule
+            .next(|class, cx| match class {
+                Dispatch::Check => checks.poll_recv(cx).map(|check| {
+                    let check = check.expect("queued original check");
+                    assert_eq!(check.request, request);
+                    assert!(check.connected.load(Ordering::Acquire));
+                    seen_check = true;
+                    class
+                }),
+                Dispatch::Handshake => admissions.poll_join_next(cx).map(|admitted| {
+                    assert_eq!(admitted.unwrap().unwrap(), 17);
+                    seen_admission = true;
+                    class
+                }),
+                // Renewal, completed forwarding and cleanup stay continuously ready.
+                _ => Poll::Ready(class),
+            })
+            .await;
+        turns.push(selected);
+    }
+    assert!(seen_check && seen_admission);
+    assert_eq!(turns, DISPATCH);
+    assert_eq!(sender.capacity(), control::MAXIMUM_PENDING);
+    // A ready class arriving just after its turn also receives the next cycle.
+    for expected in DISPATCH {
+        assert_eq!(schedule.poll(Poll::Ready), Poll::Ready(expected));
+    }
+}
+
+#[test]
+fn due_streams_are_serviced_before_renewed_low_ids_and_new_arrivals() {
+    let now = crate::authority_challenge::boot_time_ms().unwrap() + 1000;
+    let mut schedule = Schedule::default();
+    let mut live = BTreeMap::new();
+    for id in 1..=3 {
+        let mut stream = prepared_stream(now + 50, now + 10_000);
+        stream.accepted_at = now - 1000;
+        stream.renewal_turn = schedule.renewed().unwrap();
+        live.insert([id; 32], stream);
+    }
+    let expiry = live[&[1; 32]].gate.expiry().unwrap();
+    for expected in 1..=3 {
+        let id = due_stream(&live, now, 100, u64::MAX).unwrap();
+        assert_eq!(id, [expected; 32]);
+        live.get_mut(&id).unwrap().renewal_turn = schedule.renewed().unwrap();
+        if expected == 1 {
+            let mut arrival = prepared_stream(now + 50, now + 10_000);
+            arrival.accepted_at = now - 1000;
+            arrival.renewal_turn = schedule.renewed().unwrap();
+            live.insert([0; 32], arrival);
+        }
+        // Every stream remains due, including the low ID just serviced.
+        assert_eq!(live[&[1; 32]].gate.expiry().unwrap(), expiry);
+    }
+    live.get(&[1; 32])
+        .unwrap()
+        .forwarding
+        .finished
+        .store(true, Ordering::Release);
+    assert_eq!(due_stream(&live, now, 100, u64::MAX), Some([0; 32]));
+}
+
+#[test]
+fn close_preparation_has_one_finite_pass_despite_continuously_due_gates() {
+    let now = crate::authority_challenge::boot_time_ms().unwrap() + 1000;
+    let mut endpoint = EndpointPermission {
+        gate: route_io::Gate::new(now + 50),
+        accepted_at: Some(now - 1000),
+        renewals: 0,
+    };
+    let _activity = endpoint.gate.activity().unwrap();
+    let mut schedule = Schedule::default();
+    let mut live = BTreeMap::new();
+    for id in 1..=3 {
+        let mut stream = prepared_stream(now + 50, now + 10_000);
+        stream.accepted_at = now - 1000;
+        stream.renewal_turn = schedule.renewed().unwrap();
+        live.insert([id; 32], stream);
+    }
+    let close = PendingClose::completed(
+        prepared_stream(now + 50, now + 10_000),
+        now,
+        1000,
+        endpoint.renewals,
+        schedule.renewal_turn,
+    );
+    let reference = close.reference.clone();
+    assert_eq!(
+        maintenance(now, &endpoint, &live, Some(&close), 100, 100).unwrap(),
+        Maintenance::Own
+    );
+    endpoint.renewals += 1;
+    for expected in 1..=3 {
+        assert_eq!(
+            maintenance(now, &endpoint, &live, Some(&close), 100, 100).unwrap(),
+            Maintenance::Stream([expected; 32])
+        );
+        live.get_mut(&[expected; 32]).unwrap().renewal_turn = schedule.renewed().unwrap();
+    }
+    assert_eq!(
+        maintenance(now, &endpoint, &live, Some(&close), 100, 100).unwrap(),
+        Maintenance::Close,
+        "already visited gates cannot restart the preparation pass"
+    );
+    assert_eq!(close.reference, reference);
+    assert_eq!(close.deadline, now + 1000);
+    assert_eq!(endpoint.gate.expiry().unwrap(), now + 50);
+    assert_eq!(occupied(0, 0, &live, Some(&close)), 4);
 }
 
 #[test]
@@ -54,7 +205,13 @@ fn completed_stream_burst_yields_to_due_renewals_then_closes_without_starvation(
     stream.gate.renew(now + 5000).unwrap();
     stream.accepted_at = now;
     for n in 0..4 {
-        let close = PendingClose::completed(live.remove(&[n; 32]).unwrap(), now, 1000);
+        let close = PendingClose::completed(
+            live.remove(&[n; 32]).unwrap(),
+            now,
+            1000,
+            endpoint.renewals,
+            0,
+        );
         assert_eq!(
             maintenance(now, &endpoint, &live, Some(&close), 100, 100).unwrap(),
             Maintenance::Close,
@@ -80,7 +237,13 @@ fn pending_close_reserves_one_action_before_each_renewal_latest_start() {
         maintenance(now, &endpoint, &live, None, 100, 100).unwrap(),
         Maintenance::Wait
     );
-    let close = PendingClose::completed(prepared_stream(now + 100, now + 10_000), now, 1000);
+    let close = PendingClose::completed(
+        prepared_stream(now + 100, now + 10_000),
+        now,
+        1000,
+        endpoint.renewals,
+        0,
+    );
     assert_eq!(
         maintenance(now, &endpoint, &live, Some(&close), 100, 100).unwrap(),
         Maintenance::Own
@@ -112,7 +275,7 @@ fn held_completion_closes_local_gate_and_keeps_its_relay_attachment_slot() {
     let reference = live[&[1; 32]].reference.clone();
     // This accounting limits relay replenishment; public admission has its own semaphore.
     assert_eq!(occupied(7, 8, &live, None), 16);
-    let close = PendingClose::completed(live.remove(&[1; 32]).unwrap(), now, 1000);
+    let close = PendingClose::completed(live.remove(&[1; 32]).unwrap(), now, 1000, 0, 0);
     assert!(
         gate.expiry().is_err(),
         "completed local bytes are fenced immediately"
@@ -326,6 +489,7 @@ fn completion_invalidates_stream_before_join_set_is_polled() {
         gate: route_io::Gate::new(4000),
         accepted_at: 100,
         retry_after: 0,
+        renewal_turn: 0,
         forwarding: status.clone(),
     };
     assert_eq!(stream.check_deadline(100), None);
