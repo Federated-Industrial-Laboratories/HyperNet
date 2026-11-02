@@ -3,7 +3,7 @@
 [Documentation](ReadMe.md) | [Project](../ReadMe.md)
 
 Support depends on measured kernel and runtime capabilities. A compiler pass or
-a distribution name is insufficient. The 0.10.0 release target remains native Ubuntu 24.04
+a distribution name is insufficient. The 0.10.1 release target remains native Ubuntu 24.04
 x86_64 with GNU libc 2.39 and the enforced kernel/runtime controls below. Earlier
 release observations retain their original binary and package identities. See the
 [release notes](ReleaseNotes.md) for the release changes and measured scope.

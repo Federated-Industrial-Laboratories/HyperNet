@@ -15,8 +15,62 @@ The original caller wait, route lifetime, local consent, cancellation and newly
 certified permission expiry still bound acceptance. No authority result is
 reused, and read capacity is unchanged. Core 0.10.1 remains compatible with Suite
 0.10.0; no wire, grant or retained-state migration is required for this patch.
-Native qualification and release artifact checks remain pending. This entry does
-not assert a completed release or latency guarantee.
+Download the [Linux 0.10.1 release](https://github.com/Federated-Industrial-Laboratories/HyperNet/releases/tag/v0.10.1).
+
+### Qualification and upgrade scope
+
+The release target remains native Ubuntu 24.04 x86_64 with GNU libc 2.39. The
+maintained Rust and package suites pass. A bounded native application workflow
+exercised renewed gates, current conversation and search operations, client
+reconnect, a persistent service bot, and refusal after authority revocation.
+The application retained its draft without publishing or selecting a direct
+transport fallback. Owned fixtures were stopped and removed.
+
+These checks do not establish application throughput, a concurrent-user target,
+physical operator independence or another supported platform. Existing stream
+and authority-work limits are unchanged. Earlier release results retain their
+original artifact identities.
+
+Replace affected services while stopped and renew their local artifact consent
+before activation. Preserve complete authority state, journals, identities,
+package trust and retained floors. Suite 0.10.0 companions remain compatible.
+Upgrades from 0.9.0 still require the [permission-scope migration](PermissionScopes.md).
+The package state contract remains `HyperNet080Authority2`.
+
+### Package verification and installation
+
+Use `Tools/Bundle.py` and its adjacent `Tools/PackageTrust.py` from an
+independently authenticated `v0.10.1` checkout. Authenticate the publisher through
+[PublisherKey.txt](PublisherKey.txt). The generation-1 pin remains
+`6529f9e574e73409ec578c9e9a66e683fef6ae885704d22d75538781b4b43b1e`.
+A key downloaded beside a signature does not establish publisher identity.
+
+The release supplies `HyperNet-0.10.1-linux-x86_64.tar`, its `.sig`,
+`HyperNet-0.10.1-linux-x86_64.target.json`, its `.sig`, `Publisher.pub`,
+and signed checksums. The target uses sequence 7 and version floor 0.10.1.
+Retain the existing product trust directory for upgrades; never reset its floor.
+The Core package also carries the matching immutable OCI image. The
+`HyperNet-0.10.1-system-sources.tar.xz` companion archive supplies the source
+packages and patches for redistributed image libraries.
+
+With authenticated tools and existing product trust:
+
+```sh
+python3 /Trusted/HyperNet/Tools/Bundle.py Install \
+  --archive HyperNet-0.10.1-linux-x86_64.tar \
+  --signature HyperNet-0.10.1-linux-x86_64.tar.sig \
+  --public-key Publisher.pub \
+  --trust-directory "$HOME/.local/share/HyperNet/PackageTrust" \
+  --policy HyperNet-0.10.1-linux-x86_64.target.json \
+  --policy-signature HyperNet-0.10.1-linux-x86_64.target.json.sig \
+  --prefix "$HOME/.local/opt/HyperNet-0.10.1"
+python3 /Trusted/HyperNet/Tools/Bundle.py VerifyInstalled \
+  --prefix "$HOME/.local/opt/HyperNet-0.10.1" --public-key Publisher.pub
+```
+
+For first-install trust setup, follow [installation](Installation.md). Package
+installation does not activate a workload or renew network authority. Use
+[upgrade and recovery](UpgradeRecovery.md) before resuming an installed service.
 
 ## Linux 0.10.0 application context and authority checks
 
