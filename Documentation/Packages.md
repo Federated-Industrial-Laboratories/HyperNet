@@ -42,7 +42,7 @@ python3 Tools/Bundle.py Create \
 Create accepts trusted build outputs only. It inspects the local image without
 starting it, verifies its architecture and compares its actual binaries with the
 supplied build files. Package version identifies the actual HyperNet runtime;
-the current runtime is 0.10.0. Other runtime contracts are rejected.
+the current runtime is 0.10.1. Other runtime contracts are rejected.
 The helper generates no signing identity. Select and protect the operator's own
 offline signing key; no signing secret enters the package.
 After assembly, use `Authorise` to sign the exact finite update target. See
