@@ -1559,6 +1559,7 @@ impl Driver {
             }
             6 => self.read_start(a[4].bytes()?),
             7 => self.read_poll(a[4].bytes()?.try_into()?),
+            8 => self.read_acknowledge(a[4].bytes()?),
             5 => {
                 wire::decode(a[4].bytes()?)?.array(0)?;
                 // Local diagnostics do not send peer traffic or attest quorum readiness.

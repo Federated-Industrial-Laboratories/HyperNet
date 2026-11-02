@@ -1111,7 +1111,7 @@ async fn endpoint_incoming(
         let stream = acceptor.accept(socket).await.context(Refusal::Tls)?;
         timing.mark(Phase::EndpointTlsComplete);
         ensure!(
-            stream.get_ref().1.alpn_protocol() == Some(route_tls::ALPN),
+            route_tls::endpoint_protocol(stream.get_ref().1.alpn_protocol()),
             "private endpoint protocol differs"
         );
         let exporter = stream.get_ref().1.export_keying_material(
@@ -1192,7 +1192,7 @@ async fn attach(
         )
         .await??;
         ensure!(
-            inner.get_ref().1.alpn_protocol() == Some(route_tls::ALPN),
+            route_tls::endpoint_protocol(inner.get_ref().1.alpn_protocol()),
             "attached endpoint protocol differs"
         );
         let exporter = inner.get_ref().1.export_keying_material(
@@ -1688,7 +1688,7 @@ pub async fn run(config: Config, guard: &Guard, active: &Active) -> Result<()> {
         guard.role == 5 && guard.manifest == config.manifest,
         "route activation differs from exact local consent"
     );
-    let acceptor = TlsAcceptor::from(route_tls::server(
+    let mut tls = route_tls::server(
         &config.profile.identity,
         &files::read(Path::new("/Config/Certificate.pem"), 65536, true)?,
         &zeroize::Zeroizing::new(files::read(
@@ -1696,7 +1696,12 @@ pub async fn run(config: Config, guard: &Guard, active: &Active) -> Result<()> {
             16384,
             true,
         )?),
-    )?);
+    )?;
+    if config.profile.mode != 1 && config.profile.protocol == 1 {
+        Arc::make_mut(&mut tls).alpn_protocols =
+            vec![route_tls::READ_ACK_ALPN.to_vec(), route_tls::ALPN.to_vec()];
+    }
+    let acceptor = TlsAcceptor::from(tls);
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     loop {
         let outcome = async {

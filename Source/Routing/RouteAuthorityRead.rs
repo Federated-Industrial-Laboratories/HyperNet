@@ -178,8 +178,18 @@ impl Client<'_> {
                 code: verified.result.code,
             };
             if verified.result.disposition != Disposition::Permit {
-                self.store
-                    .observe_read(verified, &mut self.session, self.guard.health()?, 0)?;
+                let consumed = self.store.observe_read_consumed(
+                    verified,
+                    &mut self.session,
+                    self.guard.health()?,
+                    0,
+                )?;
+                transport::acknowledge_read(
+                    &consumed,
+                    &self.config.key,
+                    deadline,
+                    Path::new("/Authority/Control.sock"),
+                );
                 return Ok(observation);
             }
             let expiry = verified
@@ -188,7 +198,7 @@ impl Client<'_> {
                 .saturating_sub(authority_challenge::DELTA_MS);
             let candidate = candidate.context("fresh Route permit omitted verified context")?;
             transport::remaining(deadline)?;
-            let value = self.store.accept_read(
+            let (value, consumed) = self.store.accept_read_consumed(
                 verified,
                 &mut self.session,
                 self.guard.health()?,
@@ -201,6 +211,12 @@ impl Client<'_> {
                     Ok(candidate.value)
                 },
             )?;
+            transport::acknowledge_read(
+                &consumed,
+                &self.config.key,
+                deadline,
+                Path::new("/Authority/Control.sock"),
+            );
             self.last_expiry = expiry;
             observation.value = Some(value);
             Ok(observation)

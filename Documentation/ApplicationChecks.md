@@ -94,6 +94,12 @@ Verified refusals retain their structured disposition, refusal code, scope,
 epoch, height, state digest, statement digest, evaluation time and original
 statement expiry. Error strings are not authority evidence.
 
+After consuming a verified read, Core sends a signed local cleanup acknowledgement
+for that exact completed collection. Cleanup cannot authorize or repeat a check.
+It does not wait for a reply; a lost or unsupported acknowledgement leaves the
+original finite retention in place. See the [wire contract](WireContract.md)
+for the bounded local acknowledgement and compatibility rules.
+
 The native companion supplies a start time and absolute `CLOCK_BOOTTIME` deadline.
 The latter may be no more than 5,000 ms after the former, and the start cannot be
 in Core's future. The SDK separately enforces its original local call deadline.

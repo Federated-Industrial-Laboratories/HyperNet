@@ -2,6 +2,30 @@
 // Fresh reads advance witnessed authority without changing the ordinary effect tracker.
 use super::*;
 use crate::authority_read::VerifiedRead;
+
+/// Created only after successful floor publication and one-use challenge consumption.
+pub struct ConsumedRead {
+    statement: crate::authority_read::Statement,
+    consumed_at: crate::authority_challenge::Observation,
+}
+impl ConsumedRead {
+    pub(crate) fn acknowledgement(
+        &self,
+        key: &ed25519_dalek::SigningKey,
+        deadline: u64,
+    ) -> Result<Vec<u8>> {
+        let remaining = deadline
+            .checked_sub(self.consumed_at.boot_ms)
+            .filter(|remaining| *remaining > 0)
+            .context("consumed read cleanup deadline expired")?;
+        let not_after_ms = self
+            .consumed_at
+            .wall_ms
+            .saturating_add(remaining)
+            .min(self.statement.expires_at_ms);
+        crate::authority_read::Acknowledgement::sign(&self.statement, key, not_after_ms)
+    }
+}
 impl Store {
     pub fn attach_read_history(
         &self,
@@ -87,6 +111,10 @@ impl Store {
             result.continuity(),
         )
     }
+    #[allow(
+        dead_code,
+        reason = "Shared consumers may retain replies without acknowledgement."
+    )]
     pub fn observe_read(
         &mut self,
         result: VerifiedRead,
@@ -94,6 +122,16 @@ impl Store {
         health: ClockHealth,
         not_before: u64,
     ) -> Result<()> {
+        self.observe_read_consumed(result, session, health, not_before)
+            .map(|_| ())
+    }
+    pub fn observe_read_consumed(
+        &mut self,
+        result: VerifiedRead,
+        session: &mut Session,
+        health: ClockHealth,
+        not_before: u64,
+    ) -> Result<ConsumedRead> {
         self.read_ready(&result)?;
         ensure!(
             result.result.disposition == Disposition::Refuse,
@@ -106,9 +144,16 @@ impl Store {
         );
         self.advance_read(&result, now.wall_ms)?;
         let consumed = session.consume_read(&result, not_before, health)?;
-        session.finish_consumption(consumed, health)?;
-        Ok(())
+        let consumed_at = session.finish_consumption(consumed, health)?;
+        Ok(ConsumedRead {
+            statement: result.statement,
+            consumed_at,
+        })
     }
+    #[allow(
+        dead_code,
+        reason = "Shared consumers may retain replies without acknowledgement."
+    )]
     pub fn accept_read<T>(
         &mut self,
         result: VerifiedRead,
@@ -117,6 +162,17 @@ impl Store {
         not_before: u64,
         publish: impl FnOnce(&OperationResult, &mut Store) -> Result<T>,
     ) -> Result<T> {
+        self.accept_read_consumed(result, session, health, not_before, publish)
+            .map(|(value, _)| value)
+    }
+    pub fn accept_read_consumed<T>(
+        &mut self,
+        result: VerifiedRead,
+        session: &mut Session,
+        health: ClockHealth,
+        not_before: u64,
+        publish: impl FnOnce(&OperationResult, &mut Store) -> Result<T>,
+    ) -> Result<(T, ConsumedRead)> {
         self.read_ready(&result)?;
         ensure!(
             result.result.disposition == Disposition::Permit,
@@ -131,7 +187,13 @@ impl Store {
         let consumed = session.consume_read(&result, not_before, health)?;
         let output = publish(&result.result, self)?;
         self.unchanged()?;
-        session.finish_consumption(consumed, health)?;
-        Ok(output)
+        let consumed_at = session.finish_consumption(consumed, health)?;
+        Ok((
+            output,
+            ConsumedRead {
+                statement: result.statement,
+                consumed_at,
+            },
+        ))
     }
 }

@@ -17,17 +17,60 @@ fn control(driver: &Driver, operation: u64, payload: &[u8]) -> Vec<u8> {
 }
 #[test]
 fn fresh_policy_quorum_uses_current_local_state_without_journal_or_stream_writes() {
-    policy_quorum(false, false);
+    policy_quorum(false, false, false);
 }
 #[test]
 fn fresh_read_delayed_shares_survive_retransmission_and_recollection_until_exact_expiry() {
-    policy_quorum(true, false);
+    policy_quorum(true, false, false);
 }
 #[test]
 fn completed_fresh_read_capacity_recovers_for_the_same_original_challenge() {
-    policy_quorum(false, true);
+    policy_quorum(false, true, false);
 }
-fn policy_quorum(delayed: bool, capacity: bool) {
+#[test]
+fn consumed_fresh_read_acknowledgement_releases_only_complete_bound_results() {
+    policy_quorum(false, true, true);
+}
+#[tokio::test]
+async fn consumed_read_cleanup_ingress_delivers_one_framed_receipt() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let directory = Directory::new();
+    let path = directory.0.join("Control.sock");
+    let (listener, _guard) = ingress::local_socket(&path).unwrap();
+    let (events, mut receiver) = tokio::sync::mpsc::channel(1);
+    let (diagnostics, _monitor) = diagnostics::Diagnostics::new();
+    let task = tokio::spawn(ingress::accept_local(listener, events, diagnostics));
+    let fixture = crate::authority_proof::tests::Fixture::new(10000);
+    let packet = wire::encode(&V::Array(vec![
+        V::Uint(41),
+        V::Uint(1),
+        fixture.descriptor.scope().value(),
+        V::Uint(8),
+        V::Bytes(vec![]),
+    ]))
+    .unwrap();
+    // The connector drains a framed receipt while a local notification may close immediately.
+    let send = async {
+        let mut stream = tokio::net::UnixStream::connect(&path).await.unwrap();
+        stream.write_u32(packet.len() as u32).await.unwrap();
+        stream.write_all(&packet).await.unwrap();
+        let Event::Local { body, answer, .. } = receiver.recv().await.unwrap() else {
+            panic!("cleanup was not local")
+        };
+        assert_eq!(body, packet);
+        answer.send(vec![64, 1]).unwrap();
+        assert_eq!(stream.read_u32().await.unwrap(), 2);
+        let mut reply = [0; 2];
+        stream.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply, [64, 1]);
+        assert!(receiver.try_recv().is_err());
+    };
+    tokio::time::timeout(Duration::from_secs(1), send)
+        .await
+        .unwrap();
+    task.abort();
+}
+fn policy_quorum(delayed: bool, capacity: bool, acknowledge: bool) {
     let now = crate::consensus_clock::moment().unwrap();
     let fixture = crate::authority_application::tests::Fixture::at(now.wall_ms - 1000);
     let configuration = fixture.configuration().clone();
@@ -83,7 +126,7 @@ fn policy_quorum(delayed: bool, capacity: bool) {
             &request,
             &fixture.requester,
             [67; 32],
-            if capacity { 3000 } else { 5000 },
+            if capacity && !acknowledge { 3000 } else { 5000 },
             None,
             ClockHealth::new(now.wall_ms, now.boot_ms, now.boot_ms + 1000, 1)
                 .unwrap()
@@ -119,6 +162,13 @@ fn policy_quorum(delayed: bool, capacity: bool) {
         panic!("expected read probe")
     };
     let initial = read::Statement::parse(&initial_payload).unwrap();
+    if acknowledge {
+        let premature =
+            read::Acknowledgement::sign(&initial, &fixture.requester, initial.expires_at_ms)
+                .unwrap();
+        assert!(drivers[0].read_acknowledge(&premature).is_err());
+        assert_eq!(drivers[0].reads.len(), 1);
+    }
     let started = Instant::now();
     if delayed {
         // Drive the actual retry timer without sleeps: 300 ms transit exceeds RETRANSMIT.
@@ -334,16 +384,122 @@ fn policy_quorum(delayed: bool, capacity: bool) {
             (2, 2)
         );
         assert_eq!(drivers[0].reads.len(), MAX_PENDING);
-        let expires = crate::authority_proof::Challenge::from_signed(&challenge)
-            .unwrap()
-            .expires_at_ms;
-        let now = crate::consensus_clock::moment().unwrap().wall_ms;
-        std::thread::sleep(Duration::from_millis(
-            expires
-                .saturating_sub(crate::authority_challenge::DELTA_MS)
-                .saturating_add(1)
-                .saturating_sub(now),
-        ));
+        let acknowledged = if acknowledge {
+            // Completion alone did not release the slot, including after a lost response.
+            let recovered = drivers[0].read_poll(id).unwrap();
+            assert_eq!(recovered, reply);
+            let directory = Directory::new();
+            let now = crate::consensus_clock::moment().unwrap();
+            let health = ClockHealth::new(now.wall_ms, now.boot_ms, now.boot_ms + 1000, 1)
+                .unwrap()
+                .frozen();
+            let mut store = crate::authority_floor::Store::initialise(
+                &directory.0,
+                configuration.descriptor().clone(),
+                requester,
+                health,
+            )
+            .unwrap();
+            // Negative vectors precede the bounded consume-and-acknowledge section.
+            let signed = read::Acknowledgement::sign(
+                &verified.statement,
+                &fixture.requester,
+                verified.statement.expires_at_ms,
+            )
+            .unwrap();
+            let (payload, _) = wire::envelope(&signed, 1).unwrap();
+            let fields = wire::decode(&payload).unwrap().array(7).unwrap().to_vec();
+            let wrong_key = ed25519_dalek::SigningKey::from_bytes(&[91; 32]);
+            assert!(
+                drivers[0]
+                    .read_acknowledge(&wire::sign_envelope(&payload, &wrong_key).unwrap())
+                    .is_err()
+            );
+            for (field, value) in [
+                (1, V::Uint(2)),
+                (4, V::Bytes(vec![91; 32])),
+                (5, V::Bytes(vec![92; 32])),
+                (6, V::Uint(u64::MAX)),
+            ] {
+                let mut changed = fields.clone();
+                changed[field] = value;
+                let bad = wire::sign_envelope(
+                    &wire::encode(&V::Array(changed)).unwrap(),
+                    &fixture.requester,
+                )
+                .unwrap();
+                assert!(drivers[0].read_acknowledge(&bad).is_err());
+                assert_eq!(drivers[0].reads.len(), MAX_PENDING);
+            }
+            let mut changed = fields.clone();
+            let mut scope = configuration.descriptor().scope().clone();
+            scope.epoch += 1;
+            changed[2] = scope.value();
+            let bad = wire::sign_envelope(
+                &wire::encode(&V::Array(changed)).unwrap(),
+                &fixture.requester,
+            )
+            .unwrap();
+            assert!(drivers[0].read_acknowledge(&bad).is_err());
+            let mut expired = fields.clone();
+            expired[6] = V::Uint(now.wall_ms);
+            let expired = wire::sign_envelope(
+                &wire::encode(&V::Array(expired)).unwrap(),
+                &fixture.requester,
+            )
+            .unwrap();
+            let reply = drivers[0].read_acknowledge(&expired).unwrap();
+            assert!(
+                !wire::decode(&reply).unwrap().array(7).unwrap()[6]
+                    .boolean()
+                    .unwrap()
+            );
+            assert_eq!(drivers[0].reads.len(), MAX_PENDING);
+            let mut changed = fields;
+            changed[3] = V::Bytes(vec![94; 32]);
+            let absent = wire::sign_envelope(
+                &wire::encode(&V::Array(changed)).unwrap(),
+                &fixture.requester,
+            )
+            .unwrap();
+            drivers[0].read_acknowledge(&absent).unwrap();
+            assert_eq!(drivers[0].reads.len(), MAX_PENDING);
+            let now = crate::consensus_clock::moment().unwrap();
+            let health = ClockHealth::new(now.wall_ms, now.boot_ms, now.boot_ms + 1000, 1)
+                .unwrap()
+                .frozen();
+            let (value, consumed) = store
+                .accept_read_consumed(verified, &mut session, health, 0, |_, _| Ok(42))
+                .unwrap();
+            assert_eq!(value, 42);
+            let signed = consumed
+                .acknowledgement(&fixture.requester, now.boot_ms + 1000)
+                .unwrap();
+            let packet = control(&drivers[0], 8, &signed);
+            let reply = drivers[0].local_checked(&packet).unwrap();
+            let receipt = wire::decode(&reply).unwrap();
+            let receipt = receipt.array(7).unwrap();
+            assert_eq!(receipt[0].uint().unwrap(), 64);
+            assert_eq!(receipt[1].uint().unwrap(), 1);
+            assert_eq!(receipt[2], configuration.descriptor().scope().value());
+            assert_eq!(receipt[3].fixed::<32>().unwrap(), id);
+            assert!(receipt[6].boolean().unwrap());
+            assert_eq!(drivers[0].reads.len(), MAX_PENDING - 1);
+            assert!(!drivers[0].reads.contains_key(&id));
+            Some(signed)
+        } else {
+            let expires = crate::authority_proof::Challenge::from_signed(&challenge)
+                .unwrap()
+                .expires_at_ms;
+            let now = crate::consensus_clock::moment().unwrap().wall_ms;
+            std::thread::sleep(Duration::from_millis(
+                expires
+                    .saturating_sub(crate::authority_challenge::DELTA_MS)
+                    .saturating_add(1)
+                    .saturating_sub(now),
+            ));
+            None
+        };
         for directory in &directories {
             runtime_clock(&directory.0);
         }
@@ -376,6 +532,20 @@ fn policy_quorum(delayed: bool, capacity: bool) {
                     .expires_at_ms
         );
         assert_eq!(drivers[0].reads.len(), MAX_PENDING);
+        if let Some(acknowledgement) = acknowledged {
+            let duplicate = drivers[0].read_acknowledge(&acknowledgement).unwrap();
+            assert!(
+                !wire::decode(&duplicate).unwrap().array(7).unwrap()[6]
+                    .boolean()
+                    .unwrap()
+            );
+            assert_eq!(drivers[0].reads.len(), MAX_PENDING);
+            assert!(
+                drivers[0]
+                    .reads
+                    .contains_key(&read::read_id(&signed, &original_challenge).unwrap())
+            );
+        }
     }
     if delayed {
         // A forward wall correction must expire the old quorum even before its monotonic cap.

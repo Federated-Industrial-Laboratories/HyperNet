@@ -30,16 +30,19 @@ use tokio::{
 
 pub(super) struct SocketGuard {
     path: PathBuf,
+    acknowledgement: PathBuf,
     device: u64,
     inode: u64,
     _lock: File,
 }
 impl Drop for SocketGuard {
     fn drop(&mut self) {
-        if std::fs::symlink_metadata(&self.path).is_ok_and(|m| {
-            m.dev() == self.device && m.ino() == self.inode && m.file_type().is_socket()
-        }) {
-            let _ = std::fs::remove_file(&self.path);
+        for path in [&self.acknowledgement, &self.path] {
+            if std::fs::symlink_metadata(path).is_ok_and(|m| {
+                m.dev() == self.device && m.ino() == self.inode && m.file_type().is_socket()
+            }) {
+                let _ = std::fs::remove_file(path);
+            }
         }
     }
 }
@@ -88,15 +91,47 @@ pub(super) fn local_socket(path: &Path) -> Result<(UnixListener, SocketGuard)> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     let m = std::fs::symlink_metadata(path)?;
     socket.set_nonblocking(true)?;
-    Ok((
-        UnixListener::from_std(socket)?,
-        SocketGuard {
-            path: path.to_path_buf(),
-            device: m.dev(),
-            inode: m.ino(),
-            _lock: lock,
-        },
-    ))
+    let guard = SocketGuard {
+        path: path.to_path_buf(),
+        acknowledgement: parent.join(crate::authority_local_transport::READ_ACK_SOCKET),
+        device: m.dev(),
+        inode: m.ino(),
+        _lock: lock,
+    };
+    if let Ok(old) = std::fs::symlink_metadata(&guard.acknowledgement) {
+        ensure!(
+            old.file_type().is_socket() && old.uid() == m.uid() && old.mode() & 0o077 == 0,
+            "Unsafe existing acknowledgement socket"
+        );
+        let directory = File::open(parent)?;
+        let endpoint = Path::new("/proc/self/fd")
+            .join(directory.as_raw_fd().to_string())
+            .join(crate::authority_local_transport::READ_ACK_SOCKET);
+        match std::os::unix::net::UnixStream::connect(endpoint) {
+            Ok(_) => anyhow::bail!("Acknowledgement socket is already listening"),
+            Err(error) => ensure!(
+                matches!(
+                    error.raw_os_error(),
+                    Some(libc::ECONNREFUSED) | Some(libc::ENOENT)
+                ),
+                "Cannot establish that the acknowledgement socket is stale"
+            ),
+        }
+        let actual = std::fs::symlink_metadata(&guard.acknowledgement)?;
+        ensure!(
+            actual.dev() == old.dev() && actual.ino() == old.ino(),
+            "Acknowledgement socket changed during reconciliation"
+        );
+        std::fs::remove_file(&guard.acknowledgement)?;
+    }
+    // The alias adds no listener, queue, connection limit or independent lifetime.
+    std::fs::hard_link(path, &guard.acknowledgement)?;
+    let alias = std::fs::symlink_metadata(&guard.acknowledgement)?;
+    ensure!(
+        alias.dev() == guard.device && alias.ino() == guard.inode && alias.file_type().is_socket(),
+        "Acknowledgement alias differs from the listening socket"
+    );
+    Ok((UnixListener::from_std(socket)?, guard))
 }
 pub(super) async fn accept_local(
     listener: UnixListener,
@@ -124,6 +159,7 @@ pub(super) async fn accept_local(
                         if length == 0 || length > trust_wire::MAXIMUM { return Err(Code::LocalInvalid); }
                         let mut bytes = vec![0; length];
                         stream.read_exact(&mut bytes).await.map_err(|_| Code::LocalIo)?;
+                        let cleanup = crate::authority_local_transport::is_read_acknowledgement(&bytes);
                         let (answer, response) = oneshot::channel();
                         events.try_send(Event::Local { body: bytes, answer, queued: Instant::now() })
                             .map_err(|error| match error {
@@ -132,8 +168,8 @@ pub(super) async fn accept_local(
                             })?;
                         let body = response.await.map_err(|_| Code::LocalResponseClosed)?;
                         let length = u32::try_from(body.len()).map_err(|_| Code::LocalInvalid)?;
-                        stream.write_u32(length).await.map_err(|_| Code::LocalIo)?;
-                        stream.write_all(&body).await.map_err(|_| Code::LocalIo)?;
+                        let written = async { stream.write_u32(length).await?; stream.write_all(&body).await }.await;
+                        if !cleanup { written.map_err(|_| Code::LocalIo)?; }
                         Ok::<(), Code>(())
                     }).await;
                     let code = match result { Err(_) => Some(Code::LocalTimeout), Ok(Err(code)) => Some(code), Ok(Ok(())) => None };

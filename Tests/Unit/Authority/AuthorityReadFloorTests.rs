@@ -237,7 +237,7 @@ fn failed_fresh_read_publication_keeps_floors_without_recording_an_ordinary_effe
     let query = Read::new(&store, &mut session, sample);
     assert!(
         store
-            .accept_read(
+            .accept_read_consumed(
                 query.verify(&store),
                 &mut session,
                 sample,
@@ -275,6 +275,187 @@ fn failed_fresh_read_publication_keeps_floors_without_recording_an_ordinary_effe
         .accept_read(query.verify(&store), &mut session, sample, 0, |_, _| Ok(()))
         .unwrap();
     assert_eq!(store.stored.tracker, tracker);
+}
+
+#[test]
+fn consumed_fresh_read_cleanup_never_waits_for_support_or_reuses_authority() {
+    use std::{
+        fs::File,
+        io::{Read as _, Write as _},
+        os::{
+            fd::AsRawFd,
+            unix::{fs::PermissionsExt, net::UnixListener},
+        },
+        time::{Duration, Instant},
+    };
+    for refused in [false, true] {
+        let (directory, sample, mut session, mut store) = setup();
+        let sample = later(sample, 500);
+        let mut query = Read::new(&store, &mut session, sample);
+        if refused {
+            query.result = encoded(vec![
+                V::Uint(24),
+                V::Uint(1),
+                V::Text("AuthorityPolicyContext".into()),
+                V::Uint(1),
+                V::Uint(2),
+                b(&encoded(vec![])),
+            ]);
+            let payload = store.descriptor().quorum(&query.certificate).unwrap();
+            let mut statement = Statement::parse(&payload).unwrap();
+            statement.result = wire::digest(&query.result);
+            query.certificate = quorum(
+                wire::decode(&statement.encode().unwrap())
+                    .unwrap()
+                    .array(13)
+                    .unwrap()
+                    .to_vec(),
+            );
+        }
+        let verified = query.verify(&store);
+        let statement = verified.statement.clone();
+        let consumed = if refused {
+            store
+                .observe_read_consumed(verified, &mut session, sample, 0)
+                .unwrap()
+        } else {
+            let (value, consumed) = store
+                .accept_read_consumed(verified, &mut session, sample, 0, |_, _| Ok(42))
+                .unwrap();
+            assert_eq!(value, 42);
+            consumed
+        };
+        let key = SigningKey::from_bytes(&[1; 32]);
+        let observed = sample.observe().unwrap();
+        let short = consumed
+            .acknowledgement(&key, observed.boot_ms + 10)
+            .unwrap();
+        let short = read::Acknowledgement::from_signed(&short).unwrap();
+        assert_eq!(short.not_after_ms, observed.wall_ms + 10);
+        let path = directory.0.join("Ack.sock");
+        let parent = File::open(&directory.0).unwrap();
+        let listener =
+            UnixListener::bind(format!("/proc/self/fd/{}/Ack.sock", parent.as_raw_fd())).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let deadline = crate::authority_challenge::boot_time_ms().unwrap() + 2000;
+        // A legacy listener receives no cleanup traffic; a different socket is not support.
+        crate::authority_local_transport::acknowledge_read(&consumed, &key, deadline, &path);
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        let alias = directory
+            .0
+            .join(crate::authority_local_transport::READ_ACK_SOCKET);
+        let other = UnixListener::bind(format!(
+            "/proc/self/fd/{}/ReadAcknowledgements.sock",
+            parent.as_raw_fd()
+        ))
+        .unwrap();
+        std::fs::set_permissions(&alias, std::fs::Permissions::from_mode(0o600)).unwrap();
+        other.set_nonblocking(true).unwrap();
+        crate::authority_local_transport::acknowledge_read(&consumed, &key, deadline, &path);
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            other.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        drop(other);
+        std::fs::remove_file(&alias).unwrap();
+        std::fs::hard_link(&path, &alias).unwrap();
+        let started = Instant::now();
+        crate::authority_local_transport::acknowledge_read(&consumed, &key, deadline, &path);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "cleanup waited for a server that has not read or replied"
+        );
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut size = [0; 4];
+        socket.read_exact(&mut size).unwrap();
+        let size = u32::from_be_bytes(size) as usize;
+        assert!(size <= read::Acknowledgement::MAXIMUM);
+        let mut packet = vec![0; size];
+        socket.read_exact(&mut packet).unwrap();
+        assert!(crate::authority_local_transport::is_read_acknowledgement(
+            &packet
+        ));
+        let value = wire::decode(&packet).unwrap();
+        let fields = value.array(5).unwrap();
+        let acknowledgement =
+            read::Acknowledgement::from_signed(fields[4].bytes().unwrap()).unwrap();
+        assert_eq!(
+            acknowledgement.id,
+            read::read_id(&query.request, &query.challenge).unwrap()
+        );
+        assert_eq!(
+            acknowledgement.statement,
+            wire::digest(&statement.encode().unwrap())
+        );
+        assert_eq!(acknowledgement.result, wire::digest(&query.result));
+        assert!(acknowledgement.not_after_ms <= statement.expires_at_ms);
+        assert_eq!(
+            socket.read(&mut [0; 1]).unwrap(),
+            0,
+            "cleanup retained a response waiter"
+        );
+        // An older server's unsupported-operation reply cannot alter a consumed result.
+        let unsupported = encoded(vec![
+            V::Uint(42),
+            V::Uint(1),
+            store.descriptor().scope().value(),
+            V::Uint(2),
+            V::Uint(2),
+            V::Null,
+            V::Null,
+            V::Null,
+            V::Null,
+            V::Array(vec![]),
+        ]);
+        let _ = socket.write_all(&unsupported);
+        crate::authority_local_transport::acknowledge_read(&consumed, &key, 0, &path);
+        crate::authority_local_transport::acknowledge_read(
+            &consumed,
+            &SigningKey::from_bytes(&[2; 32]),
+            deadline,
+            &path,
+        );
+        crate::authority_local_transport::acknowledge_read(
+            &consumed,
+            &key,
+            deadline,
+            &directory.0.join("Absent.sock"),
+        );
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        if refused {
+            assert!(
+                store
+                    .observe_read_consumed(query.verify(&store), &mut session, sample, 0)
+                    .is_err()
+            );
+        } else {
+            assert!(
+                store
+                    .accept_read_consumed(
+                        query.verify(&store),
+                        &mut session,
+                        sample,
+                        0,
+                        |_, _| -> Result<()> { panic!("cleanup replayed consumed authority") }
+                    )
+                    .is_err()
+            );
+        }
+    }
 }
 
 #[test]

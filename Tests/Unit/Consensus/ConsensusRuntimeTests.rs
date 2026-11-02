@@ -2545,17 +2545,45 @@ fn live_status_reports_local_progress_without_signing_or_peer_queries() {
 
 #[tokio::test]
 async fn local_socket_is_private_and_reconciles_only_its_stale_inode() {
+    use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
     let directory = Directory::new();
-    let path = directory.0.join("Control.sock");
+    let padding = 105 - directory.0.as_os_str().as_encoded_bytes().len() - 2 - "Control.sock".len();
+    let parent = directory.0.join("x".repeat(padding));
+    std::fs::create_dir(&parent).unwrap();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = parent.join("Control.sock");
     let (socket, guard) = ingress::local_socket(&path).unwrap();
+    let alias = parent.join(crate::authority_local_transport::READ_ACK_SOCKET);
+    assert_eq!(path.as_os_str().as_encoded_bytes().len(), 105);
+    assert!(alias.as_os_str().as_encoded_bytes().len() >= 108);
+    let control_metadata = std::fs::metadata(&path).unwrap();
+    let alias_metadata = std::fs::metadata(&alias).unwrap();
+    assert_eq!(
+        (control_metadata.dev(), control_metadata.ino()),
+        (alias_metadata.dev(), alias_metadata.ino())
+    );
+    let owned = std::fs::File::open(&parent).unwrap();
+    let endpoint = Path::new("/proc/self/fd")
+        .join(owned.as_raw_fd().to_string())
+        .join(crate::authority_local_transport::READ_ACK_SOCKET);
+    let caller = tokio::net::UnixStream::connect(endpoint).await.unwrap();
+    let (accepted, _) = socket.accept().await.unwrap();
+    drop((caller, accepted));
     assert_eq!(
         std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o600
     );
     assert!(ingress::local_socket(&path).is_err());
+    let stale = parent.join("Stale.sock");
+    std::fs::rename(&alias, &stale).unwrap();
     drop(socket);
     drop(guard);
     assert!(!path.exists());
+    assert!(!alias.exists());
+    std::fs::rename(&stale, &alias).unwrap();
+    let (socket, guard) = ingress::local_socket(&path).unwrap();
+    drop((socket, guard));
+    assert!(!path.exists() && !alias.exists());
     std::fs::write(&path, b"unrelated").unwrap();
     assert!(ingress::local_socket(&path).is_err());
     assert_eq!(std::fs::read(&path).unwrap(), b"unrelated");

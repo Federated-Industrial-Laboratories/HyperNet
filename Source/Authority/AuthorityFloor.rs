@@ -18,6 +18,7 @@ use std::{collections::BTreeMap, ffi::OsStr, fs::File, path::Path};
 mod epoch;
 #[path = "AuthorityReadFloor.rs"]
 mod read;
+pub use read::ConsumedRead;
 #[path = "AuthorityTracker.rs"]
 mod tracker;
 #[path = "AuthorityFloorTransaction.rs"]

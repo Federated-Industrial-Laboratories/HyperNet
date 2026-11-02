@@ -337,7 +337,7 @@ impl<'a> Session<'a> {
         )?;
         outer.sock.admitted(limits, boot_time_ms()?);
         let connection = ClientConnection::new(
-            route_tls::client(&profile.destination)?,
+            route_tls::endpoint_client(&profile.destination, profile.protocol)?,
             ServerName::try_from(profile.destination.server_name.clone())?,
         )?;
         let mut inner = StreamOwned::new(connection, outer);
@@ -346,7 +346,7 @@ impl<'a> Session<'a> {
             .complete_io(&mut inner.sock)
             .context("authenticate final private service")?;
         ensure!(
-            inner.conn.alpn_protocol() == Some(route_tls::ALPN),
+            route_tls::endpoint_protocol(inner.conn.alpn_protocol()),
             "final service protocol differs"
         );
         protocol::parse_endpoint_ready(
@@ -393,6 +393,15 @@ impl<'a> Session<'a> {
             self.stream.take();
         }
         result
+    }
+    #[allow(
+        dead_code,
+        reason = "The native authority connector uses this negotiated optional capability."
+    )]
+    pub(crate) fn read_acknowledgements(&self) -> bool {
+        self.stream
+            .as_ref()
+            .is_some_and(|stream| stream.conn.alpn_protocol() == Some(route_tls::READ_ACK_ALPN))
     }
 }
 #[allow(dead_code)] // Shared one-shot entry point used by Core transport qualification.
