@@ -73,6 +73,87 @@ impl Drop for LiveStream {
         self.gate.close();
     }
 }
+struct PendingClose {
+    reference: VersionRef,
+    deadline: u64,
+}
+impl PendingClose {
+    fn completed(stream: LiveStream, now: u64, idle_ms: u64) -> Self {
+        stream.gate.close();
+        Self {
+            reference: stream.reference.clone(),
+            deadline: now.saturating_add(idle_ms),
+        }
+    }
+    fn finish(self, client: &mut Client<'_>, diagnostics: &mut u8) {
+        // A failed mutation remains in the requester's exact recovery slot.
+        // Deferral never creates another close deadline or substitutes its identity.
+        let expired =
+            crate::authority_challenge::boot_time_ms().is_ok_and(|now| now >= self.deadline);
+        if client
+            .before(self.deadline, |client| client.stream_close(&self.reference))
+            .is_err()
+            && *diagnostics < 16
+        {
+            *diagnostics += 1;
+            eprintln!(
+                "HyperNet application stream cleanup: sample={} category={}",
+                diagnostics,
+                if expired { "Expired" } else { "Failed" }
+            );
+        }
+    }
+}
+#[derive(Debug, PartialEq, Eq)]
+enum Maintenance {
+    Own,
+    Stream(Digest),
+    Close,
+    Wait,
+}
+fn occupied(
+    incoming: usize,
+    handshakes: usize,
+    live: &BTreeMap<Digest, LiveStream>,
+    close: Option<&PendingClose>,
+) -> usize {
+    incoming + handshakes + live.len() + usize::from(close.is_some())
+}
+fn maintenance(
+    now: u64,
+    permission: &EndpointPermission,
+    live: &BTreeMap<Digest, LiveStream>,
+    close: Option<&PendingClose>,
+    own_budget: u64,
+    action_budget: u64,
+) -> Result<Maintenance> {
+    // Reserve one measured action before selecting cleanup. These costs only
+    // schedule work; no certified gate or original close deadline is extended.
+    let close_budget = close
+        .filter(|close| now < close.deadline)
+        .map_or(0, |_| action_budget);
+    if permission.refresh_due(now, own_budget.saturating_add(close_budget))? {
+        return Ok(Maintenance::Own);
+    }
+    if let Some(id) = live.iter().find_map(|(id, stream)| {
+        (!stream.forwarding.finished.load(Ordering::Acquire)
+            && now >= stream.retry_after
+            && now
+                >= refresh_at(
+                    stream.gate.expiry().unwrap_or(0),
+                    action_budget.saturating_add(close_budget),
+                    Some(stream.accepted_at),
+                ))
+        .then_some(*id)
+    }) {
+        return Ok(Maintenance::Stream(id));
+    }
+    Ok(if close.is_some() {
+        Maintenance::Close
+    } else {
+        Maintenance::Wait
+    })
+}
 async fn hello(
     mut session: Session,
     application: crate::route_config::Application,
@@ -260,6 +341,8 @@ pub(super) async fn endpoint(
     let mut handshakes: JoinSet<Result<OpenedStream>> = JoinSet::new();
     let mut forwarding: JoinSet<(Digest, Result<()>)> = JoinSet::new();
     let mut live: BTreeMap<Digest, LiveStream> = BTreeMap::new();
+    let mut closing: Option<PendingClose> = None;
+    let mut cleanup_diagnostics = 0;
     let mut tick = tokio::time::interval(Duration::from_millis(DISPATCH_MS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -267,34 +350,36 @@ pub(super) async fn endpoint(
     let outcome=async {loop {
         active.check(guard)?;
         if let Some((identity,address))=&relay {
-            while incoming.len()+handshakes.len()+live.len()<capacity && tokio::time::Instant::now()>=retry_after {
+            while occupied(incoming.len(),handshakes.len(),&live,closing.as_ref())<capacity && tokio::time::Instant::now()>=retry_after {
                 let open=Open {network:config.manifest.network,incarnation:config.manifest.incarnation,relay:identity.service,service:own.identity.service,voucher:vec![],nonce:protocol::random()?,attachment:true};
                 incoming.spawn(attach(*address,identity.clone(),acceptor.clone(),config.key.clone(),open,own.limits));
             }
         }
         let now=crate::authority_challenge::boot_time_ms()?;
-        let renew=live.iter().find_map(|(id,s)| (now>=s.retry_after && now>=refresh_at(s.gate.expiry().unwrap_or(0),client.operation_budget_ms(),Some(s.accepted_at))).then_some(*id));
-        let own_due=permission.refresh_due(now,client.own_renewal_budget_ms())?;
+        let maintenance=maintenance(now,&permission,&live,closing.as_ref(),client.own_renewal_budget_ms(),client.operation_budget_ms())?;
         let public=listener.is_some();
         let (listener_tasks,listener_requests)=listener.as_mut().map(|l|(&mut l.tasks,&mut l.requests)).unzip();
         tokio::select! {
             biased;
             _=tokio::signal::ctrl_c()=>break,
             _=terminate.recv()=>break,
-            result=forwarding.join_next(),if !forwarding.is_empty()=>{
-                if let Some(Ok((id,_result)))=result && let Some(s)=live.remove(&id) {
-                    s.gate.close();let _=client.before(now.saturating_add(own.limits.idle_ms),|client|client.stream_close(&s.reference));
-                }
-            },
-            _=std::future::ready(()),if own_due=>{
+            _=std::future::ready(()),if maintenance==Maintenance::Own=>{
                 permission.refresh(client,now.saturating_add(own.limits.idle_ms))?;active.check(guard)?;
             },
-            _=std::future::ready(()),if renew.is_some()=>{
-                let id=renew.expect("selected stream renewal");let s=live.get_mut(&id).expect("selected live stream");
+            _=std::future::ready(()),if matches!(maintenance,Maintenance::Stream(_))=>{
+                let Maintenance::Stream(id)=maintenance else {unreachable!("selected stream renewal")};let s=live.get_mut(&id).expect("selected live stream");
                 if now>=s.forwarding.deadline {s.gate.close();s.retry_after=u64::MAX;continue;}
                 match clock_checked(client.before(s.forwarding.deadline.min(now.saturating_add(own.limits.idle_ms)),|client|client.stream_permit(&s.reference)))? {
                     Ok(expiry)=>{s.gate.renew(expiry)?;s.accepted_at=crate::authority_challenge::boot_time_ms()?;s.retry_after=0;},
                     Err(error)=>{if error.is::<ReadRetry>() {s.retry_after=now.saturating_add(READ_RETRY_MS);} else {s.gate.close();s.retry_after=u64::MAX;}},
+                }
+            },
+            _=std::future::ready(()),if maintenance==Maintenance::Close=>{
+                closing.take().expect("selected stream cleanup").finish(client,&mut cleanup_diagnostics);
+            },
+            result=forwarding.join_next(),if !forwarding.is_empty() && closing.is_none()=>{
+                if let Some(Ok((id,_result)))=result && let Some(stream)=live.remove(&id) {
+                    closing=Some(PendingClose::completed(stream,crate::authority_challenge::boot_time_ms()?,own.limits.idle_ms));
                 }
             },
             result=handshakes.join_next(),if !handshakes.is_empty()=>{
@@ -355,6 +440,9 @@ pub(super) async fn endpoint(
     drain(&mut incoming).await;
     drain(&mut handshakes).await;
     drain(&mut forwarding).await;
+    if let Some(close) = closing {
+        close.finish(client, &mut cleanup_diagnostics);
+    }
     // Failed closure retains a spent slot until its original wall-clock expiry.
     for stream in live.values() {
         let _ = client.before(

@@ -23,6 +23,106 @@ fn prepared_stream(expiry: u64, deadline: u64) -> LiveStream {
 }
 
 #[test]
+fn completed_stream_burst_yields_to_due_renewals_then_closes_without_starvation() {
+    let now = crate::authority_challenge::boot_time_ms().unwrap() + 1000;
+    let mut endpoint = EndpointPermission {
+        gate: route_io::Gate::new(now + 150),
+        accepted_at: Some(now - 1000),
+        renewals: 0,
+    };
+    let _activity = endpoint.gate.activity().unwrap();
+    let mut live = BTreeMap::new();
+    for n in 0..4 {
+        let stream = prepared_stream(now + 10, now + 10_000);
+        stream.forwarding.finished.store(true, Ordering::Release);
+        live.insert([n; 32], stream);
+    }
+    live.insert([9; 32], prepared_stream(now + 150, now + 10_000));
+    assert_eq!(
+        maintenance(now, &endpoint, &live, None, 100, 100).unwrap(),
+        Maintenance::Own,
+        "completed forwarding cannot outrank an already due endpoint renewal"
+    );
+    endpoint.gate.renew(now + 5000).unwrap();
+    endpoint.accepted_at = Some(now);
+    assert_eq!(
+        maintenance(now, &endpoint, &live, None, 100, 100).unwrap(),
+        Maintenance::Stream([9; 32]),
+        "finished streams must not consume renewal turns"
+    );
+    let stream = live.get_mut(&[9; 32]).unwrap();
+    stream.gate.renew(now + 5000).unwrap();
+    stream.accepted_at = now;
+    for n in 0..4 {
+        let close = PendingClose::completed(live.remove(&[n; 32]).unwrap(), now, 1000);
+        assert_eq!(
+            maintenance(now, &endpoint, &live, Some(&close), 100, 100).unwrap(),
+            Maintenance::Close,
+            "fresh headroom must release each bounded close turn"
+        );
+        assert_eq!(close.deadline, now + 1000);
+        assert_eq!(endpoint.gate.expiry().unwrap(), now + 5000);
+        assert_eq!(live[&[9; 32]].gate.expiry().unwrap(), now + 5000);
+    }
+}
+
+#[test]
+fn pending_close_reserves_one_action_before_each_renewal_latest_start() {
+    let now = crate::authority_challenge::boot_time_ms().unwrap() + 1000;
+    let mut endpoint = EndpointPermission {
+        gate: route_io::Gate::new(now + 250),
+        accepted_at: Some(now - 1000),
+        renewals: 0,
+    };
+    let _activity = endpoint.gate.activity().unwrap();
+    let mut live = BTreeMap::from([([9; 32], prepared_stream(now + 250, now + 10_000))]);
+    assert_eq!(
+        maintenance(now, &endpoint, &live, None, 100, 100).unwrap(),
+        Maintenance::Wait
+    );
+    let close = PendingClose::completed(prepared_stream(now + 100, now + 10_000), now, 1000);
+    assert_eq!(
+        maintenance(now, &endpoint, &live, Some(&close), 100, 100).unwrap(),
+        Maintenance::Own
+    );
+    assert_eq!(endpoint.gate.expiry().unwrap(), now + 250);
+    endpoint.gate.renew(now + 5000).unwrap();
+    endpoint.accepted_at = Some(now);
+    assert_eq!(
+        maintenance(now, &endpoint, &live, Some(&close), 100, 100).unwrap(),
+        Maintenance::Stream([9; 32])
+    );
+    assert_eq!(live[&[9; 32]].gate.expiry().unwrap(), now + 250);
+    let stream = live.get_mut(&[9; 32]).unwrap();
+    stream.gate.renew(now + 5000).unwrap();
+    stream.accepted_at = now;
+    assert_eq!(
+        maintenance(close.deadline, &endpoint, &live, Some(&close), 100, 100).unwrap(),
+        Maintenance::Close,
+        "an expired close gets its original failing attempt, not a renewed window"
+    );
+    assert_eq!(close.deadline, now + 1000);
+}
+
+#[test]
+fn held_completion_closes_local_gate_and_keeps_its_existing_capacity_slot() {
+    let now = crate::authority_challenge::boot_time_ms().unwrap();
+    let mut live = BTreeMap::from([([1; 32], prepared_stream(now + 5000, now + 10_000))]);
+    let gate = live[&[1; 32]].gate.clone();
+    let reference = live[&[1; 32]].reference.clone();
+    assert_eq!(occupied(7, 8, &live, None), 16);
+    let close = PendingClose::completed(live.remove(&[1; 32]).unwrap(), now, 1000);
+    assert!(
+        gate.expiry().is_err(),
+        "completed local bytes are fenced immediately"
+    );
+    assert_eq!(close.reference, reference);
+    assert_eq!(close.deadline, now + 1000);
+    assert_eq!(occupied(7, 8, &live, Some(&close)), 16);
+    assert_eq!(occupied(7, 8, &live, None), 15);
+}
+
+#[test]
 fn queued_check_prepares_both_gates_before_the_normal_renewal_timer() {
     let now = crate::authority_challenge::boot_time_ms().unwrap();
     let caller_end = now + 2000;

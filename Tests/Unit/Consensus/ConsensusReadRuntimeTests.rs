@@ -5,6 +5,8 @@ use crate::{
     authority_challenge::{ClockHealth, Session},
     authority_read as read,
 };
+#[path = "ConsensusReadAcknowledgementInteropTests.rs"]
+mod interop;
 fn control(driver: &Driver, operation: u64, payload: &[u8]) -> Vec<u8> {
     wire::encode(&V::Array(vec![
         V::Uint(41),
