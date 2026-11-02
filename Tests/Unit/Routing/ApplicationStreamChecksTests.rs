@@ -24,6 +24,209 @@ fn prepared_stream(expiry: u64, deadline: u64) -> LiveStream {
     }
 }
 
+#[test]
+fn stalled_diagnostic_sink_does_not_hold_producers_or_retime_records() {
+    use std::{
+        io,
+        sync::{Mutex, mpsc},
+    };
+    struct Stalled {
+        entered: Option<mpsc::Sender<()>>,
+        release: mpsc::Receiver<()>,
+        records: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+    impl io::Write for Stalled {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if let Some(entered) = self.entered.take() {
+                let _ = entered.send(());
+                self.release
+                    .recv_timeout(Duration::from_secs(3))
+                    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?;
+            }
+            self.records.lock().unwrap().push(bytes.to_vec());
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let (entered, waiting) = mpsc::channel();
+    let (release, held) = mpsc::channel();
+    let records = Arc::new(Mutex::new(Vec::new()));
+    let (sender, writer) = diagnostic_writer(Stalled {
+        entered: Some(entered),
+        release: held,
+        records: records.clone(),
+    })
+    .unwrap();
+    let mut first = DiagnosticLine::new();
+    std::fmt::write(&mut first, format_args!("sample=1 bootMs=100\n")).unwrap();
+    queue_diagnostic(&sender, first);
+    let stalled = waiting.recv_timeout(Duration::from_secs(1));
+    let producer_sender = sender.clone();
+    let (finished, completion) = mpsc::channel();
+    let producer = std::thread::spawn(move || {
+        for sample in 2..=1025 {
+            let mut line = DiagnosticLine::new();
+            std::fmt::write(&mut line, format_args!("sample={sample} bootMs=200\n")).unwrap();
+            queue_diagnostic(&producer_sender, line);
+        }
+        let mut oversized = DiagnosticLine::new();
+        assert!(
+            std::fmt::Write::write_str(&mut oversized, &"x".repeat(DIAGNOSTIC_BYTES + 1)).is_err()
+        );
+        queue_diagnostic(&producer_sender, oversized);
+        let _ = finished.send(());
+    });
+    let produced_without_sink = completion.recv_timeout(Duration::from_millis(500));
+    // Always release and join the finite test writer before checking producer progress.
+    let _ = release.send(());
+    producer.join().unwrap();
+    drop(sender);
+    writer.join().unwrap();
+    assert!(stalled.is_ok());
+    assert!(
+        produced_without_sink.is_ok(),
+        "diagnostic producer waited for the sink"
+    );
+    let records = records.lock().unwrap();
+    assert_eq!(records.len(), DIAGNOSTIC_QUEUE + 1);
+    assert_eq!(records[0], b"sample=1 bootMs=100\n");
+    assert!(
+        records
+            .iter()
+            .skip(1)
+            .all(|line| line.ends_with(b"bootMs=200\n"))
+    );
+    assert!(records.iter().all(|line| line.len() <= DIAGNOSTIC_BYTES));
+    let (closed, receiver) = mpsc::sync_channel(1);
+    drop(receiver);
+    queue_diagnostic(&closed, DiagnosticLine::new());
+}
+
+#[test]
+fn timing_caps_are_independent_and_do_not_reset_when_exhausted() {
+    let checks = AtomicU64::new(0);
+    let actor = AtomicU64::new(0);
+    let session = AtomicU64::new(0);
+    for expected in 1..=256 {
+        assert_eq!(Timing::counted(7, &checks, 256).sample, Some(expected));
+    }
+    for _ in 0..4 {
+        assert!(Timing::counted(7, &checks, 256).sample.is_none());
+    }
+    for expected in 1..=64 {
+        assert_eq!(Timing::counted(7, &actor, 64).sample, Some(expected));
+    }
+    assert!(Timing::counted(7, &actor, 64).sample.is_none());
+    assert_eq!(Timing::counted(7, &session, 64).sample, Some(1));
+    assert_eq!(checks.load(Ordering::Relaxed), 256);
+    assert_eq!(actor.load(Ordering::Relaxed), 64);
+}
+
+#[test]
+fn actor_diagnostics_preserve_single_execution_and_typed_failure() {
+    let mut effects = 0;
+    let value = observed(Activity::StreamAdmission, 123, None, || {
+        effects += 1;
+        Ok(17)
+    })
+    .unwrap();
+    assert_eq!((value, effects), (17, 1));
+    let error = observed(Activity::Cleanup, 123, None, || -> Result<()> {
+        effects += 1;
+        Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe).into())
+    })
+    .unwrap_err();
+    assert_eq!(effects, 2);
+    assert_eq!(
+        error.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+}
+
+#[test]
+fn check_diagnostics_keep_early_outcomes_bounds_and_redaction_with_failed_sink() {
+    struct Closed;
+    impl std::fmt::Write for Closed {
+        fn write_str(&mut self, _: &str) -> std::fmt::Result {
+            Err(std::fmt::Error)
+        }
+    }
+    let (_, _, ready, mut request) = fixture();
+    request.local_connection_id = "private-connection-must-not-appear".into();
+    request.caller_started_boot_ms = 100;
+    request.caller_deadline_boot_ms = 200;
+    let (reply, _) = tokio::sync::oneshot::channel();
+    let check = checks::Check {
+        request: request.clone(),
+        ready: Arc::new(ready),
+        connected: Arc::new(AtomicBool::new(true)),
+        cancelled: Arc::new(AtomicBool::new(false)),
+        reply,
+        timing: Some(Timing {
+            started: 110,
+            sample: Some(7),
+        }),
+    };
+    let mut output = String::new();
+    for stage in [checks::Stage::Enqueued, checks::Stage::Dequeued] {
+        check.record_at(&mut output, 210, stage, None, None);
+    }
+    for disposition in [Disposition::Expired, Disposition::NotActive] {
+        // These are successful evaluate returns, not errors: each still has an outcome record.
+        let original =
+            checks::unavailable(request.clone(), check.ready.privacy.clone(), disposition);
+        let encoded = control::encode(&original).unwrap();
+        check.record_at(
+            &mut Closed,
+            210,
+            checks::Stage::Outcome,
+            Some(&original.disposition),
+            None,
+        );
+        let receipt = check.complete(Ok(original));
+        assert_eq!(control::encode(&receipt).unwrap(), encoded);
+        check.record_at(
+            &mut output,
+            210,
+            checks::Stage::Outcome,
+            Some(&receipt.disposition),
+            None,
+        );
+    }
+    let receipt = check.complete(Err(
+        std::io::Error::from(std::io::ErrorKind::BrokenPipe).into()
+    ));
+    assert_eq!(receipt.request, request);
+    assert_eq!(receipt.disposition, Disposition::Unavailable);
+    assert!(receipt.authority.is_none());
+    let text = output;
+    assert_eq!(text.matches("sample=7 ").count(), 4);
+    assert_eq!(text.matches("deadlineBootMs=200 ").count(), 4);
+    assert!(text.contains("elapsedMs=100 "));
+    assert!(text.contains("disposition=Some(Expired)"));
+    assert!(text.contains("disposition=Some(NotActive)"));
+    assert!(!text.contains(&request.local_connection_id));
+    assert!(!text.contains("nonce") && !text.contains("session"));
+    let mut maximum = check;
+    maximum.request.caller_started_boot_ms = u64::MAX;
+    maximum.request.caller_deadline_boot_ms = u64::MAX;
+    maximum.timing = Some(Timing {
+        started: 0,
+        sample: Some(256),
+    });
+    let mut record = String::new();
+    maximum.record_at(
+        &mut record,
+        u64::MAX,
+        checks::Stage::EndpointPreparation,
+        Some(&Disposition::Unavailable),
+        Some((FailureCode::FreshQuorumUnavailable, Some(u64::MAX))),
+    );
+    assert!(record.len() < 384);
+}
+
 #[tokio::test]
 async fn ready_checks_and_admissions_receive_turns_during_continuous_maintenance() {
     use std::task::Poll;
@@ -37,6 +240,7 @@ async fn ready_checks_and_admissions_receive_turns_during_continuous_maintenance
             connected: Arc::new(AtomicBool::new(true)),
             cancelled: Arc::new(AtomicBool::new(false)),
             reply,
+            timing: None,
         })
         .await
         .unwrap();
@@ -566,7 +770,7 @@ fn completion_invalidates_stream_before_join_set_is_polled() {
     status.established.store(true, Ordering::Release);
     assert_eq!(stream.check_deadline(100), Some(4000));
     assert_eq!(stream.check_deadline(4000), None);
-    drop(ForwardingCompletion(status));
+    drop(ForwardingCompletion(status, Timing::begin(0, false)));
     assert_eq!(stream.check_deadline(100), None);
 }
 
@@ -588,6 +792,8 @@ async fn check_exchange_correlates_receipts_and_rejects_second_pending_session()
         .unwrap()
         .unwrap();
     assert_eq!(check.request, request);
+    let queued_timing = check.timing.expect("clock available at verified enqueue");
+    assert!(queued_timing.started >= request.caller_started_boot_ms);
     let mut second = request.clone();
     second.nonce = [12; 32];
     route_io::send(&mut companion, &control::encode(&second).unwrap())

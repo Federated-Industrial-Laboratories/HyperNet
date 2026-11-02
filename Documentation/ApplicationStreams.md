@@ -157,6 +157,33 @@ With at most C active sessions, each continuously due session receives a renewal
 turn within 8*C work dispatches. These are dispatch bounds, not latency promises:
 each authority operation still has its original deadline and recovery contract.
 
+Bounded process-local timing separates authority-check queue delay from work in
+the endpoint actor. The first 256 verified enqueues retain one numeric sample
+through enqueue, dequeue, any endpoint/session preparation, the fresh read and
+the final disposition. Early expired and inactive results also retain their
+outcome. Elapsed time is measured from enqueue; the original caller start and
+deadline are recorded separately. The five actor operation classes (incoming
+permission, handshake permission, stream admission, stream permit and cleanup)
+each record at most 64 start/end pairs with their original deadline. Stream
+admission includes exact recovery, inspection and admission; its elapsed time
+does not identify the cost of an individual authority exchange. Endpoint renewal
+keeps its existing independent samples and records its call deadline.
+
+Admission records can reference the existing local session sample, which also
+marks application acceptance and forwarding completion. These numbers do not
+identify a connection in another process. There are at most 2304 added timing
+records per process, each below 384 bytes; together with deadline fields on the
+existing renewal records, added output stays below 1 MiB. Counters never reset
+on reconnect. No account/session identifiers, payloads or arbitrary error text
+are recorded. Diagnostic clock or output failures do not change authority
+results. One writer thread handles stderr outside the actor. Producers use a
+non-waiting send to a 32-record queue; each record is at most 512 bytes (16 KiB
+of queued record bytes, plus one writer-held record). Oversize records, full or
+closed queues and writer startup failures drop diagnostics. Timestamps are
+captured before enqueueing. A stalled sink can therefore lose samples or leave
+partial timings; diagnostics are not a complete audit trail. Timing does not
+extend deadlines or certify throughput or availability.
+
 One completed stream can wait for measured renewal and action headroom. Its local
 gate closes immediately. The single held cleanup record counts against relay
 attachment replenishment. Public listeners retain their existing queued/admitted

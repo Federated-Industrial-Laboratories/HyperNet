@@ -6,15 +6,59 @@ use crate::authority_proof::VersionRef;
 use std::sync::atomic::AtomicBool;
 #[path = "ApplicationStreamChecks.rs"]
 mod checks;
+#[derive(Clone, Copy, Debug)]
+enum Activity {
+    IncomingPermission,
+    HandshakePermission,
+    StreamAdmission,
+    StreamPermit,
+    Cleanup,
+}
+static ACTIVITY_SAMPLES: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+fn observed<T>(
+    activity: Activity,
+    deadline: u64,
+    session: Option<Timing>,
+    action: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let timing = crate::authority_challenge::boot_time_ms()
+        .ok()
+        .map(|now| Timing::counted(now, &ACTIVITY_SAMPLES[activity as usize], 64));
+    let session_sample = session.and_then(|s| s.sample);
+    if let Some(Timing {
+        sample: Some(sample),
+        started,
+    }) = timing
+    {
+        diagnostic(format_args!(
+            "HyperNet application actor: operation={activity:?} sample={sample} sessionSample={session_sample:?} stage=Start deadlineBootMs={deadline} bootMs={started}\n"
+        ));
+    }
+    let result = action();
+    if let Some(Timing {
+        sample: Some(sample),
+        started,
+    }) = timing
+        && let Ok(now) = crate::authority_challenge::boot_time_ms()
+    {
+        diagnostic(format_args!(
+            "HyperNet application actor: operation={activity:?} sample={sample} sessionSample={session_sample:?} stage=Complete deadlineBootMs={deadline} elapsedMs={} reason={:?} bootMs={now}\n",
+            now.saturating_sub(started),
+            result.as_ref().err().map(failure_code)
+        ));
+    }
+    result
+}
 struct Forwarding {
     deadline: u64,
     established: AtomicBool,
     finished: AtomicBool,
 }
-struct ForwardingCompletion(Arc<Forwarding>);
+struct ForwardingCompletion(Arc<Forwarding>, Timing);
 impl Drop for ForwardingCompletion {
     fn drop(&mut self) {
         self.0.finished.store(true, Ordering::Release);
+        self.1.mark(Phase::ApplicationForwardComplete);
     }
 }
 struct OpenedStream {
@@ -106,8 +150,10 @@ impl PendingClose {
             || crate::authority_challenge::boot_time_ms().unwrap_or(u64::MAX),
             diagnostics,
             |reference, proof_digest, deadline| {
-                client.before(deadline, |client| {
-                    client.stream_close(reference, proof_digest)
+                observed(Activity::Cleanup, deadline, None, || {
+                    client.before(deadline, |client| {
+                        client.stream_close(reference, proof_digest)
+                    })
                 })
             },
         )
@@ -130,11 +176,11 @@ impl PendingClose {
         let expired = expired || finished >= self.deadline;
         if *diagnostics < 16 {
             *diagnostics += 1;
-            eprintln!(
-                "HyperNet application stream cleanup: sample={} category={}",
+            diagnostic(format_args!(
+                "HyperNet application stream cleanup: sample={} category={}\n",
                 diagnostics,
                 if expired { "Expired" } else { "Failed" }
-            );
+            ));
         }
         // Unknown effects stay in the requester's exact recovery slot. This one
         // held retirement retains its target and first deadline between attempts.
@@ -349,7 +395,7 @@ async fn serve(
     forwarding: Arc<Forwarding>,
 ) -> Result<()> {
     let deadline = forwarding.deadline;
-    let _completion = ForwardingCompletion(forwarding.clone());
+    let _completion = ForwardingCompletion(forwarding.clone(), opened.session.timing);
     let session = &mut opened.session;
     let binding = &application.binding;
     let local = tokio::select! {
@@ -384,6 +430,7 @@ async fn serve(
     )
     .await?;
     forwarding.established.store(true, Ordering::Release);
+    session.mark(Phase::ApplicationAccepted);
     let limits = Limits {
         bytes: session.bytes.min(opened.proof.limits.bytes),
         duration_ms: crate::authority_local_transport::remaining(deadline)?,
@@ -531,7 +578,7 @@ pub(super) async fn endpoint(
                 s.renewal_turn=schedule.renewed()?;
                 if now>=s.forwarding.deadline {s.gate.close();s.retry_after=u64::MAX;continue;}
                 let deadline=s.forwarding.deadline.min(now.saturating_add(own.limits.idle_ms));
-                match clock_checked(client.before(deadline,|client|client.stream_permit(&s.reference)))? {
+                match clock_checked(observed(Activity::StreamPermit,deadline,None,||client.before(deadline,|client|client.stream_permit(&s.reference))))? {
                     Ok(expiry)=>{s.gate.renew(expiry)?;s.accepted_at=crate::authority_challenge::boot_time_ms()?;s.retry_after=0;},
                     Err(error)=>{if error.is::<ReadRetry>() {s.retry_after=now.saturating_add(READ_RETRY_MS);} else {s.gate.close();s.retry_after=u64::MAX;}},
                 }
@@ -549,8 +596,8 @@ pub(super) async fn endpoint(
                 if let Ok(Ok(opened))=result {
                     let id=opened.proof.id()?;
                     if live.contains_key(&id) {continue;}
-                    permission.current(client,opened.session.deadline)?;
-                    let admitted=clock_checked(client.before(opened.session.deadline,|client|client.stream_admit(opened.proof.clone())))?;
+                    observed(Activity::HandshakePermission,opened.session.deadline,Some(opened.session.timing),||permission.current(client,opened.session.deadline))?;
+                    let admitted=clock_checked(observed(Activity::StreamAdmission,opened.session.deadline,Some(opened.session.timing),||client.before(opened.session.deadline,|client|client.stream_admit(opened.proof.clone()))))?;
                     if let Ok(reference)=admitted {
                         active.check(guard)?;
                         let now=crate::authority_challenge::boot_time_ms()?;
@@ -566,12 +613,12 @@ pub(super) async fn endpoint(
             Event::Public(Queued {mut request,slot,deadline,started,..})=>{
                 if crate::authority_local_transport::remaining(deadline).is_err(){continue;}
                 request.deadline=request.deadline.min(started.saturating_add(own.limits.duration_ms));request.slot=Some(slot);
-                permission.current(client,deadline)?;active.check(guard)?;
+                observed(Activity::IncomingPermission,deadline,Some(request.timing),||permission.current(client,deadline))?;active.check(guard)?;
                 handshakes.spawn(hello(request,application.clone(),ready.clone(),permission.gate.clone()));
             },
             Event::Incoming(result)=>{
                 if let Ok(Ok(session))=result {
-                    permission.current(client,session.deadline)?;active.check(guard)?;
+                    observed(Activity::IncomingPermission,session.deadline,Some(session.timing),||permission.current(client,session.deadline))?;active.check(guard)?;
                     handshakes.spawn(hello(session,application.clone(),ready.clone(),permission.gate.clone()));
                 } else {retry_after=tokio::time::Instant::now()+Duration::from_millis(own.limits.idle_ms.min(1000));}
             },

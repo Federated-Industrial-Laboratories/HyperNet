@@ -7,12 +7,23 @@ use crate::authority_domains::streams::control::{
 use std::sync::atomic::AtomicBool;
 use tokio::sync::oneshot;
 
+static CHECK_SAMPLES: AtomicU64 = AtomicU64::new(0);
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Stage {
+    Enqueued,
+    Dequeued,
+    EndpointPreparation,
+    StreamPreparation,
+    FreshRead,
+    Outcome,
+}
 pub(super) struct Check {
     pub request: Request,
     pub ready: Arc<Ready>,
     pub connected: Arc<AtomicBool>,
     pub cancelled: Arc<AtomicBool>,
     pub reply: oneshot::Sender<Receipt>,
+    pub timing: Option<Timing>,
 }
 struct Connection(Arc<AtomicBool>);
 impl Drop for Connection {
@@ -158,14 +169,17 @@ pub(super) async fn exchange(
                     tokio::time::timeout(Duration::from_millis(1000), route_io::send(&mut writer, &control::sign(&receipt, binding, key)?)).await??;
                     continue;
                 }
-                let cancelled = Arc::new(AtomicBool::new(false));
-                let (reply, receiver) = oneshot::channel();
-                let check = Check { request: request.clone(), ready: ready.clone(), connected: connected.0.clone(), cancelled: cancelled.clone(), reply };
-                if queue.try_send(check).is_err() {
+                let Ok(slot) = queue.try_reserve() else {
                     let receipt = unavailable(request, privacy.clone(), Disposition::Unavailable);
                     tokio::time::timeout(Duration::from_millis(1000), route_io::send(&mut writer, &control::sign(&receipt, binding, key)?)).await??;
                     continue;
-                }
+                };
+                let cancelled = Arc::new(AtomicBool::new(false));
+                let (reply, receiver) = oneshot::channel();
+                let timing = crate::authority_challenge::boot_time_ms().ok().map(|now| Timing::counted(now, &CHECK_SAMPLES, 256));
+                let check = Check { request: request.clone(), ready: ready.clone(), connected: connected.0.clone(), cancelled: cancelled.clone(), reply, timing };
+                check.record(Stage::Enqueued, None, None);
+                slot.send(check);
                 pending.insert(request.nonce, (request.clone(), cancelled.clone()));
                 replies.spawn(async move { (request.nonce, cancelled, receiver.await) });
             },
@@ -193,6 +207,7 @@ pub(super) fn evaluate(
 ) -> Receipt {
     let request = &check.request;
     let privacy = check.ready.privacy.clone();
+    check.record(Stage::Dequeued, None, None);
     let result = (|| -> Result<Receipt> {
         let now = crate::authority_challenge::boot_time_ms()?;
         if now >= request.caller_deadline_boot_ms || request.caller_started_boot_ms > now {
@@ -227,6 +242,7 @@ pub(super) fn evaluate(
             client.own_renewal_budget_ms(),
             |deadline| {
                 check.current(guard, active)?;
+                check.record(Stage::EndpointPreparation, None, None);
                 client.before_check(deadline, request.caller_started_boot_ms, |client| {
                     client.own()
                 })?;
@@ -241,6 +257,7 @@ pub(super) fn evaluate(
             || !check.connected.load(Ordering::Acquire) || check.cancelled.load(Ordering::Acquire),
             |deadline| {
                 check.current(guard, active)?;
+                check.record(Stage::StreamPreparation, None, None);
                 let expiry =
                     client.before_check(deadline, request.caller_started_boot_ms, |client| {
                         client.stream_permit(&reference)
@@ -265,6 +282,7 @@ pub(super) fn evaluate(
                 .min(stream_deadline)
                 .min(permission.gate.expiry()?),
         );
+        check.record(Stage::FreshRead, None, None);
         let (authority, permitted, observed_deadline) = client.before(deadline, |client| {
             client.check_stream(&request.session, request.caller_started_boot_ms)
         })?;
@@ -305,19 +323,66 @@ pub(super) fn evaluate(
             privacy,
         })
     })();
-    result.unwrap_or_else(|error| {
-        // Existing bounded, metadata-only diagnostics retain the failure category.
-        Timing::begin(request.caller_started_boot_ms, true)
-            .failure(Phase::ApplicationCheckRefused, &error);
-        unavailable(
-            request.clone(),
-            check.ready.privacy.clone(),
-            Disposition::Unavailable,
-        )
-    })
+    check.complete(result)
 }
 
 impl Check {
+    fn record(
+        &self,
+        stage: Stage,
+        disposition: Option<&Disposition>,
+        failure: Option<(FailureCode, Option<u64>)>,
+    ) {
+        if let Some(timing) = self.timing
+            && timing.sample.is_some()
+            && let Ok(now) = crate::authority_challenge::boot_time_ms()
+        {
+            let mut line = DiagnosticLine::new();
+            self.record_at(&mut line, now, stage, disposition, failure);
+            diagnostic_line(line);
+        }
+    }
+    pub(super) fn record_at(
+        &self,
+        output: &mut impl std::fmt::Write,
+        now: u64,
+        stage: Stage,
+        disposition: Option<&Disposition>,
+        failure: Option<(FailureCode, Option<u64>)>,
+    ) {
+        if let Some(timing) = self.timing
+            && let Some(sample) = timing.sample
+        {
+            let reason = failure.map(|f| f.0);
+            let fresh_read_code = failure.and_then(|f| f.1);
+            let _ = writeln!(
+                output,
+                "HyperNet application check: sample={sample} stage={stage:?} elapsedMs={} callerStartedBootMs={} deadlineBootMs={} disposition={disposition:?} reason={reason:?} freshReadCode={fresh_read_code:?} bootMs={now}",
+                now.saturating_sub(timing.started),
+                self.request.caller_started_boot_ms,
+                self.request.caller_deadline_boot_ms
+            );
+        }
+    }
+    pub(super) fn complete(&self, result: Result<Receipt>) -> Receipt {
+        let failure = result.as_ref().err().map(|error| {
+            (
+                failure_code(error),
+                error
+                    .downcast_ref::<crate::authority_local_transport::FreshReadUnavailable>()
+                    .map(|e| e.code),
+            )
+        });
+        let receipt = result.unwrap_or_else(|_| {
+            unavailable(
+                self.request.clone(),
+                self.ready.privacy.clone(),
+                Disposition::Unavailable,
+            )
+        });
+        self.record(Stage::Outcome, Some(&receipt.disposition), failure);
+        receipt
+    }
     fn current(&self, guard: &Guard, active: &Active) -> Result<()> {
         crate::authority_local_transport::remaining(self.request.caller_deadline_boot_ms)?;
         self.request.matches_ready(&self.ready)?;
