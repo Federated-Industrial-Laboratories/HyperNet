@@ -2,6 +2,52 @@
 
 [Documentation](ReadMe.md) | [Project](../ReadMe.md)
 
+## Linux 0.10.2 release candidate
+
+Version 0.10.2 adds optional acknowledgement of consumed fresh reads and improves
+application-stream cleanup scheduling. This source candidate is not a published
+package. Package signing, installation qualification and native load results must
+identify their exact artifacts separately from earlier release evidence.
+
+### Changes and compatibility
+
+- A signed acknowledgement releases only the exact completed read after its
+  authorised recipient consumes the verified result. It binds the original scope,
+  read, statement, result and deadline. Pending reads and lost responses retain
+  their original expiry and recovery. The 32-read and 768 KiB limits remain.
+- A private same-inode socket alias and optional final-service TLS negotiation
+  identify cleanup support. Legacy peers retain their existing read/poll behavior;
+  missing support skips cleanup without opening a replacement session. Cleanup
+  cannot grant authority, renew a deadline or change a consumed result.
+- Application endpoints renew their own and live-stream permission before closing
+  completed streams when measured headroom is insufficient. Local close still
+  invalidates the stream immediately. One held completion remains within the
+  existing capacity accounting; unknown authoritative Close outcomes retain exact
+  requester recovery.
+- Bounded capacity diagnostics report retained count and bytes, incoming charge,
+  earliest expiry and fixed ceilings without payloads or requester identities.
+
+Use Core 0.10.2 and Suite 0.10.1 for cleanup across Core and native Suite read
+consumers. Earlier payload and authority-check peers remain compatible, with
+completed reads retained until expiry when optional cleanup is unavailable.
+No grant, state-contract or one-use authority migration is introduced.
+
+### Upgrade and qualification scope
+
+The target remains native Ubuntu 24.04 x86_64 with GNU libc 2.39. Source-bound
+component checks cover actual quorum collection removal after Suite consumption
+over admitted TLS, legacy session reuse, original deadlines and renewal/close
+scheduling. They do not establish application throughput, concurrent-user capacity
+or a new platform. Earlier native results retain their original source and binary
+identities; a version change does not relabel them as candidate qualification.
+
+Follow stopped service replacement and renew local artifact consent before
+activation. Preserve complete authority state, requester journals, identities,
+package trust and retained floors. The package contract remains
+`HyperNet080Authority2`. Use a separately authenticated, signed target for the
+exact candidate package; do not reset existing trust or assume a target sequence
+from the version number. See [upgrade and recovery](UpgradeRecovery.md).
+
 ## Linux 0.10.1 authority readiness correction
 
 Version 0.10.1 prepares endpoint and selected-stream permission before a queued

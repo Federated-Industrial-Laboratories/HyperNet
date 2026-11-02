@@ -35,6 +35,10 @@ clients. Reading a Page does not require running a host or authority replica.
 > Read the [release notes](Documentation/ReleaseNotes.md) and
 > [deployment limits](Documentation/Qualification.md) before choosing a deployment.
 
+The 0.10.2 source candidate adds optional consumed-read cleanup and prioritises
+current application permission before completed-stream cleanup. See the
+[release candidate notes](Documentation/ReleaseNotes.md) for compatibility and scope.
+
 Version 0.10.1 corrects permission readiness for short application checks without
 extending their original deadlines or reusing authority evidence. It remains
 compatible with Suite 0.10.0.
@@ -147,8 +151,8 @@ for permissions and recovery.
 
 ## Documentation and development
 
-The [release notes](Documentation/ReleaseNotes.md) describe the 0.10.1 scope and
-known limits. The [documentation index](Documentation/ReadMe.md) provides reading routes for
+The [release notes](Documentation/ReleaseNotes.md) describe the 0.10.2 candidate,
+earlier release scope and known limits. The [documentation index](Documentation/ReadMe.md) provides reading routes for
 operators, authors and application developers, plus the complete reference library.
 [Source layout](Documentation/SourceLayout.md) maps implementation modules.
 [Qualification](Documentation/Qualification.md) describes focused checks and the
