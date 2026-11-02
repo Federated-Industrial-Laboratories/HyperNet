@@ -24,6 +24,15 @@ identify their exact artifacts separately from earlier release evidence.
   invalidates the stream immediately. One held completion remains within the
   existing capacity accounting; unknown authoritative Close outcomes retain exact
   requester recovery.
+- Ready application work classes take finite turns, and due streams renew in
+  service order. Maintenance cannot indefinitely overtake a queued check or
+  completed handshake. These dispatch bounds do not promise a wall-clock latency.
+- Endpoint retirement survives a competing caller Close. An endpoint-only
+  `StreamRetirementContext` read obtains the current session, service and route
+  records without granting forwarding permission. Retirement matches the original
+  proof generation and signed-proof digest; a reused slot is left unchanged.
+  The one held cleanup preserves its original deadline and uses bounded backoff.
+  Any unknown signed Close outcome must resolve before another is prepared.
 - Bounded capacity diagnostics report retained count and bytes, incoming charge,
   earliest expiry and fixed ceilings without payloads or requester identities.
 
@@ -31,6 +40,9 @@ Use Core 0.10.2 and Suite 0.10.1 for cleanup across Core and native Suite read
 consumers. Earlier payload and authority-check peers remain compatible, with
 completed reads retained until expiry when optional cleanup is unavailable.
 No grant, state-contract or one-use authority migration is introduced.
+The additive retirement-context query requires supporting authority replicas.
+Upgrade the committee before relying on this recovery; an older committee refuses
+the query without an ordered-mutation fallback or an extended cleanup deadline.
 
 ### Upgrade and qualification scope
 
