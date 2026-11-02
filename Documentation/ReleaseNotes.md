@@ -2,6 +2,22 @@
 
 [Documentation](ReadMe.md) | [Project](../ReadMe.md)
 
+## Linux 0.10.1 authority readiness correction
+
+Version 0.10.1 prepares endpoint and selected-stream permission before a queued
+application check when the current certified gate lacks enough headroom. Each
+gate receives at most one bounded preparation. Readiness reads retain the same
+signed challenge ceiling as the final check: the original caller start plus five
+seconds. A short caller wait no longer truncates that challenge below the
+authority's conservative evaluation interval.
+
+The original caller wait, route lifetime, local consent, cancellation and newly
+certified permission expiry still bound acceptance. No authority result is
+reused, and read capacity is unchanged. Core 0.10.1 remains compatible with Suite
+0.10.0; no wire, grant or retained-state migration is required for this patch.
+Native qualification and release artifact checks remain pending. This entry does
+not assert a completed release or latency guarantee.
+
 ## Linux 0.10.0 application context and authority checks
 
 Version 0.10.0 adds explicit current-authority observations and transport context

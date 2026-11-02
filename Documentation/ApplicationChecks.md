@@ -80,6 +80,12 @@ check arrived before the periodic renewal timer became due. Preparation rechecks
 the exact live session, cancellation, control identity and current clock. It uses
 the original caller and route deadlines; a fresh certified expiry can still be
 shorter and remains binding. There is no renewal loop or added read capacity.
+Readiness reads use the same challenge ceiling as the final check: the original
+caller start plus five seconds. They do not restart that window when renewal
+begins. A shorter caller wait still bounds transport, persistence and local use;
+it does not shorten the signed challenge below the authority's existing
+conservative uncertainty interval. Route, consent and fresh certified gate
+expiries remain binding, and cancellation still prevents a completed check.
 
 An unresolved ordinary request or fence remaining after readiness maintenance
 makes the fresh read unavailable. The read never uses a readiness result as its

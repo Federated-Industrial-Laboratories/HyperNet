@@ -227,7 +227,9 @@ pub(super) fn evaluate(
             client.own_renewal_budget_ms(),
             |deadline| {
                 check.current(guard, active)?;
-                client.before(deadline, |client| client.own())?;
+                client.before_check(deadline, request.caller_started_boot_ms, |client| {
+                    client.own()
+                })?;
                 check.current(guard, active)?;
                 client.effect_deadline()
             },
@@ -239,7 +241,10 @@ pub(super) fn evaluate(
             || !check.connected.load(Ordering::Acquire) || check.cancelled.load(Ordering::Acquire),
             |deadline| {
                 check.current(guard, active)?;
-                let expiry = client.before(deadline, |client| client.stream_permit(&reference))?;
+                let expiry =
+                    client.before_check(deadline, request.caller_started_boot_ms, |client| {
+                        client.stream_permit(&reference)
+                    })?;
                 check.current(guard, active)?;
                 Ok(expiry)
             },
