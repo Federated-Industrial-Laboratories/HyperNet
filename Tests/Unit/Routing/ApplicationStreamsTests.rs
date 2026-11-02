@@ -138,6 +138,302 @@ fn proof(
     p.envelope = wire::sign_envelope(&p.payload(N, I).unwrap(), &deployment::key(5)).unwrap();
     streams::Proof::parse(&p.envelope, N, I).unwrap()
 }
+fn retirement_context(
+    f: &mut Fixture,
+    original: &VersionRef,
+    at: u64,
+) -> crate::authority_domains::result::Candidate {
+    use crate::authority_read::{self as read, Query, Request, Statement};
+    let (_, mut operation, decision) = execute(
+        f,
+        StreamCommand::RetirementContext {
+            session: original.clone(),
+        },
+        161,
+        None,
+        at,
+        false,
+    );
+    assert_eq!(decision.code, 0);
+    assert!(decision.state.is_none());
+    assert_eq!(
+        decision.versions.iter().map(|r| r.kind).collect::<Vec<_>>(),
+        [165, 172, 173]
+    );
+    operation.snapshot = snapshot(&deployment::snapshot(&[])).unwrap();
+    let bootstrap = crate::trust_bootstrap::check(&f.bootstrap, true, 5000).unwrap();
+    let signed = Request::sign(
+        bootstrap.descriptor().scope(),
+        &deployment::key(161),
+        public(161),
+        [77; 32],
+        operation.snapshot.height,
+        Query::Domain(operation),
+    )
+    .unwrap();
+    let request = Request::from_signed(&signed).unwrap();
+    let bytes = wire::encode(&a(vec![
+        V::Uint(24),
+        V::Uint(1),
+        V::Text("AuthorityDomain".into()),
+        V::Uint(0),
+        V::Uint(0),
+        b(&wire::encode(&decision.value).unwrap()),
+    ]))
+    .unwrap();
+    let result = crate::authority_proof::OperationResult::parse(&bytes).unwrap();
+    let statement = Statement {
+        scope: request.scope.clone(),
+        request: request.digest,
+        challenge: [78; 32],
+        requester: public(161),
+        recipient: public(161),
+        height: request.minimum_height,
+        node: [79; 32],
+        state: [80; 32],
+        evaluated_at_ms: at,
+        expires_at_ms: at + 5000,
+        result: wire::digest(&bytes),
+    };
+    // Exercise the same independent typed-context consumer as RouteAuthority.
+    read::verify_domain(
+        &bootstrap,
+        &f.state,
+        &f.records,
+        &request,
+        &result,
+        &statement,
+        &[],
+    )
+    .unwrap()
+}
+
+#[test]
+fn caller_close_race_refreshes_only_the_same_proof_before_endpoint_retirement() {
+    let (mut f, registration) = setup();
+    let p = proof(&f, &registration, 1, 30);
+    let digest = wire::digest(&p.envelope);
+    execute(
+        &mut f,
+        StreamCommand::Admit { proof: p.clone() },
+        161,
+        None,
+        5000,
+        true,
+    );
+    let original = f
+        .state
+        .record(173, p.id().unwrap())
+        .unwrap()
+        .reference
+        .clone();
+    let (intent, pending, _) = execute(
+        &mut f,
+        StreamCommand::Close {
+            session: original.clone(),
+        },
+        161,
+        None,
+        5000,
+        false,
+    );
+    execute(
+        &mut f,
+        StreamCommand::Close {
+            session: original.clone(),
+        },
+        5,
+        None,
+        5000,
+        true,
+    );
+    assert_eq!(
+        pending
+            .prepare(
+                &f.state,
+                &f.records,
+                &f.reserved,
+                &intent,
+                5000,
+                false,
+                true
+            )
+            .unwrap()
+            .code,
+        3
+    );
+    let cancelled = f.state.record(173, original.id).unwrap().reference.clone();
+    let next = proof(&f, &registration, cancelled.generation + 1, 40);
+    assert_eq!(
+        execute(
+            &mut f,
+            StreamCommand::Admit { proof: next },
+            161,
+            None,
+            5000,
+            false
+        )
+        .2
+        .code,
+        3
+    );
+
+    let context = retirement_context(&mut f, &original, 5000);
+    let target = crate::route_authority::retirement_target(&context.state, &original, digest)
+        .unwrap()
+        .unwrap();
+    assert_eq!(target, cancelled);
+    assert!(
+        crate::route_authority::retirement_target(&context.state, &original, [99; 32])
+            .unwrap()
+            .is_none()
+    );
+    execute(
+        &mut f,
+        StreamCommand::Close { session: target },
+        161,
+        None,
+        5000,
+        true,
+    );
+    let context = retirement_context(&mut f, &original, 5000);
+    assert!(
+        crate::route_authority::retirement_target(&context.state, &original, digest)
+            .unwrap()
+            .is_none()
+    );
+    let generation = f
+        .state
+        .record(173, original.id)
+        .unwrap()
+        .reference
+        .generation
+        + 1;
+    let next = proof(&f, &registration, generation, 41);
+    execute(
+        &mut f,
+        StreamCommand::Admit { proof: next },
+        161,
+        None,
+        5000,
+        true,
+    );
+    let context = retirement_context(&mut f, &original, 5000);
+    assert!(
+        crate::route_authority::retirement_target(&context.state, &original, digest)
+            .unwrap()
+            .is_none(),
+        "old cleanup cannot close a reused slot"
+    );
+}
+
+#[test]
+fn retirement_context_is_endpoint_only_and_survives_revocation_and_expiry() {
+    for invalidation in ["withdrawn", "revoked", "expired"] {
+        let (mut f, registration) = setup();
+        let p = proof(&f, &registration, 1, 50);
+        execute(
+            &mut f,
+            StreamCommand::Admit { proof: p.clone() },
+            161,
+            None,
+            5000,
+            true,
+        );
+        let original = f
+            .state
+            .record(173, p.id().unwrap())
+            .unwrap()
+            .reference
+            .clone();
+        execute(
+            &mut f,
+            StreamCommand::Close {
+                session: original.clone(),
+            },
+            5,
+            None,
+            5000,
+            true,
+        );
+        let at = match invalidation {
+            "expired" => p.expires + 1,
+            "revoked" => {
+                f.records.push(
+                    wire::encode(&a(vec![
+                        V::Uint(126),
+                        V::Uint(1),
+                        b(&N),
+                        b(&I),
+                        V::Uint(1),
+                        V::Null,
+                        reference(&p.grant),
+                        b(&public(5)),
+                        deployment::snapshot(&[]),
+                    ]))
+                    .unwrap(),
+                );
+                members::sort_records(&mut f.records).unwrap();
+                Governance::parse(N, I, &f.records).unwrap();
+                5000
+            }
+            _ => {
+                f.withdraw_deployment();
+                5000
+            }
+        };
+        assert_eq!(
+            execute(
+                &mut f,
+                StreamCommand::Inspect { proof: p.clone() },
+                161,
+                None,
+                at,
+                false
+            )
+            .2
+            .code,
+            3
+        );
+        for signer in [5, 160] {
+            assert_eq!(
+                execute(
+                    &mut f,
+                    StreamCommand::RetirementContext {
+                        session: original.clone()
+                    },
+                    signer,
+                    None,
+                    at,
+                    false
+                )
+                .2
+                .code,
+                3
+            );
+        }
+        let context = retirement_context(&mut f, &original, at);
+        let target = crate::route_authority::retirement_target(
+            &context.state,
+            &original,
+            wire::digest(&p.envelope),
+        )
+        .unwrap()
+        .unwrap();
+        execute(
+            &mut f,
+            StreamCommand::Close { session: target },
+            161,
+            None,
+            at,
+            true,
+        );
+        let current =
+            streams::Session::parse(&f.state.record(173, original.id).unwrap().payload, N, I)
+                .unwrap();
+        assert!(current.closed && current.retired);
+    }
+}
 #[test]
 fn application_stream_principal_retirement_and_restart_are_independent_of_relay_access() {
     let (mut f, registration) = setup();

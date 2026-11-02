@@ -11,6 +11,7 @@ fn prepared_stream(expiry: u64, deadline: u64) -> LiveStream {
     let (_, _, _, request) = fixture();
     LiveStream {
         reference: request.session,
+        proof_digest: [91; 32],
         gate: route_io::Gate::new(expiry),
         accepted_at: crate::authority_challenge::boot_time_ms().unwrap(),
         retry_after: 0,
@@ -287,6 +288,74 @@ fn held_completion_closes_local_gate_and_keeps_its_relay_attachment_slot() {
 }
 
 #[test]
+fn failed_retirement_retains_one_target_and_original_deadline_across_backoff() {
+    let now = crate::authority_challenge::boot_time_ms().unwrap();
+    let mut close =
+        PendingClose::completed(prepared_stream(now + 5000, now + 10_000), now, 4000, 0, 0);
+    let original = close.reference.clone();
+    let proof = close.proof_digest;
+    let deadline = close.deadline;
+    let clock = std::cell::Cell::new(now);
+    let mut diagnostics = 0;
+    assert!(!close.attempt_with(
+        || clock.get(),
+        &mut diagnostics,
+        |reference, digest, end| {
+            assert_eq!((reference, digest, end), (&original, proof, deadline));
+            clock.set(now + 250);
+            anyhow::bail!("original close outcome remains unknown")
+        }
+    ));
+    assert_eq!(close.retry_after, now + 250 + READ_RETRY_MS);
+    assert_eq!(occupied(7, 8, &BTreeMap::new(), Some(&close)), 16);
+    assert!(!close.attempt_with(
+        || now + 500,
+        &mut diagnostics,
+        |_, _, _| panic!("backoff dispatched cleanup")
+    ));
+    assert!(!close.attempt_with(
+        || now + 1500,
+        &mut diagnostics,
+        |reference, digest, end| {
+            assert_eq!((reference, digest, end), (&original, proof, deadline));
+            anyhow::bail!("exact outcome still pending")
+        }
+    ));
+    assert_eq!(close.deadline, deadline);
+    assert!(close.attempt_with(
+        || deadline,
+        &mut diagnostics,
+        |_, _, _| panic!("expired cleanup obtained another attempt")
+    ));
+    assert_eq!(diagnostics, 3);
+}
+
+#[test]
+fn recovered_retirement_completes_without_replacing_its_target_or_deadline() {
+    let now = crate::authority_challenge::boot_time_ms().unwrap();
+    let mut close =
+        PendingClose::completed(prepared_stream(now + 5000, now + 10_000), now, 4000, 0, 0);
+    let original = close.reference.clone();
+    let deadline = close.deadline;
+    let mut diagnostics = 0;
+    assert!(!close.attempt_with(
+        || now,
+        &mut diagnostics,
+        |_, _, _| anyhow::bail!("refusal requires exact status")
+    ));
+    assert!(close.attempt_with(
+        || now + READ_RETRY_MS,
+        &mut diagnostics,
+        |reference, _, end| {
+            assert_eq!(reference, &original);
+            assert_eq!(end, deadline);
+            Ok(())
+        }
+    ));
+    assert_eq!(diagnostics, 1);
+}
+
+#[test]
 fn queued_check_prepares_both_gates_before_the_normal_renewal_timer() {
     let now = crate::authority_challenge::boot_time_ms().unwrap();
     let caller_end = now + 2000;
@@ -486,6 +555,7 @@ fn completion_invalidates_stream_before_join_set_is_polled() {
     });
     let stream = LiveStream {
         reference: request.session,
+        proof_digest: [91; 32],
         gate: route_io::Gate::new(4000),
         accepted_at: 100,
         retry_after: 0,

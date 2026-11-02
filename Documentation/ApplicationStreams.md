@@ -169,9 +169,27 @@ sooner. Cleanup retains its first deadline; it does not extend a session or
 certified permission. Gates still stop traffic at certified expiry, and expired
 or disconnected checks cannot obtain fresh authority. An expired or failed
 cleanup emits a bounded category diagnostic.
-An uncertain close remains the exact pending requester operation. It must resolve
-under the existing recovery rules before later authority work can proceed; this
-scheduling order cannot guarantee availability while that mutation is unresolved.
+After a failed attempt, the one held retirement waits one second before another
+turn, measured from attempt completion. It keeps its original deadline and target;
+expiry releases only this local cleanup record. An uncertain signed close remains
+in the durable requester's exact recovery slot. Its original outcome must resolve
+before a new retirement context or close can be prepared. This scheduling order
+cannot guarantee availability while that mutation is unresolved.
+
+The caller can close a stream before the endpoint retires it, advancing its record
+generation. The endpoint obtains `StreamRetirementContext` under its intrinsic
+ownership to learn the current session, service and route records. This disclosure
+does not require a live connection grant and supplies no forwarding permission.
+The endpoint closes only the same original proof generation and signed-proof
+digest; a retired or reused slot is left unchanged. A competing close can refuse
+the exact mutation again, so the original-outcome and bounded-retry rules still
+apply. Existing current-permission and exact-close checks remain mandatory.
+
+This additive read requires an authority committee that supports
+`StreamRetirementContext`. An older committee refuses the unsupported query;
+the endpoint does not substitute an ordinary mutation or another authority path.
+The slot then remains unavailable until its existing retirement or expiry rules
+permit reuse. Upgrade the committee before relying on this retirement recovery.
 
 Current session state is kind 173; service state is kind 172. Closing and
 retirement replace the bounded current slot record. No authority mutation is

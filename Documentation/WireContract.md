@@ -492,9 +492,10 @@ deadline. It does not acquire the active signer's exclusive journal lock.
 
 ## Fresh quorum reads
 
-Four observational queries use a separate protocol: `AuthorityPolicyContext`,
-`PageView`, `RouteLookup` and `RouteVoucherContext`. Admission, host content effects,
-stream controls and all mutations still require their ordered request and result.
+Observational queries use a separate protocol: `AuthorityPolicyContext`,
+`PageView`, `RouteLookup`, `RouteVoucherContext`, `StreamLookup`, `StreamInspect`,
+`StreamPermit` and `StreamRetirementContext`. Admission, host content effects,
+stream mutations and all other mutations still require their ordered request and result.
 The whitelist matches complete parsed variants. A non-mutating flag does not
 admit another operation to this protocol.
 
@@ -536,6 +537,16 @@ transaction leaves ordinary and fence trackers unchanged. Restart can retain the
 certified floor and historical provenance, but cannot revive a live challenge.
 A Page view does not replace the host's ordered authorization or exact receipt.
 A route context does not consume a Permit or extend an admitted channel's limits.
+
+`StreamRetirementContext` carries `["StreamRetirementContext",SessionVersionRef]`
+as its domain command, with no grant. Only the endpoint key from the current
+session's service-route binding may read it. Its bounded closure contains exactly
+the current kind173 session, kind172 service and kind165 route. It remains a
+metadata disclosure after grant revocation or proof expiry and grants no current
+forwarding permission. The consumer must preserve the original proof generation
+and signed-proof digest before preparing an exact current-reference `StreamClose`.
+It cannot replace an unknown ordinary outcome. This additive command requires
+supporting authority replicas; older replicas refuse it without a mutation fallback.
 
 Fresh query output sidecars are empty; page bodies remain on their separate host
 exchange. Collection retains at most32active reads and786432aggregate bytes.

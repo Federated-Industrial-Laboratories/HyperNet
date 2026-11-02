@@ -18,6 +18,7 @@ pub(crate) fn evaluate_domain(
     match &operation.command {
         domains::Command::Stream(
             domains::streams::Command::Permit { .. }
+            | domains::streams::Command::RetirementContext { .. }
             | domains::streams::Command::Lookup { .. }
             | domains::streams::Command::Inspect { .. },
         ) => domains::streams::evaluate_read(operation, state, records, reserved, requester, at),

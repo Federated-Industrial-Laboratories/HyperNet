@@ -23,6 +23,7 @@ struct OpenedStream {
 }
 struct LiveStream {
     reference: VersionRef,
+    proof_digest: Digest,
     gate: route_io::Gate,
     accepted_at: u64,
     retry_after: u64,
@@ -76,7 +77,9 @@ impl Drop for LiveStream {
 }
 struct PendingClose {
     reference: VersionRef,
+    proof_digest: Digest,
     deadline: u64,
+    retry_after: u64,
     own_renewals: u64,
     renewal_turn: u64,
 }
@@ -91,21 +94,41 @@ impl PendingClose {
         stream.gate.close();
         Self {
             reference: stream.reference.clone(),
+            proof_digest: stream.proof_digest,
             deadline: now.saturating_add(idle_ms),
+            retry_after: now,
             own_renewals,
             renewal_turn,
         }
     }
-    fn finish(self, client: &mut Client<'_>, diagnostics: &mut u8) {
-        // A failed mutation remains in the requester's exact recovery slot.
-        // Deferral never creates another close deadline or substitutes its identity.
-        let expired =
-            crate::authority_challenge::boot_time_ms().is_ok_and(|now| now >= self.deadline);
-        if client
-            .before(self.deadline, |client| client.stream_close(&self.reference))
-            .is_err()
-            && *diagnostics < 16
-        {
+    fn attempt(&mut self, client: &mut Client<'_>, diagnostics: &mut u8) -> bool {
+        self.attempt_with(
+            || crate::authority_challenge::boot_time_ms().unwrap_or(u64::MAX),
+            diagnostics,
+            |reference, proof_digest, deadline| {
+                client.before(deadline, |client| {
+                    client.stream_close(reference, proof_digest)
+                })
+            },
+        )
+    }
+    fn attempt_with(
+        &mut self,
+        mut clock: impl FnMut() -> u64,
+        diagnostics: &mut u8,
+        close: impl FnOnce(&VersionRef, Digest, u64) -> Result<()>,
+    ) -> bool {
+        let now = clock();
+        if now < self.retry_after {
+            return false;
+        }
+        let expired = now >= self.deadline;
+        if !expired && close(&self.reference, self.proof_digest, self.deadline).is_ok() {
+            return true;
+        }
+        let finished = clock();
+        let expired = expired || finished >= self.deadline;
+        if *diagnostics < 16 {
             *diagnostics += 1;
             eprintln!(
                 "HyperNet application stream cleanup: sample={} category={}",
@@ -113,6 +136,10 @@ impl PendingClose {
                 if expired { "Expired" } else { "Failed" }
             );
         }
+        // Unknown effects stay in the requester's exact recovery slot. This one
+        // held retirement retains its target and first deadline between attempts.
+        self.retry_after = finished.saturating_add(READ_RETRY_MS).min(self.deadline);
+        expired
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -473,7 +500,7 @@ pub(super) async fn endpoint(
         let close_budget=closing.as_ref().filter(|close|now<close.deadline).map_or(0,|_|client.operation_budget_ms());
         let own_due=permission.refresh_due(now,client.own_renewal_budget_ms().saturating_add(close_budget))?;
         let stream_due=due_stream(&live,now,client.operation_budget_ms().saturating_add(close_budget),u64::MAX);
-        let close_work=closing.as_ref().map(|close|maintenance(now,&permission,&live,Some(close),client.own_renewal_budget_ms(),client.operation_budget_ms())).transpose()?;
+        let close_work=closing.as_ref().filter(|close|now>=close.retry_after).map(|close|maintenance(now,&permission,&live,Some(close),client.own_renewal_budget_ms(),client.operation_budget_ms())).transpose()?;
         let public=listener.is_some();
         let (listener_tasks,mut listener_requests)=listener.as_mut().map(|l|(&mut l.tasks,&mut l.requests)).unzip();
         let next=tokio::select! {
@@ -510,7 +537,7 @@ pub(super) async fn endpoint(
                 }
             },
             Event::Maintenance(Maintenance::Close)=>{
-                closing.take().expect("selected stream cleanup").finish(client,&mut cleanup_diagnostics);
+                if closing.as_mut().expect("selected stream cleanup").attempt(client,&mut cleanup_diagnostics) {closing=None;}
             },
             Event::Maintenance(Maintenance::Wait)=>unreachable!("held cleanup always has work"),
             Event::Forwarding(result)=>{
@@ -530,7 +557,7 @@ pub(super) async fn endpoint(
                         let deadline=opened.session.deadline.min(now.saturating_add(opened.proof.expires.saturating_sub(client.now()?))).min(now.saturating_add(opened.proof.limits.duration_ms));
                         let gate=route_io::Gate::with_signal(client.effect_deadline()?,demand.clone());
                         let status=Arc::new(Forwarding {deadline,established:AtomicBool::new(false),finished:AtomicBool::new(false)});
-                        live.insert(id,LiveStream {reference:reference.clone(),gate:gate.clone(),accepted_at:now,retry_after:0,renewal_turn:schedule.renewed()?,forwarding:status.clone()});
+                        live.insert(id,LiveStream {reference:reference.clone(),proof_digest:wire::digest(&opened.proof.envelope),gate:gate.clone(),accepted_at:now,retry_after:0,renewal_turn:schedule.renewed()?,forwarding:status.clone()});
                         let application=application.clone();let key=config.key.clone();let endpoint_gate=permission.gate.clone();
                         forwarding.spawn(async move {(id,serve(opened,reference,application,key,gate,endpoint_gate,status).await)});
                     }
@@ -571,14 +598,14 @@ pub(super) async fn endpoint(
     drain(&mut incoming).await;
     drain(&mut handshakes).await;
     drain(&mut forwarding).await;
-    if let Some(close) = closing {
-        close.finish(client, &mut cleanup_diagnostics);
+    if let Some(mut close) = closing {
+        close.attempt(client, &mut cleanup_diagnostics);
     }
     // Failed closure retains a spent slot until its original wall-clock expiry.
     for stream in live.values() {
         let _ = client.before(
             crate::authority_challenge::boot_time_ms()?.saturating_add(1000),
-            |client| client.stream_close(&stream.reference),
+            |client| client.stream_close(&stream.reference, stream.proof_digest),
         );
     }
     outcome

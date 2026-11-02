@@ -71,6 +71,18 @@ pub(crate) fn registered(
     );
     Ok(selected.profile)
 }
+pub(crate) fn retirement_target(
+    state: &domains::State,
+    original: &VersionRef,
+    proof_digest: Digest,
+) -> Result<Option<VersionRef>> {
+    let record = state.record(173, original.id)?;
+    let current = streams::Session::parse(&record.payload, state.network, state.incarnation)?;
+    Ok((!current.retired
+        && current.proof.generation == original.generation
+        && wire::digest(&current.proof.envelope) == proof_digest)
+        .then(|| record.reference.clone()))
+}
 pub struct Client<'a> {
     config: &'a Config,
     guard: &'a Guard,
@@ -181,6 +193,7 @@ impl<'a> Client<'a> {
                 streams::Command::Inspect { .. }
                     | streams::Command::Admit { .. }
                     | streams::Command::Permit { .. }
+                    | streams::Command::RetirementContext { .. }
                     | streams::Command::Close { .. }
             )
         ) {
@@ -424,7 +437,9 @@ impl<'a> Client<'a> {
                 DomainCommand::Route(
                     routes::Command::Lookup { .. } | routes::Command::VoucherContext { .. }
                 ) | DomainCommand::Stream(
-                    streams::Command::Inspect { .. } | streams::Command::Permit { .. }
+                    streams::Command::Inspect { .. }
+                        | streams::Command::Permit { .. }
+                        | streams::Command::RetirementContext { .. }
                 )
             )
         {
@@ -939,18 +954,15 @@ impl<'a> Client<'a> {
         };
         Ok((authority, permitted, deadline))
     }
-    pub fn stream_close(&mut self, session: &VersionRef) -> Result<()> {
+    pub fn stream_close(&mut self, session: &VersionRef, proof_digest: Digest) -> Result<()> {
         self.recover()?;
-        let r = self.disk.context().0.record(173, session.id)?.clone();
-        let current = streams::Session::parse(
-            &r.payload,
-            self.guard.manifest.network,
-            self.guard.manifest.incarnation,
-        )?;
-        if !current.retired && current.proof.generation == session.generation {
-            self.domain_action(DomainCommand::Stream(streams::Command::Close {
-                session: r.reference,
-            }))?;
+        // A caller can close this slot first. Resolve an unknown original close
+        // before reading its current generation or preparing another exact close.
+        self.domain_action(DomainCommand::Stream(streams::Command::RetirementContext {
+            session: session.clone(),
+        }))?;
+        if let Some(session) = retirement_target(self.disk.context().0, session, proof_digest)? {
+            self.domain_action(DomainCommand::Stream(streams::Command::Close { session }))?;
         }
         Ok(())
     }

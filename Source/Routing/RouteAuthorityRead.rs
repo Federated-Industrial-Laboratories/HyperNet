@@ -72,7 +72,9 @@ impl Client<'_> {
                 DomainCommand::Route(
                     routes::Command::Lookup { .. } | routes::Command::VoucherContext { .. }
                 ) | DomainCommand::Stream(
-                    streams::Command::Inspect { .. } | streams::Command::Permit { .. }
+                    streams::Command::Inspect { .. }
+                        | streams::Command::Permit { .. }
+                        | streams::Command::RetirementContext { .. }
                 )
             ),
             "fresh Route retry requires a read-only context operation"
@@ -217,7 +219,13 @@ impl Client<'_> {
                 deadline,
                 Path::new("/Authority/Control.sock"),
             );
-            self.last_expiry = expiry;
+            // Retirement metadata does not certify permission to forward bytes.
+            if !matches!(
+                command,
+                DomainCommand::Stream(streams::Command::RetirementContext { .. })
+            ) {
+                self.last_expiry = expiry;
+            }
             observation.value = Some(value);
             Ok(observation)
         })();
