@@ -150,9 +150,11 @@ spent allowance or revives a closed generation.
 
 Endpoint and live-session renewal take priority over completed-stream cleanup.
 One completed stream can wait for measured renewal and action headroom. Its local
-gate closes immediately, and its slot still counts against endpoint capacity.
-Cleanup retains its first deadline; it does not extend a session or certified
-permission. An expired or failed cleanup emits a bounded category diagnostic.
+gate closes immediately. The single held cleanup record counts against relay
+attachment replenishment. Public listeners retain their existing queued/admitted
+session limit and separately bounded parser pool, plus at most one closed-session
+cleanup record. Cleanup retains its first deadline; it does not extend a session
+or certified permission. An expired or failed cleanup emits a bounded category diagnostic.
 An uncertain close remains the exact pending requester operation. It must resolve
 under the existing recovery rules before later authority work can proceed; this
 scheduling order cannot guarantee availability while that mutation is unresolved.

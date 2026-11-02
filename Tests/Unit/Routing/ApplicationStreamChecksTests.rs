@@ -105,11 +105,12 @@ fn pending_close_reserves_one_action_before_each_renewal_latest_start() {
 }
 
 #[test]
-fn held_completion_closes_local_gate_and_keeps_its_existing_capacity_slot() {
+fn held_completion_closes_local_gate_and_keeps_its_relay_attachment_slot() {
     let now = crate::authority_challenge::boot_time_ms().unwrap();
     let mut live = BTreeMap::from([([1; 32], prepared_stream(now + 5000, now + 10_000))]);
     let gate = live[&[1; 32]].gate.clone();
     let reference = live[&[1; 32]].reference.clone();
+    // This accounting limits relay replenishment; public admission has its own semaphore.
     assert_eq!(occupied(7, 8, &live, None), 16);
     let close = PendingClose::completed(live.remove(&[1; 32]).unwrap(), now, 1000);
     assert!(
