@@ -185,8 +185,8 @@ pub(super) async fn exchange(
 
 pub(super) fn evaluate(
     check: &Check,
-    live: &BTreeMap<Digest, LiveStream>,
-    gate: &route_io::Gate,
+    live: &mut BTreeMap<Digest, LiveStream>,
+    permission: &mut EndpointPermission,
     client: &mut Client<'_>,
     guard: &Guard,
     active: &Active,
@@ -200,7 +200,7 @@ pub(super) fn evaluate(
         }
         check.request.matches_ready(&check.ready)?;
         let current = live
-            .get(&request.session.id)
+            .get_mut(&request.session.id)
             .filter(|s| s.reference == request.session);
         let Some(stream) = current else {
             return Ok(unavailable(
@@ -209,17 +209,50 @@ pub(super) fn evaluate(
                 Disposition::NotActive,
             ));
         };
-        let Some(stream_deadline) = stream.check_deadline(now) else {
+        if stream.check_deadline(now).is_none() {
             return Ok(unavailable(
                 request.clone(),
                 privacy,
                 Disposition::NotActive,
             ));
-        };
-        ensure!(
-            check.connected.load(Ordering::Acquire) && !check.cancelled.load(Ordering::Acquire),
-            "application check cancelled"
-        );
+        }
+        check.current(guard, active)?;
+        // Readiness maintenance precedes the separate fresh check. It never supplies
+        // the check result or replaces its original caller/challenge deadline.
+        let preparation_end = request
+            .caller_deadline_boot_ms
+            .min(stream.forwarding.deadline);
+        permission.prepare_check(
+            preparation_end,
+            client.own_renewal_budget_ms(),
+            |deadline| {
+                check.current(guard, active)?;
+                client.before_check(deadline, request.caller_started_boot_ms, |client| {
+                    client.own()
+                })?;
+                check.current(guard, active)?;
+                client.effect_deadline()
+            },
+        )?;
+        let reference = stream.reference.clone();
+        stream.prepare_check(
+            preparation_end,
+            client.operation_budget_ms(),
+            || !check.connected.load(Ordering::Acquire) || check.cancelled.load(Ordering::Acquire),
+            |deadline| {
+                check.current(guard, active)?;
+                let expiry =
+                    client.before_check(deadline, request.caller_started_boot_ms, |client| {
+                        client.stream_permit(&reference)
+                    })?;
+                check.current(guard, active)?;
+                Ok(expiry)
+            },
+        )?;
+        check.current(guard, active)?;
+        let stream_deadline = stream
+            .check_deadline(crate::authority_challenge::boot_time_ms()?)
+            .context("application stream is no longer current")?;
         let clock = guard.application_clock()?;
         ensure!(
             clock.kernel_boot == check.ready.challenge.kernel_boot,
@@ -230,7 +263,7 @@ pub(super) fn evaluate(
             request
                 .caller_deadline_boot_ms
                 .min(stream_deadline)
-                .min(gate.expiry()?),
+                .min(permission.gate.expiry()?),
         );
         let (authority, permitted, observed_deadline) = client.before(deadline, |client| {
             client.check_stream(&request.session, request.caller_started_boot_ms)
@@ -255,7 +288,7 @@ pub(super) fn evaluate(
             deadline
                 .min(observed_deadline)
                 .min(stream_deadline)
-                .min(gate.expiry()?),
+                .min(permission.gate.expiry()?),
         );
         if not_after <= now {
             return Ok(unavailable(request.clone(), privacy, Disposition::Expired));
@@ -282,4 +315,20 @@ pub(super) fn evaluate(
             Disposition::Unavailable,
         )
     })
+}
+
+impl Check {
+    fn current(&self, guard: &Guard, active: &Active) -> Result<()> {
+        crate::authority_local_transport::remaining(self.request.caller_deadline_boot_ms)?;
+        self.request.matches_ready(&self.ready)?;
+        ensure!(
+            self.connected.load(Ordering::Acquire) && !self.cancelled.load(Ordering::Acquire),
+            "application check cancelled"
+        );
+        ensure!(
+            guard.application_clock()?.kernel_boot == self.ready.challenge.kernel_boot,
+            "application check host boot changed"
+        );
+        active.check(guard)
+    }
 }

@@ -36,6 +36,37 @@ impl LiveStream {
             && deadline > now)
             .then_some(deadline)
     }
+    fn prepare_check(
+        &mut self,
+        deadline: u64,
+        budget: u64,
+        cancelled: impl Fn() -> bool,
+        refresh: impl FnOnce(u64) -> Result<u64>,
+    ) -> Result<()> {
+        let deadline = deadline.min(self.forwarding.deadline);
+        crate::authority_local_transport::remaining(deadline)?;
+        let now = crate::authority_challenge::boot_time_ms()?;
+        ensure!(!cancelled(), "application check cancelled");
+        self.check_deadline(now)
+            .context("application stream is no longer current")?;
+        let expiry = self.gate.expiry()?;
+        if expiry < deadline
+            || now >= refresh_at(expiry, budget.saturating_mul(2), Some(self.accepted_at))
+        {
+            let expiry = refresh(deadline)?;
+            crate::authority_local_transport::remaining(deadline)?;
+            ensure!(
+                !cancelled()
+                    && self.forwarding.established.load(Ordering::Acquire)
+                    && !self.forwarding.finished.load(Ordering::Acquire),
+                "application check context ended"
+            );
+            self.gate.renew(expiry.min(self.forwarding.deadline))?;
+            self.accepted_at = crate::authority_challenge::boot_time_ms()?;
+            self.retry_after = 0;
+        }
+        Ok(())
+    }
 }
 impl Drop for LiveStream {
     fn drop(&mut self) {
@@ -300,7 +331,7 @@ pub(super) async fn endpoint(
                 } else {retry_after=tokio::time::Instant::now()+Duration::from_millis(own.limits.idle_ms.min(1000));}
             },
             Some(check)=check_requests.recv()=>{
-                let receipt=checks::evaluate(&check,&live,&permission.gate,client,guard,active);
+                let receipt=checks::evaluate(&check,&mut live,&mut permission,client,guard,active);
                 if check.connected.load(Ordering::Acquire) && !check.cancelled.load(Ordering::Acquire) {let _=check.reply.send(receipt);}
             },
             _=demand.notified()=>{},

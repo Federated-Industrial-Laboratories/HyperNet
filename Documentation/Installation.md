@@ -2,7 +2,7 @@
 
 [Documentation](ReadMe.md) | [Project](../ReadMe.md) | [Next: Host requirements](Hosting.md)
 
-For public packages, start with the [Linux 0.10.0 download and installation steps](ReleaseNotes.md).
+For public packages, start with the [Linux 0.10.1 download and installation steps](ReleaseNotes.md).
 
 Install HyperNet to operate authority replicas or consenting services. To browse,
 send mail or exchange files as a network member, use the separate

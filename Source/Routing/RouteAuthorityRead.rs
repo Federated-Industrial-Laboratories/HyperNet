@@ -10,6 +10,27 @@ pub(super) struct Observation {
     pub code: u64,
 }
 
+pub(super) fn issue_challenge(
+    session: &mut Session,
+    request: &[u8],
+    recipient: &ed25519_dalek::SigningKey,
+    nonce: Digest,
+    deadline: u64,
+    challenge_ceiling: Option<u64>,
+    health: authority_challenge::ClockHealth,
+) -> Result<Vec<u8>> {
+    // A short wait must not become an unusably short signed freshness window.
+    // Only an existing check supplies a separate, already fixed original ceiling.
+    session.issue_read(
+        request,
+        recipient,
+        nonce,
+        authority_challenge::MAXIMUM_DURATION_MS,
+        Some(challenge_ceiling.unwrap_or(deadline)),
+        health,
+    )
+}
+
 impl Client<'_> {
     pub(crate) fn retry_read(error: anyhow::Error) -> anyhow::Error {
         use crate::route_runtime::ReadRetry;
@@ -90,15 +111,17 @@ impl Client<'_> {
             .deadline
             .map_or(maximum_deadline, |original| original.min(maximum_deadline));
         transport::remaining(deadline)?;
-        // The authority's uncertainty interval needs a full freshness window even
-        // for short caller waits. Neither transport nor local effects acquire it.
-        let challenge_ceiling = challenge_ceiling.unwrap_or(deadline);
-        let challenge = self.session.issue_read(
+        let challenge_ceiling = challenge_ceiling
+            .into_iter()
+            .chain(self.read_challenge_ceiling)
+            .min();
+        let challenge = issue_challenge(
+            &mut self.session,
             &signed,
             &self.config.key,
             nonce,
-            authority_challenge::MAXIMUM_DURATION_MS,
-            Some(challenge_ceiling),
+            deadline,
+            challenge_ceiling,
             health,
         )?;
         let outcome = (|| {

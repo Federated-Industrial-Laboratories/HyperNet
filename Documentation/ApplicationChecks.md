@@ -72,8 +72,24 @@ action is introduced by this protocol.
 ## Fresh evaluation and lifetime
 
 Core invokes the existing read-only `Stream::Permit` evaluator for that exact
-live session. An unresolved ordinary request or fence makes the check unavailable;
-the check never calls recovery or falls back to an ordinary authority mutation.
+live session. Before that separate fresh read, the endpoint prepares its own
+deployment gate and the selected stream gate through their existing renewal
+operations. Each gate can renew once when its old expiry would clip the original
+caller deadline or its normal action headroom is due. This also applies when a
+check arrived before the periodic renewal timer became due. Preparation rechecks
+the exact live session, cancellation, control identity and current clock. It uses
+the original caller and route deadlines; a fresh certified expiry can still be
+shorter and remains binding. There is no renewal loop or added read capacity.
+Readiness reads use the same challenge ceiling as the final check: the original
+caller start plus five seconds. They do not restart that window when renewal
+begins. A shorter caller wait still bounds transport, persistence and local use;
+it does not shorten the signed challenge below the authority's existing
+conservative uncertainty interval. Route, consent and fresh certified gate
+expiries remain binding, and cancellation still prevents a completed check.
+
+An unresolved ordinary request or fence remaining after readiness maintenance
+makes the fresh read unavailable. The read never uses a readiness result as its
+answer and never falls back to an ordinary authority mutation.
 Verified refusals retain their structured disposition, refusal code, scope,
 epoch, height, state digest, statement digest, evaluation time and original
 statement expiry. Error strings are not authority evidence.

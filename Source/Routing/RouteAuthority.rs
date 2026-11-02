@@ -81,6 +81,7 @@ pub struct Client<'a> {
     last_expiry: u64,
     costs: OperationCosts,
     deadline: Option<u64>,
+    read_challenge_ceiling: Option<u64>,
 }
 #[derive(Default)]
 struct OperationCosts {
@@ -131,6 +132,7 @@ impl<'a> Client<'a> {
             last_expiry: 0,
             costs: OperationCosts::default(),
             deadline: None,
+            read_challenge_ceiling: None,
         };
         out.check_cache()?;
         // Recover the exact retained request before any new connection can consume permission.
@@ -650,6 +652,28 @@ impl<'a> Client<'a> {
         self.deadline = previous;
         result
     }
+    pub fn before_check<T>(
+        &mut self,
+        deadline: u64,
+        caller_started: u64,
+        operation: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        ensure!(
+            caller_started <= authority_challenge::boot_time_ms()?,
+            "application check starts in the future"
+        );
+        let ceiling = caller_started
+            .checked_add(authority_challenge::MAXIMUM_DURATION_MS)
+            .context("application challenge ceiling overflow")?;
+        transport::remaining(ceiling)?;
+        let previous = self.read_challenge_ceiling;
+        self.read_challenge_ceiling = Some(previous.map_or(ceiling, |old| old.min(ceiling)));
+        // Readiness uses the final check's original freshness ceiling. The
+        // synchronous wait and every accepted effect retain their shorter bounds.
+        let result = self.before(deadline, operation);
+        self.read_challenge_ceiling = previous;
+        result
+    }
     fn admit_current(
         &mut self,
         open: &crate::route_protocol::Open,
@@ -857,7 +881,7 @@ impl<'a> Client<'a> {
         }))?;
         self.effect_deadline()
     }
-    /// No recovery or ordinary request fallback is permitted on the companion check path.
+    /// The fresh read never recovers or falls back to an ordinary request.
     pub fn check_stream(
         &mut self,
         session: &VersionRef,
