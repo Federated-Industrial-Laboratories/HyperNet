@@ -324,7 +324,9 @@ fn policy_quorum(delayed: bool, capacity: bool) {
             V::Bytes(original_challenge.clone()),
         ]))
         .unwrap();
+        assert!(!drivers[0].diagnostics.has_read_capacity_report());
         let unavailable = drivers[0].read_start(&exact).unwrap();
+        assert!(drivers[0].diagnostics.has_read_capacity_report());
         let unavailable = wire::decode(&unavailable).unwrap();
         let fields = unavailable.array(10).unwrap();
         assert_eq!(

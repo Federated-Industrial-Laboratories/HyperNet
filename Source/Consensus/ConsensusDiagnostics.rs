@@ -12,7 +12,7 @@ use tokio::{sync::watch, time::Instant};
 const RATE: Duration = Duration::from_secs(5);
 const SLOW: Duration = Duration::from_millis(250);
 const STALLED: Duration = Duration::from_secs(1);
-const COUNT: usize = 12;
+const COUNT: usize = 13;
 
 #[derive(Clone, Copy)]
 pub(super) struct Stamp {
@@ -188,6 +188,7 @@ pub(super) enum Code {
     StalledTurn,
     ShutdownObserved,
     ProposalClockAge,
+    FreshReadCapacity,
 }
 impl Code {
     fn name(self) -> &'static str {
@@ -204,6 +205,7 @@ impl Code {
             Self::StalledTurn => "StalledTurn",
             Self::ShutdownObserved => "ShutdownObserved",
             Self::ProposalClockAge => "ProposalClockAge",
+            Self::FreshReadCapacity => "FreshReadCapacity",
         }
     }
 }
@@ -257,6 +259,31 @@ impl Budget {
         }
         slot.last = Some(now);
         Some(std::mem::take(&mut slot.suppressed))
+    }
+}
+pub(super) struct ReadCapacity {
+    pub retained_count: usize,
+    pub retained_bytes: usize,
+    pub incoming_bytes: usize,
+    pub earliest_expiry: Option<Instant>,
+    pub count_limit: usize,
+    pub byte_limit: usize,
+}
+impl ReadCapacity {
+    fn record(&self, now: Instant, boot_ms: u64, suppressed: u64) -> serde_json::Value {
+        let earliest_expiry_ms = self.earliest_expiry.map(|expiry| {
+            expiry
+                .saturating_duration_since(now)
+                .as_millis()
+                .min(u64::MAX as u128) as u64
+        });
+        serde_json::json!({
+            "status": "ReplicaDiagnostic", "code": Code::FreshReadCapacity.name(),
+            "bootMs": boot_ms, "suppressed": suppressed,
+            "retainedCount": self.retained_count, "retainedBytes": self.retained_bytes,
+            "incomingBytes": self.incoming_bytes, "earliestExpiryRemainingMs": earliest_expiry_ms,
+            "countLimit": self.count_limit, "byteLimit": self.byte_limit,
+        })
     }
 }
 #[derive(Clone, Copy)]
@@ -478,6 +505,21 @@ impl Diagnostics {
     }
     pub(super) fn emit(&self, code: Code, stage: Stage, elapsed: Duration, view: u64) {
         self.emit_detail(code, stage, elapsed, view, None, None);
+    }
+    pub(super) fn read_capacity(&self, capacity: ReadCapacity) {
+        let Ok(boot_ms) = crate::authority_challenge::boot_time_ms() else {
+            return;
+        };
+        let now = Instant::now();
+        let suppressed = self
+            .budget
+            .lock()
+            .ok()
+            .and_then(|mut budget| budget.admit(Code::FreshReadCapacity, now));
+        if let Some(suppressed) = suppressed {
+            let record = capacity.record(now, boot_ms, suppressed);
+            let _ = writeln!(std::io::stderr().lock(), "{record}");
+        }
     }
     fn emit_detail(
         &self,

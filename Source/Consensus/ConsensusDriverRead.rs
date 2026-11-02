@@ -197,6 +197,14 @@ impl Driver {
         if self.reads.len() >= MAX_PENDING
             || self.read_bytes() + request.len() + challenge.len() > MAX_READ_BYTES
         {
+            self.diagnostics.read_capacity(diagnostics::ReadCapacity {
+                retained_count: self.reads.len(),
+                retained_bytes: self.read_bytes(),
+                incoming_bytes: request.len() + challenge.len(),
+                earliest_expiry: self.reads.values().map(|read| read.expires).min(),
+                count_limit: MAX_PENDING,
+                byte_limit: MAX_READ_BYTES,
+            });
             return self.read_reply(2, 2, id, None);
         }
         self.reads.insert(

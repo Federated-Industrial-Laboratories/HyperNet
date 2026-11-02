@@ -2,6 +2,13 @@
 // Test fixtures and accessors in the owning module scope.
 impl Diagnostics {
     #[cfg(test)]
+    pub(super) fn has_read_capacity_report(&self) -> bool {
+        self.budget.lock().unwrap().0[Code::FreshReadCapacity as usize]
+            .last
+            .is_some()
+    }
+
+    #[cfg(test)]
     pub(super) fn signature_lookups(&self) -> u64 {
         self.activity.lock().unwrap().storage.envelope_cache_lookups
     }
