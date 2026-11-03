@@ -28,7 +28,7 @@ pub(super) struct Check {
     pub _slot: OwnedSemaphorePermit,
 }
 pub(super) enum Preparation {
-    Ready(Box<PreparedRead>),
+    Ready,
     Complete(Box<Receipt>),
 }
 pub(super) struct Pending {
@@ -292,8 +292,37 @@ pub(super) fn prepare(
         },
     )?;
     check.current(guard, active)?;
+    Ok(Preparation::Ready)
+}
+
+// Capture once: a draining round never admits later arrivals or extends its end.
+pub(super) fn cohort(first: Check, queue: &mut mpsc::Receiver<Check>) -> Vec<Check> {
+    let mut checks = Vec::with_capacity(control::MAXIMUM_PENDING);
+    checks.push(first);
+    while checks.len() < control::MAXIMUM_PENDING {
+        let Ok(check) = queue.try_recv() else { break };
+        checks.push(check);
+    }
+    checks
+}
+
+pub(super) fn issue(
+    check: &Check,
+    live: &BTreeMap<Digest, LiveStream>,
+    permission: &EndpointPermission,
+    client: &mut Client<'_>,
+    guard: &Guard,
+    active: &Active,
+) -> Result<PreparedRead> {
+    // Every member's readiness work has finished before any member issues a
+    // challenge. Recheck validity now: other preparation cannot renew this call.
+    check.current(guard, active)?;
+    let now = crate::authority_challenge::boot_time_ms()?;
+    let stream = check
+        .completion_stream(live, permission, now)?
+        .context("application stream is no longer current")?;
     let stream_deadline = stream
-        .check_deadline(crate::authority_challenge::boot_time_ms()?)
+        .check_deadline(now)
         .context("application stream is no longer current")?;
     let clock = guard.application_clock()?;
     ensure!(
@@ -301,6 +330,7 @@ pub(super) fn prepare(
         "application check host boot changed"
     );
     active.check(guard)?;
+    let request = &check.request;
     let deadline = clock.read_deadline(
         request
             .caller_deadline_boot_ms
@@ -308,10 +338,9 @@ pub(super) fn prepare(
             .min(permission.gate.expiry()?),
     );
     check.record(Stage::FreshRead, None, None);
-    let read = client.before(deadline, |client| {
+    client.before(deadline, |client| {
         client.prepare_check_stream(&request.session, request.caller_started_boot_ms)
-    })?;
-    Ok(Preparation::Ready(Box::new(read)))
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

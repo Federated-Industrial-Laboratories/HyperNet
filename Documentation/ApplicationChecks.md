@@ -102,6 +102,18 @@ The endpoint actor alone issues and consumes challenges, owns requester state,
 and publishes durable authority and domain state. Maintenance keeps the same
 synchronous prepare/exchange/finish composition.
 
+Checks run in finite rounds. The actor captures at most four checks already
+available, performs every captured check's necessary gate preparation, then
+revalidates and issues their fresh challenges. No later arrival joins that round.
+While its workers remain, completion has a separate dispatch class; unrelated
+synchronous admission, renewal and cleanup do not advance the actor's floor or
+consume its permission tail before completion. Clock/currentness checks,
+cancellation, control loss, original deadlines and termination remain active.
+A round does not renew any deadline or gate. After it drains, lifecycle work
+retains its fair turn before another round; sustained arrivals cannot refill a
+round indefinitely. Independent authority progress can still overtake a read,
+and an expired gate still refuses it.
+
 On completion the actor rechecks the current control generation, exact session,
 forwarding state, gates, consent and clock before accepting evidence. Verification
 uses the current domain records, generations, causal floor and retained history;
@@ -172,9 +184,10 @@ connection or session. One admission permit follows each check through the
 endpoint queue, its worker and finalization, so queued and in-flight work together
 never exceed four, including across reconnects. The framed-reader queue also
 holds at most four bounded frames. Overflow receives a bounded unavailable
-response; it cannot create an unbounded task or authority queue. Check issue and
-completion share the existing fair dispatch turn with bounded lifecycle work.
-Termination closes gates and cancels pending checks before joining workers.
+response; it cannot create an unbounded task or authority queue. Finite captured
+read rounds alternate with the existing bounded lifecycle rotation; completions
+are drained before the next lifecycle turn. Termination closes gates and cancels
+pending checks before joining workers.
 
 Cancellation binds the complete request and suppresses its result. Disconnect
 invalidates all checks on that channel. A read already executing may finish its

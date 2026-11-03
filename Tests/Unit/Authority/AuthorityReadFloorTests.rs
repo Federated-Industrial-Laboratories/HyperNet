@@ -15,7 +15,7 @@ fn later(sample: ClockHealth, elapsed: u64) -> ClockHealth {
     .frozen()
 }
 
-struct Read {
+pub(crate) struct Read {
     request: Vec<u8>,
     challenge: Vec<u8>,
     result: Vec<u8>,
@@ -24,7 +24,7 @@ struct Read {
     versions: Vec<VersionRef>,
 }
 impl Read {
-    fn new(store: &Store, session: &mut Session, sample: ClockHealth) -> Self {
+    pub(crate) fn new(store: &Store, session: &mut Session, sample: ClockHealth) -> Self {
         Self::with_nonce(store, session, sample, [97; 32])
     }
     fn with_nonce(
@@ -112,7 +112,7 @@ impl Read {
             versions,
         }
     }
-    fn verify(&self, store: &Store) -> VerifiedRead {
+    pub(crate) fn verify(&self, store: &Store) -> VerifiedRead {
         read::verify_response(
             store.descriptor(),
             &self.request,

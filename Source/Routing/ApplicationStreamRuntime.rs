@@ -198,6 +198,7 @@ enum Dispatch {
     Own,
     Stream,
     Check,
+    Complete,
     Handshake,
     Incoming,
     Public,
@@ -222,22 +223,31 @@ struct Schedule {
 impl Schedule {
     async fn next<T>(
         &mut self,
+        reading: bool,
         mut ready: impl FnMut(Dispatch, &mut std::task::Context<'_>) -> std::task::Poll<T>,
     ) -> T {
         tokio::task::consume_budget().await;
         // A ready queue must not look empty merely because another class spent
         // the task's cooperative budget. Only this finite selector is unbudgeted.
         tokio::task::unconstrained(std::future::poll_fn(|cx| {
-            self.poll(|class| ready(class, cx))
+            self.poll(reading, |class| ready(class, cx))
         }))
         .await
     }
-    // Interleave one queued check between non-check events. Other ready classes
-    // retain their rotation; checks alone do not wait for an idle class.
+    // A finite captured read round owns the actor until its workers drain.
+    // Completion never starts another round. Between rounds the existing
+    // lifecycle rotation retains its turn, even under continuous check arrival.
     fn poll<T>(
         &mut self,
+        reading: bool,
         mut ready: impl FnMut(Dispatch) -> std::task::Poll<T>,
     ) -> std::task::Poll<T> {
+        if let std::task::Poll::Ready(completed) = ready(Dispatch::Complete) {
+            return std::task::Poll::Ready(completed);
+        }
+        if reading {
+            return std::task::Poll::Pending;
+        }
         let checked = self.check_turn;
         if checked && let std::task::Poll::Ready(event) = ready(Dispatch::Check) {
             self.check_turn = false;
@@ -574,13 +584,11 @@ pub(super) async fn endpoint(
             _=tokio::signal::ctrl_c()=>break,
             _=terminate.recv()=>break,
             stopped=async {listener_tasks.expect("enabled listener").join_next().await},if public=>{stopped.context("application listener stopped")???;anyhow::bail!("application listener stopped");},
-            next=schedule.next(|class,cx|match class {
+            next=schedule.next(!pending.is_empty(),|class,cx|match class {
                 Dispatch::Own if own_due=>std::task::Poll::Ready(Event::Maintenance(Maintenance::Own)),
                 Dispatch::Stream if stream_due.is_some()=>std::task::Poll::Ready(Event::Maintenance(Maintenance::Stream(stream_due.expect("due stream")))),
-                Dispatch::Check=>{
-                    let completed=event(reads.poll_join_next_with_id(cx),Event::Checked);
-                    if completed.is_ready() {completed} else {event(check_requests.poll_recv(cx),Event::Check)}
-                },
+                Dispatch::Complete=>event(reads.poll_join_next_with_id(cx),Event::Checked),
+                Dispatch::Check=>event(check_requests.poll_recv(cx),Event::Check),
                 Dispatch::Handshake if !handshakes.is_empty()=>event(handshakes.poll_join_next(cx),Event::Handshake),
                 Dispatch::Incoming if !incoming.is_empty()=>event(incoming.poll_join_next(cx),Event::Incoming),
                 Dispatch::Public if public=>event(listener_requests.as_mut().expect("enabled listener").poll_recv(cx),Event::Public),
@@ -645,27 +653,36 @@ pub(super) async fn endpoint(
                 } else {retry_after=tokio::time::Instant::now()+Duration::from_millis(own.limits.idle_ms.min(1000));}
             },
             Event::Check(check)=>{
-                match checks::prepare(&check,&mut live,&mut permission,client,guard,active) {
-                    Ok(checks::Preparation::Ready(read))=>{
-                        let read=*read;
-                        let exchange=read.exchange();
-                        let clock=guard.clock_source();
-                        let connected=check.connected.clone();
-                        let cancelled=check.cancelled.clone();
-                        let stream=live.get(&check.request.session.id).expect("prepared live stream");
-                        let forwarding=stream.forwarding.clone();
-                        let stream_gate=stream.gate.clone();
-                        let endpoint_gate=permission.gate.clone();
-                        let task=reads.spawn_blocking(move || exchange.run(|| {
-                            ensure!(connected.load(Ordering::Acquire) && !cancelled.load(Ordering::Acquire), "application check cancelled");
-                            ensure!(forwarding.established.load(Ordering::Acquire) && !forwarding.finished.load(Ordering::Acquire), "application stream is no longer current");
-                            crate::authority_local_transport::remaining(stream_gate.expiry()?.min(endpoint_gate.expiry()?))?;
-                            clock.health()
-                        }));
-                        pending.insert(task.id(),checks::Pending {check,read});
-                    },
-                    Ok(checks::Preparation::Complete(receipt))=>{let receipt=check.complete(Ok(*receipt));check.respond(receipt);},
-                    Err(error)=>{let receipt=check.complete(Err(error));check.respond(receipt);},
+                let mut prepared=Vec::with_capacity(streams::control::MAXIMUM_PENDING);
+                for check in checks::cohort(check,&mut check_requests) {
+                    match checks::prepare(&check,&mut live,&mut permission,client,guard,active) {
+                        Ok(checks::Preparation::Ready)=>prepared.push(check),
+                        Ok(checks::Preparation::Complete(receipt))=>{let receipt=check.complete(Ok(*receipt));check.respond(receipt);},
+                        Err(error)=>{let receipt=check.complete(Err(error));check.respond(receipt);},
+                    }
+                }
+                // Readiness may learn a new floor. Finish all of it before any
+                // challenge captures that floor, then issue this finite cohort.
+                for check in prepared {
+                    let read=match checks::issue(&check,&live,&permission,client,guard,active) {
+                        Ok(read)=>read,
+                        Err(error)=>{let receipt=check.complete(Err(error));check.respond(receipt);continue;},
+                    };
+                    let exchange=read.exchange();
+                    let clock=guard.clock_source();
+                    let connected=check.connected.clone();
+                    let cancelled=check.cancelled.clone();
+                    let stream=live.get(&check.request.session.id).expect("issued live stream");
+                    let forwarding=stream.forwarding.clone();
+                    let stream_gate=stream.gate.clone();
+                    let endpoint_gate=permission.gate.clone();
+                    let task=reads.spawn_blocking(move || exchange.run(|| {
+                        ensure!(connected.load(Ordering::Acquire) && !cancelled.load(Ordering::Acquire), "application check cancelled");
+                        ensure!(forwarding.established.load(Ordering::Acquire) && !forwarding.finished.load(Ordering::Acquire), "application stream is no longer current");
+                        crate::authority_local_transport::remaining(stream_gate.expiry()?.min(endpoint_gate.expiry()?))?;
+                        clock.health()
+                    }));
+                    pending.insert(task.id(),checks::Pending {check,read});
                 }
             },
             Event::Checked(result)=>{
