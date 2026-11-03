@@ -4,8 +4,9 @@ use super::*;
 use crate::authority_domains::streams::control::{
     self, Cancel, Challenge, Disposition, Privacy, Ready, Receipt, Request,
 };
+use crate::route_authority::{PreparedRead, ReadCompletion};
 use std::sync::atomic::AtomicBool;
-use tokio::sync::oneshot;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 
 static CHECK_SAMPLES: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Copy, Debug)]
@@ -24,6 +25,15 @@ pub(super) struct Check {
     pub cancelled: Arc<AtomicBool>,
     pub reply: oneshot::Sender<Receipt>,
     pub timing: Option<Timing>,
+    pub _slot: OwnedSemaphorePermit,
+}
+pub(super) enum Preparation {
+    Ready(Box<PreparedRead>),
+    Complete(Box<Receipt>),
+}
+pub(super) struct Pending {
+    pub check: Check,
+    pub read: PreparedRead,
 }
 struct Connection(Arc<AtomicBool>);
 impl Drop for Connection {
@@ -58,6 +68,9 @@ pub(super) async fn run(
         return;
     };
     let mut previous: Option<Challenge> = None;
+    // A permit follows a check from admission through finalization, including
+    // cancelled workers left draining across control-generation changes.
+    let slots = Arc::new(Semaphore::new(control::MAXIMUM_PENDING));
     loop {
         let attempt = link(
             &binding,
@@ -66,6 +79,7 @@ pub(super) async fn run(
             &privacy,
             instance,
             &queue,
+            &slots,
             &mut previous,
         );
         tokio::select! {
@@ -79,6 +93,7 @@ pub(super) async fn run(
         }
     }
 }
+#[allow(clippy::too_many_arguments)]
 async fn link(
     binding: &local::Binding,
     key: &ed25519_dalek::SigningKey,
@@ -86,6 +101,7 @@ async fn link(
     privacy: &Privacy,
     instance: Digest,
     queue: &mpsc::Sender<Check>,
+    slots: &Arc<Semaphore>,
     previous: &mut Option<Challenge>,
 ) -> Result<()> {
     let mut socket = tokio::time::timeout(
@@ -126,7 +142,7 @@ async fn link(
     )
     .await??;
     *previous = Some(challenge);
-    exchange(socket, ready, binding, key, queue).await
+    exchange(socket, ready, binding, key, queue, slots).await
 }
 pub(super) async fn exchange(
     socket: tokio::net::UnixStream,
@@ -134,6 +150,7 @@ pub(super) async fn exchange(
     binding: &local::Binding,
     key: &ed25519_dalek::SigningKey,
     queue: &mpsc::Sender<Check>,
+    slots: &Arc<Semaphore>,
 ) -> Result<()> {
     let privacy = &ready.privacy;
     let connected = Connection(Arc::new(AtomicBool::new(true)));
@@ -169,6 +186,11 @@ pub(super) async fn exchange(
                     tokio::time::timeout(Duration::from_millis(1000), route_io::send(&mut writer, &control::sign(&receipt, binding, key)?)).await??;
                     continue;
                 }
+                let Ok(permit) = slots.clone().try_acquire_owned() else {
+                    let receipt = unavailable(request, privacy.clone(), Disposition::Unavailable);
+                    tokio::time::timeout(Duration::from_millis(1000), route_io::send(&mut writer, &control::sign(&receipt, binding, key)?)).await??;
+                    continue;
+                };
                 let Ok(slot) = queue.try_reserve() else {
                     let receipt = unavailable(request, privacy.clone(), Disposition::Unavailable);
                     tokio::time::timeout(Duration::from_millis(1000), route_io::send(&mut writer, &control::sign(&receipt, binding, key)?)).await??;
@@ -177,7 +199,7 @@ pub(super) async fn exchange(
                 let cancelled = Arc::new(AtomicBool::new(false));
                 let (reply, receiver) = oneshot::channel();
                 let timing = crate::authority_challenge::boot_time_ms().ok().map(|now| Timing::counted(now, &CHECK_SAMPLES, 256));
-                let check = Check { request: request.clone(), ready: ready.clone(), connected: connected.0.clone(), cancelled: cancelled.clone(), reply, timing };
+                let check = Check { request: request.clone(), ready: ready.clone(), connected: connected.0.clone(), cancelled: cancelled.clone(), reply, timing, _slot: permit };
                 check.record(Stage::Enqueued, None, None);
                 slot.send(check);
                 pending.insert(request.nonce, (request.clone(), cancelled.clone()));
@@ -197,95 +219,140 @@ pub(super) async fn exchange(
     }
 }
 
-pub(super) fn evaluate(
+pub(super) fn prepare(
     check: &Check,
     live: &mut BTreeMap<Digest, LiveStream>,
     permission: &mut EndpointPermission,
     client: &mut Client<'_>,
     guard: &Guard,
     active: &Active,
-) -> Receipt {
+) -> Result<Preparation> {
     let request = &check.request;
     let privacy = check.ready.privacy.clone();
     check.record(Stage::Dequeued, None, None);
-    let result = (|| -> Result<Receipt> {
-        let now = crate::authority_challenge::boot_time_ms()?;
-        if now >= request.caller_deadline_boot_ms || request.caller_started_boot_ms > now {
-            return Ok(unavailable(request.clone(), privacy, Disposition::Expired));
-        }
-        check.request.matches_ready(&check.ready)?;
-        let current = live
-            .get_mut(&request.session.id)
-            .filter(|s| s.reference == request.session);
-        let Some(stream) = current else {
-            return Ok(unavailable(
-                request.clone(),
-                privacy,
-                Disposition::NotActive,
-            ));
-        };
-        if stream.check_deadline(now).is_none() {
-            return Ok(unavailable(
-                request.clone(),
-                privacy,
-                Disposition::NotActive,
-            ));
-        }
-        check.current(guard, active)?;
-        // Readiness maintenance precedes the separate fresh check. It never supplies
-        // the check result or replaces its original caller/challenge deadline.
-        let preparation_end = request
-            .caller_deadline_boot_ms
-            .min(stream.forwarding.deadline);
-        permission.prepare_check(
-            preparation_end,
-            client.own_renewal_budget_ms(),
-            |deadline| {
-                check.current(guard, active)?;
-                check.record(Stage::EndpointPreparation, None, None);
+    let now = crate::authority_challenge::boot_time_ms()?;
+    if now >= request.caller_deadline_boot_ms || request.caller_started_boot_ms > now {
+        return Ok(Preparation::Complete(Box::new(unavailable(
+            request.clone(),
+            privacy,
+            Disposition::Expired,
+        ))));
+    }
+    check.request.matches_ready(&check.ready)?;
+    let current = live
+        .get_mut(&request.session.id)
+        .filter(|s| s.reference == request.session);
+    let Some(stream) = current else {
+        return Ok(Preparation::Complete(Box::new(unavailable(
+            request.clone(),
+            privacy,
+            Disposition::NotActive,
+        ))));
+    };
+    if stream.check_deadline(now).is_none() {
+        return Ok(Preparation::Complete(Box::new(unavailable(
+            request.clone(),
+            privacy,
+            Disposition::NotActive,
+        ))));
+    }
+    check.current(guard, active)?;
+    // Readiness maintenance precedes the separate fresh check. It never supplies
+    // the check result or replaces its original caller/challenge deadline.
+    let preparation_end = request
+        .caller_deadline_boot_ms
+        .min(stream.forwarding.deadline);
+    permission.prepare(
+        preparation_end,
+        client.own_renewal_budget_ms(),
+        |deadline| {
+            check.current(guard, active)?;
+            check.record(Stage::EndpointPreparation, None, None);
+            client.before_check(deadline, request.caller_started_boot_ms, |client| {
+                client.own()
+            })?;
+            check.current(guard, active)?;
+            client.effect_deadline()
+        },
+    )?;
+    let reference = stream.reference.clone();
+    stream.prepare_check(
+        preparation_end,
+        client.operation_budget_ms(),
+        || !check.connected.load(Ordering::Acquire) || check.cancelled.load(Ordering::Acquire),
+        |deadline| {
+            check.current(guard, active)?;
+            check.record(Stage::StreamPreparation, None, None);
+            let expiry =
                 client.before_check(deadline, request.caller_started_boot_ms, |client| {
-                    client.own()
+                    client.stream_permit(&reference)
                 })?;
-                check.current(guard, active)?;
-                client.effect_deadline()
-            },
-        )?;
-        let reference = stream.reference.clone();
-        stream.prepare_check(
-            preparation_end,
-            client.operation_budget_ms(),
-            || !check.connected.load(Ordering::Acquire) || check.cancelled.load(Ordering::Acquire),
-            |deadline| {
-                check.current(guard, active)?;
-                check.record(Stage::StreamPreparation, None, None);
-                let expiry =
-                    client.before_check(deadline, request.caller_started_boot_ms, |client| {
-                        client.stream_permit(&reference)
-                    })?;
-                check.current(guard, active)?;
-                Ok(expiry)
-            },
-        )?;
-        check.current(guard, active)?;
-        let stream_deadline = stream
-            .check_deadline(crate::authority_challenge::boot_time_ms()?)
-            .context("application stream is no longer current")?;
-        let clock = guard.application_clock()?;
-        ensure!(
-            clock.kernel_boot == check.ready.challenge.kernel_boot,
-            "application check host boot changed"
-        );
-        active.check(guard)?;
-        let deadline = clock.read_deadline(
-            request
-                .caller_deadline_boot_ms
-                .min(stream_deadline)
-                .min(permission.gate.expiry()?),
-        );
-        check.record(Stage::FreshRead, None, None);
-        let (authority, permitted, observed_deadline) = client.before(deadline, |client| {
-            client.check_stream(&request.session, request.caller_started_boot_ms)
-        })?;
+            check.current(guard, active)?;
+            Ok(expiry)
+        },
+    )?;
+    check.current(guard, active)?;
+    let stream_deadline = stream
+        .check_deadline(crate::authority_challenge::boot_time_ms()?)
+        .context("application stream is no longer current")?;
+    let clock = guard.application_clock()?;
+    ensure!(
+        clock.kernel_boot == check.ready.challenge.kernel_boot,
+        "application check host boot changed"
+    );
+    active.check(guard)?;
+    let deadline = clock.read_deadline(
+        request
+            .caller_deadline_boot_ms
+            .min(stream_deadline)
+            .min(permission.gate.expiry()?),
+    );
+    check.record(Stage::FreshRead, None, None);
+    let read = client.before(deadline, |client| {
+        client.prepare_check_stream(&request.session, request.caller_started_boot_ms)
+    })?;
+    Ok(Preparation::Ready(Box::new(read)))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn finish(
+    check: &Check,
+    read: PreparedRead,
+    completion: Result<ReadCompletion>,
+    live: &BTreeMap<Digest, LiveStream>,
+    permission: &EndpointPermission,
+    client: &mut Client<'_>,
+    guard: &Guard,
+    active: &Active,
+) -> Receipt {
+    let request = &check.request;
+    let privacy = check.ready.privacy.clone();
+    // Revalidate before consuming the challenge or publishing any learned state.
+    // These are current actor values, not the issue-time stream/gate snapshot.
+    let context = check.current(guard, active).and_then(|()| {
+        check.completion_stream(
+            live,
+            permission,
+            crate::authority_challenge::boot_time_ms()?,
+        )
+    });
+    let stream = match context {
+        Ok(Some(stream)) => stream,
+        Ok(None) => {
+            let discarded = client.discard_read(read);
+            return check.complete(
+                discarded.map(|()| unavailable(request.clone(), privacy, Disposition::NotActive)),
+            );
+        }
+        Err(error) => {
+            let discarded = client.discard_read(read);
+            return check.complete(discarded.and(Err(error)));
+        }
+    };
+    let deadline = read.deadline();
+    let result = (|| -> Result<Receipt> {
+        let (authority, permitted, observed_deadline) =
+            client.finish_check_stream(read, completion)?;
         let now = crate::authority_challenge::boot_time_ms()?;
         active.check(guard)?;
         let clock = guard.application_clock()?;
@@ -327,6 +394,35 @@ pub(super) fn evaluate(
 }
 
 impl Check {
+    pub(super) fn completion_stream<'a>(
+        &self,
+        live: &'a BTreeMap<Digest, LiveStream>,
+        permission: &EndpointPermission,
+        now: u64,
+    ) -> Result<Option<&'a LiveStream>> {
+        self.request.matches_ready(&self.ready)?;
+        ensure!(
+            self.connected.load(Ordering::Acquire) && !self.cancelled.load(Ordering::Acquire),
+            "application check cancelled"
+        );
+        ensure!(
+            now >= self.request.caller_started_boot_ms
+                && now < self.request.caller_deadline_boot_ms,
+            "application check deadline expired"
+        );
+        ensure!(
+            permission.gate.expiry()? > now,
+            "application endpoint permission expired"
+        );
+        Ok(live.get(&self.request.session.id).filter(|stream| {
+            stream.reference == self.request.session && stream.check_deadline(now).is_some()
+        }))
+    }
+    pub(super) fn respond(self, receipt: Receipt) {
+        if self.connected.load(Ordering::Acquire) && !self.cancelled.load(Ordering::Acquire) {
+            let _ = self.reply.send(receipt);
+        }
+    }
     fn record(
         &self,
         stage: Stage,

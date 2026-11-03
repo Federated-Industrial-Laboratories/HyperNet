@@ -25,19 +25,27 @@ struct Read {
 }
 impl Read {
     fn new(store: &Store, session: &mut Session, sample: ClockHealth) -> Self {
+        Self::with_nonce(store, session, sample, [97; 32])
+    }
+    fn with_nonce(
+        store: &Store,
+        session: &mut Session,
+        sample: ClockHealth,
+        nonce: Digest,
+    ) -> Self {
         let signer = SigningKey::from_bytes(&[1; 32]);
         let scope = store.descriptor().scope();
         let request = Request::sign(
             scope,
             &signer,
             store.requester(),
-            [97; 32],
+            nonce,
             store.prefix().height(),
             Query::PolicyContext,
         )
         .unwrap();
         let challenge = session
-            .issue_read(&request, &signer, [97; 32], 5000, None, sample)
+            .issue_read(&request, &signer, nonce, 5000, None, sample)
             .unwrap();
         let versions = [100, 114]
             .into_iter()
@@ -505,4 +513,87 @@ fn fresh_read_cannot_replace_pending_ordinary_or_fence_and_expiry_cannot_advance
         assert_eq!(std::fs::read(directory.0.join(FLOOR)).unwrap(), floor);
         assert_eq!(std::fs::read(directory.0.join(WITNESS)).unwrap(), witness);
     }
+}
+
+#[test]
+fn distinct_fresh_reads_at_one_floor_complete_out_of_order_once_each() {
+    let (_directory, sample, mut session, mut store) = setup();
+    let sample = later(sample, 500);
+    let first = Read::with_nonce(&store, &mut session, sample, [97; 32]);
+    let second = Read::with_nonce(&store, &mut session, sample, [98; 32]);
+    let prefix = store.prefix().clone();
+    let tracker = store.stored.tracker.clone();
+    let mut effects = 0;
+    for query in [&second, &first] {
+        store
+            .accept_read_consumed(query.verify(&store), &mut session, sample, 0, |_, _| {
+                effects += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(store.prefix(), &prefix);
+        assert_eq!(store.stored.tracker, tracker);
+    }
+    assert_eq!(effects, 2);
+    for query in [&first, &second] {
+        assert!(
+            store
+                .accept_read_consumed(
+                    query.verify(&store),
+                    &mut session,
+                    sample,
+                    0,
+                    |_, _| -> Result<()> { panic!("completed concurrent read was consumed twice") }
+                )
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn fresh_completion_cannot_roll_back_a_floor_advanced_after_issue() {
+    let (directory, sample, mut session, mut store) = setup();
+    let sample = later(sample, 500);
+    let query = Read::new(&store, &mut session, sample);
+    let issued_height = store.prefix().height();
+    let (pending, operation) = prepare(&mut store, sample);
+    let verified = certified(
+        &store,
+        &mut session,
+        sample,
+        pending.signed(),
+        &operation,
+        None,
+    );
+    store
+        .accept(verified, &mut session, sample, 0)
+        .unwrap()
+        .perform(
+            &mut store,
+            &mut session,
+            sample,
+            1,
+            |_| Ok(()),
+            |_, _| Ok(()),
+        )
+        .unwrap();
+    assert!(store.prefix().height() > issued_height);
+    let prefix = store.prefix().clone();
+    let floor = std::fs::read(directory.0.join(FLOOR)).unwrap();
+    let witness = std::fs::read(directory.0.join(WITNESS)).unwrap();
+    let error = store
+        .accept_read_consumed(
+            query.verify(&store),
+            &mut session,
+            sample,
+            0,
+            |_, _| -> Result<()> { panic!("overtaken read published its old context") },
+        )
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("causal floor"), "{error:#}");
+    assert_eq!(store.prefix(), &prefix);
+    assert_eq!(std::fs::read(directory.0.join(FLOOR)).unwrap(), floor);
+    assert_eq!(std::fs::read(directory.0.join(WITNESS)).unwrap(), witness);
+    session.discard(&query.challenge).unwrap();
 }

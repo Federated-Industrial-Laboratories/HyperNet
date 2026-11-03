@@ -164,6 +164,9 @@ fn check_diagnostics_keep_early_outcomes_bounds_and_redaction_with_failed_sink()
         connected: Arc::new(AtomicBool::new(true)),
         cancelled: Arc::new(AtomicBool::new(false)),
         reply,
+        _slot: Arc::new(tokio::sync::Semaphore::new(control::MAXIMUM_PENDING))
+            .try_acquire_owned()
+            .unwrap(),
         timing: Some(Timing {
             started: 110,
             sample: Some(7),
@@ -493,24 +496,58 @@ fn recovered_retirement_completes_without_replacing_its_target_or_deadline() {
 }
 
 #[test]
-fn queued_check_prepares_both_gates_before_the_normal_renewal_timer() {
+fn longer_caller_wait_does_not_renew_current_gates() {
     let now = crate::authority_challenge::boot_time_ms().unwrap();
-    let caller_end = now + 2000;
-    let route_end = now + 1500;
-    let old_endpoint = now + 250;
-    let old_stream = now + 300;
+    let caller_end = now + 5000;
+    let route_end = now + 4000;
+    let old_endpoint = now + 2000;
+    let old_stream = now + 2500;
     let budget = 10;
-    assert!(now < refresh_at(old_endpoint, budget, None));
-    assert!(now < refresh_at(old_stream, budget, Some(now)));
     let mut endpoint = EndpointPermission {
         gate: route_io::Gate::new(old_endpoint),
         accepted_at: None,
         renewals: 0,
     };
     let mut stream = prepared_stream(old_stream, route_end);
+    endpoint
+        .prepare(caller_end.min(route_end), budget, |_| {
+            panic!("caller wait renewed a current endpoint")
+        })
+        .unwrap();
+    stream
+        .prepare_check(
+            caller_end,
+            budget,
+            || false,
+            |_| panic!("caller wait renewed a current stream"),
+        )
+        .unwrap();
+    let read_end = caller_end
+        .min(endpoint.gate.expiry().unwrap())
+        .min(stream.check_deadline(now).unwrap());
+    assert_eq!(read_end, old_endpoint);
+    assert!(read_end < caller_end);
+    assert_eq!(stream.forwarding.deadline, route_end);
+    assert_eq!(stream.gate.expiry().unwrap(), old_stream);
+    assert_eq!(endpoint.renewals, 0);
+}
+
+#[test]
+fn due_check_gates_renew_once_with_the_original_wait_bound() {
+    let now = crate::authority_challenge::boot_time_ms().unwrap();
+    let caller_end = now + 5000;
+    let route_end = now + 4000;
+    let budget = 700;
+    let mut endpoint = EndpointPermission {
+        gate: route_io::Gate::new(now + 1000),
+        accepted_at: Some(now.saturating_sub(2000)),
+        renewals: 0,
+    };
+    let mut stream = prepared_stream(now + 1200, route_end);
+    stream.accepted_at = now.saturating_sub(2000);
     let mut stream_renewals = 0;
     endpoint
-        .prepare_check(caller_end.min(route_end), budget, |bound| {
+        .prepare(caller_end.min(route_end), budget, |bound| {
             assert_eq!(bound, route_end);
             Ok(now + 1400)
         })
@@ -527,17 +564,14 @@ fn queued_check_prepares_both_gates_before_the_normal_renewal_timer() {
             },
         )
         .unwrap();
-    // The bounded work crosses both old gates, but uses only the fresh certified tails.
-    std::thread::sleep(Duration::from_millis(350));
     let completed = crate::authority_challenge::boot_time_ms().unwrap();
-    assert!(completed >= old_endpoint && completed >= old_stream);
     let read_end = caller_end
         .min(endpoint.gate.expiry().unwrap())
         .min(stream.check_deadline(completed).unwrap());
     assert!(completed < read_end);
     assert_eq!(read_end, now + 1400);
     assert_eq!(stream.forwarding.deadline, route_end);
-    assert_eq!(stream.gate.expiry().unwrap(), route_end);
+    assert_eq!(stream.gate.expiry().unwrap(), now + 1800);
     assert_eq!(endpoint.renewals, 1);
     assert_eq!(
         stream_renewals, 1,
@@ -555,7 +589,7 @@ fn check_preparation_keeps_original_deadline_before_and_after_renewal() {
     };
     assert!(
         endpoint
-            .prepare_check(now, 100, |_| panic!("expired check renewed endpoint"))
+            .prepare(now, 100, |_| panic!("expired check renewed endpoint"))
             .is_err()
     );
     let mut stream = prepared_stream(now + 1000, now + 2000);
@@ -573,11 +607,12 @@ fn check_preparation_keeps_original_deadline_before_and_after_renewal() {
     let now = crate::authority_challenge::boot_time_ms().unwrap();
     let old = now + 60;
     stream.gate.renew(old).unwrap();
+    stream.accepted_at = now.saturating_sub(1000);
     assert!(
         stream
             .prepare_check(
                 now + 100,
-                10,
+                100,
                 || false,
                 |bound| {
                     assert_eq!(bound, now + 100);
@@ -610,11 +645,12 @@ fn check_preparation_does_not_revive_cancelled_or_completed_streams() {
     );
     let cancelled = AtomicBool::new(false);
     let old = stream.gate.expiry().unwrap();
+    stream.accepted_at = now.saturating_sub(2000);
     assert!(
         stream
             .prepare_check(
                 now + 2000,
-                100,
+                600,
                 || cancelled.load(Ordering::Acquire),
                 |_| {
                     cancelled.store(true, Ordering::Release);
@@ -629,7 +665,7 @@ fn check_preparation_does_not_revive_cancelled_or_completed_streams() {
         stream
             .prepare_check(
                 now + 2000,
-                100,
+                600,
                 || false,
                 |_| {
                     forwarding.finished.store(true, Ordering::Release);
@@ -652,7 +688,7 @@ fn check_preparation_reuses_sufficient_headroom_and_preserves_refusal() {
     };
     let mut stream = prepared_stream(now + 5000, now + 10000);
     endpoint
-        .prepare_check(now + 1000, 10, |_| panic!("current endpoint renewed"))
+        .prepare(now + 1000, 10, |_| panic!("current endpoint renewed"))
         .unwrap();
     stream
         .prepare_check(
@@ -663,16 +699,18 @@ fn check_preparation_reuses_sufficient_headroom_and_preserves_refusal() {
         )
         .unwrap();
     assert_eq!(endpoint.renewals, 0);
+    endpoint.accepted_at = Some(now.saturating_sub(10000));
+    stream.accepted_at = now.saturating_sub(10000);
     assert!(
         endpoint
-            .prepare_check(now + 6000, 10, |_| anyhow::bail!("authority refused"))
+            .prepare(now + 6000, 3000, |_| anyhow::bail!("authority refused"))
             .is_err()
     );
     assert!(
         stream
             .prepare_check(
                 now + 6000,
-                10,
+                3000,
                 || false,
                 |_| anyhow::bail!("authority refused")
             )
@@ -715,7 +753,15 @@ async fn check_exchange_correlates_receipts_and_rejects_second_pending_session()
     let b = binding.clone();
     let privacy = ready.privacy.clone();
     let task = tokio::spawn(async move {
-        checks::exchange(endpoint, Arc::new(ready), &b, &key, &sender).await
+        checks::exchange(
+            endpoint,
+            Arc::new(ready),
+            &b,
+            &key,
+            &sender,
+            &Arc::new(tokio::sync::Semaphore::new(control::MAXIMUM_PENDING)),
+        )
+        .await
     });
     route_io::send(&mut companion, &control::encode(&request).unwrap())
         .await
@@ -778,7 +824,15 @@ async fn cancellation_and_disconnect_invalidate_queued_and_executing_checks() {
     let (endpoint, mut companion) = tokio::net::UnixStream::pair().unwrap();
     let (sender, mut queue) = mpsc::channel(control::MAXIMUM_PENDING);
     let task = tokio::spawn(async move {
-        checks::exchange(endpoint, Arc::new(ready), &binding, &key, &sender).await
+        checks::exchange(
+            endpoint,
+            Arc::new(ready),
+            &binding,
+            &key,
+            &sender,
+            &Arc::new(tokio::sync::Semaphore::new(control::MAXIMUM_PENDING)),
+        )
+        .await
     });
     route_io::send(&mut companion, &control::encode(&request).unwrap())
         .await
@@ -810,4 +864,273 @@ async fn cancellation_and_disconnect_invalidate_queued_and_executing_checks() {
             .is_err()
     );
     assert!(!check.connected.load(Ordering::Acquire));
+}
+
+#[test]
+fn completed_exchange_requires_current_control_stream_gates_and_original_deadline() {
+    for fault in 0..10 {
+        let (_, _, ready, request) = fixture();
+        let now = request.caller_started_boot_ms;
+        let (reply, _receiver) = tokio::sync::oneshot::channel();
+        let mut check = checks::Check {
+            request: request.clone(),
+            ready: Arc::new(ready),
+            connected: Arc::new(AtomicBool::new(true)),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            reply,
+            timing: None,
+            _slot: Arc::new(tokio::sync::Semaphore::new(control::MAXIMUM_PENDING))
+                .try_acquire_owned()
+                .unwrap(),
+        };
+        let forwarding = Arc::new(Forwarding {
+            deadline: request.caller_deadline_boot_ms,
+            established: AtomicBool::new(true),
+            finished: AtomicBool::new(false),
+        });
+        let stream = LiveStream {
+            reference: request.session.clone(),
+            proof_digest: [91; 32],
+            gate: route_io::Gate::new(now + 4000),
+            accepted_at: now,
+            retry_after: 0,
+            renewal_turn: 0,
+            forwarding: forwarding.clone(),
+        };
+        let permission = EndpointPermission {
+            gate: route_io::Gate::new(now + 3000),
+            accepted_at: Some(now),
+            renewals: 0,
+        };
+        let mut live = BTreeMap::from([(request.session.id, stream)]);
+        assert!(
+            check
+                .completion_stream(&live, &permission, now)
+                .unwrap()
+                .is_some()
+        );
+        let mut completed_at = now;
+        match fault {
+            0 => check.cancelled.store(true, Ordering::Release),
+            1 => check.connected.store(false, Ordering::Release),
+            2 => {
+                Arc::get_mut(&mut check.ready)
+                    .unwrap()
+                    .challenge
+                    .control_generation += 1
+            }
+            3 => {
+                live.get_mut(&request.session.id)
+                    .unwrap()
+                    .reference
+                    .generation += 1
+            }
+            4 => {
+                live.remove(&request.session.id);
+            }
+            5 => forwarding.finished.store(true, Ordering::Release),
+            6 => forwarding.established.store(false, Ordering::Release),
+            7 => live[&request.session.id].gate.close(),
+            8 => permission.gate.close(),
+            9 => completed_at = request.caller_deadline_boot_ms,
+            _ => unreachable!(),
+        }
+        let result = check.completion_stream(&live, &permission, completed_at);
+        if (3..=7).contains(&fault) {
+            assert!(result.unwrap().is_none(), "fault {fault}");
+        } else {
+            assert!(result.is_err(), "fault {fault}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn checks_overlap_and_correlate_out_of_order_without_waiting_for_a_slow_check() {
+    let (binding, key, ready, request) = fixture();
+    let (endpoint, mut companion) = tokio::net::UnixStream::pair().unwrap();
+    let (sender, mut queue) = mpsc::channel(control::MAXIMUM_PENDING);
+    let slots = Arc::new(tokio::sync::Semaphore::new(control::MAXIMUM_PENDING));
+    let worker_slots = slots.clone();
+    let verify_binding = binding.clone();
+    let task = tokio::spawn(async move {
+        checks::exchange(
+            endpoint,
+            Arc::new(ready),
+            &binding,
+            &key,
+            &sender,
+            &worker_slots,
+        )
+        .await
+    });
+    route_io::send(&mut companion, &control::encode(&request).unwrap())
+        .await
+        .unwrap();
+    let slow = tokio::time::timeout(Duration::from_secs(1), queue.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut other = request.clone();
+    other.nonce = [12; 32];
+    other.local_connection_id = "incoming-2".into();
+    other.session.id = [13; 32];
+    route_io::send(&mut companion, &control::encode(&other).unwrap())
+        .await
+        .unwrap();
+    let fast = tokio::time::timeout(Duration::from_secs(1), queue.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(slots.available_permits(), control::MAXIMUM_PENDING - 2);
+    let receipt = checks::unavailable(
+        other.clone(),
+        fast.ready.privacy.clone(),
+        Disposition::NotActive,
+    );
+    fast.respond(receipt);
+    let bytes = tokio::time::timeout(
+        Duration::from_secs(1),
+        route_io::receive(&mut companion, control::MAXIMUM_FRAME),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let receipt: Receipt = control::verify(&bytes, &verify_binding).unwrap();
+    assert_eq!(receipt.request, other);
+    assert_eq!(slots.available_permits(), control::MAXIMUM_PENDING - 1);
+    let receipt = checks::unavailable(
+        request.clone(),
+        slow.ready.privacy.clone(),
+        Disposition::NotActive,
+    );
+    slow.respond(receipt);
+    let bytes = tokio::time::timeout(
+        Duration::from_secs(1),
+        route_io::receive(&mut companion, control::MAXIMUM_FRAME),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let receipt: Receipt = control::verify(&bytes, &verify_binding).unwrap();
+    assert_eq!(receipt.request, request);
+    assert_eq!(slots.available_permits(), control::MAXIMUM_PENDING);
+    drop(companion);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn four_total_check_slots_include_work_draining_from_the_previous_control() {
+    let (binding, key, ready, request) = fixture();
+    let (endpoint, mut companion) = tokio::net::UnixStream::pair().unwrap();
+    let (sender, mut queue) = mpsc::channel(control::MAXIMUM_PENDING);
+    let slots = Arc::new(tokio::sync::Semaphore::new(control::MAXIMUM_PENDING));
+    let worker_slots = slots.clone();
+    let worker_binding = binding.clone();
+    let worker_key = key.clone();
+    let worker_ready = ready.clone();
+    let worker_sender = sender.clone();
+    let task = tokio::spawn(async move {
+        checks::exchange(
+            endpoint,
+            Arc::new(worker_ready),
+            &worker_binding,
+            &worker_key,
+            &worker_sender,
+            &worker_slots,
+        )
+        .await
+    });
+    let mut executing = Vec::new();
+    for index in 0..control::MAXIMUM_PENDING {
+        let mut next = request.clone();
+        next.nonce = [20 + index as u8; 32];
+        next.session.id = [30 + index as u8; 32];
+        next.local_connection_id = format!("incoming-{index}");
+        route_io::send(&mut companion, &control::encode(&next).unwrap())
+            .await
+            .unwrap();
+        executing.push(
+            tokio::time::timeout(Duration::from_secs(1), queue.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    assert_eq!(slots.available_permits(), 0);
+    assert!(queue.try_recv().is_err());
+    drop(companion);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    assert!(
+        executing
+            .iter()
+            .all(|check| !check.connected.load(Ordering::Acquire))
+    );
+
+    let (endpoint, mut companion) = tokio::net::UnixStream::pair().unwrap();
+    let mut ready = ready;
+    ready.challenge.control_generation += 1;
+    let mut request = request;
+    request.control_generation += 1;
+    let worker_slots = slots.clone();
+    let verify_binding = binding.clone();
+    let task = tokio::spawn(async move {
+        checks::exchange(
+            endpoint,
+            Arc::new(ready),
+            &binding,
+            &key,
+            &sender,
+            &worker_slots,
+        )
+        .await
+    });
+    route_io::send(&mut companion, &control::encode(&request).unwrap())
+        .await
+        .unwrap();
+    let bytes = tokio::time::timeout(
+        Duration::from_secs(1),
+        route_io::receive(&mut companion, control::MAXIMUM_FRAME),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let receipt: Receipt = control::verify(&bytes, &verify_binding).unwrap();
+    assert_eq!(receipt.request, request);
+    assert_eq!(receipt.disposition, Disposition::Unavailable);
+    assert!(queue.try_recv().is_err());
+    drop(executing.pop());
+    assert_eq!(slots.available_permits(), 1);
+    request.nonce = [99; 32];
+    route_io::send(&mut companion, &control::encode(&request).unwrap())
+        .await
+        .unwrap();
+    let admitted = tokio::time::timeout(Duration::from_secs(1), queue.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(admitted.request, request);
+    assert_eq!(slots.available_permits(), 0);
+    drop(admitted);
+    drop(executing);
+    drop(companion);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(slots.available_permits(), control::MAXIMUM_PENDING);
 }

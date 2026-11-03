@@ -24,6 +24,7 @@ use anyhow::{Context, Result, ensure};
 use std::path::Path;
 #[path = "RouteAuthorityRead.rs"]
 mod read;
+pub(crate) use read::{PreparedRead, ReadCompletion};
 fn a(v: Vec<V>) -> V {
     V::Array(v)
 }
@@ -896,18 +897,19 @@ impl<'a> Client<'a> {
         }))?;
         self.effect_deadline()
     }
-    /// The fresh read never recovers or falls back to an ordinary request.
-    pub fn check_stream(
+    /// Preparation and completion stay on the requester actor. Only the exchange
+    /// between them may run concurrently; neither path recovers an ordinary effect.
+    pub(crate) fn prepare_check_stream(
         &mut self,
         session: &VersionRef,
         caller_started_boot_ms: u64,
-    ) -> Result<(streams::control::Authority, bool, u64)> {
+    ) -> Result<PreparedRead> {
         self.active.check(self.guard)?;
         ensure!(
             self.store.resume_ordinary()?.is_none() && self.store.resume_fence()?.is_none(),
             "fresh application authority requester is busy"
         );
-        let observation = self.read_observation(
+        self.prepare_read(
             DomainCommand::Stream(streams::Command::Permit {
                 session: session.clone(),
             }),
@@ -916,7 +918,15 @@ impl<'a> Client<'a> {
                     .checked_add(authority_challenge::MAXIMUM_DURATION_MS)
                     .context("application challenge ceiling overflow")?,
             ),
-        )?;
+        )
+    }
+    pub(crate) fn finish_check_stream(
+        &mut self,
+        prepared: PreparedRead,
+        completion: Result<ReadCompletion>,
+    ) -> Result<(streams::control::Authority, bool, u64)> {
+        let original_deadline = prepared.deadline();
+        let observation = self.finish_read(prepared, completion)?;
         ensure!(
             observation.disposition != Disposition::Pending,
             "fresh application authority is pending"
@@ -933,9 +943,7 @@ impl<'a> Client<'a> {
             .boot_ms
             .saturating_add(remaining)
             .min(health.valid_until_boot_ms());
-        if let Some(caller) = self.deadline {
-            deadline = deadline.min(caller);
-        }
+        deadline = deadline.min(original_deadline);
         let permitted = observation.disposition == Disposition::Permit;
         if permitted {
             deadline = deadline.min(self.effect_deadline()?);

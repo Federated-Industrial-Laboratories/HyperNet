@@ -74,12 +74,15 @@ action is introduced by this protocol.
 Core invokes the existing read-only `Stream::Permit` evaluator for that exact
 live session. Before that separate fresh read, the endpoint prepares its own
 deployment gate and the selected stream gate through their existing renewal
-operations. Each gate can renew once when its old expiry would clip the original
-caller deadline or its normal action headroom is due. This also applies when a
-check arrived before the periodic renewal timer became due. Preparation rechecks
+operations. Each gate can renew once when its normal action headroom is due.
+The caller deadline bounds waiting; it does not require a current gate to remain
+valid for that entire wait. A current gate with sufficient action headroom needs
+no preparation read. The separate fresh read and its receipt remain capped by
+both gates, even when their expiry precedes the caller deadline. Preparation rechecks
 the exact live session, cancellation, control identity and current clock. It uses
 the original caller and route deadlines; a fresh certified expiry can still be
-shorter and remains binding. There is no renewal loop or added read capacity.
+shorter and remains binding. There is no renewal loop or increase to the
+four-check admission bound.
 Readiness reads use the same challenge ceiling as the final check: the original
 caller start plus five seconds. They do not restart that window when renewal
 begins. A shorter caller wait still bounds transport, persistence and local use;
@@ -90,6 +93,25 @@ expiries remain binding, and cancellation still prevents a completed check.
 An unresolved ordinary request or fence remaining after readiness maintenance
 makes the fresh read unavailable. The read never uses a readiness result as its
 answer and never falls back to an ordinary authority mutation.
+The endpoint admits at most four checks in total across its queue and in-flight
+exchanges, including cancelled exchanges draining after a control reconnect.
+The existing one-pending-check-per-stream rule remains. Fresh certification
+exchanges can overlap on separate bounded workers; they receive only immutable
+signed requests, history anchors, clock sources and captured absolute deadlines.
+The endpoint actor alone issues and consumes challenges, owns requester state,
+and publishes durable authority and domain state. Maintenance keeps the same
+synchronous prepare/exchange/finish composition.
+
+On completion the actor rechecks the current control generation, exact session,
+forwarding state, gates, consent and clock before accepting evidence. Verification
+uses the current domain records, generations, causal floor and retained history;
+an unresolved ordinary request or fence still prevents acceptance. A response
+that has been overtaken by the current floor is refused, without rolling the floor
+back or retrying under a new deadline. Each challenge can be consumed once.
+Cancellation and shutdown suppress receipts. Shutdown cancels and joins the
+remaining exchanges under their original absolute ends, then discards the
+actor-owned challenges; it does not detach authority work.
+
 Verified refusals retain their structured disposition, refusal code, scope,
 epoch, height, state digest, statement digest, evaluation time and original
 statement expiry. Error strings are not authority evidence.
@@ -126,7 +148,7 @@ bound. An expired or unavailable clock observation still refuses the check.
 The live session must already have completed its payload handoff. After the fresh
 read, Core rechecks current gates, clock evidence, connection/cancellation state
 and forwarding state. The forwarding task independently marks completion even
-while the serial authority requester is blocked. A completed or expired stream
+while the authority actor is processing maintenance or a completion. A completed or expired stream
 cannot receive a permitted receipt merely because its JoinSet completion is still
 queued.
 
@@ -146,11 +168,13 @@ sent. A certified pending result is unavailable, not a refusal or permit.
 ## Bounds and cancellation
 
 The channel admits at most four pending checks, with at most one per local
-connection or session. The endpoint queue holds at most four items and executes
-one authority read at a time. Its framed-reader queue also holds at most four
-bounded frames. Overflow receives a bounded unavailable response; it cannot create
-an unbounded task or authority queue. Termination, stream closure and permission
-renewals precede check work in endpoint dispatch.
+connection or session. One admission permit follows each check through the
+endpoint queue, its worker and finalization, so queued and in-flight work together
+never exceed four, including across reconnects. The framed-reader queue also
+holds at most four bounded frames. Overflow receives a bounded unavailable
+response; it cannot create an unbounded task or authority queue. Check issue and
+completion share the existing fair dispatch turn with bounded lifecycle work.
+Termination closes gates and cancels pending checks before joining workers.
 
 Cancellation binds the complete request and suppresses its result. Disconnect
 invalidates all checks on that channel. A read already executing may finish its

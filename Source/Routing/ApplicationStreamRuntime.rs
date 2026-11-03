@@ -96,9 +96,7 @@ impl LiveStream {
         self.check_deadline(now)
             .context("application stream is no longer current")?;
         let expiry = self.gate.expiry()?;
-        if expiry < deadline
-            || now >= refresh_at(expiry, budget.saturating_mul(2), Some(self.accepted_at))
-        {
+        if now >= refresh_at(expiry, budget.saturating_mul(2), Some(self.accepted_at)) {
             let expiry = refresh(deadline)?;
             crate::authority_local_transport::remaining(deadline)?;
             ensure!(
@@ -274,6 +272,15 @@ enum Event {
     Incoming(std::result::Result<Result<Session>, tokio::task::JoinError>),
     Public(Queued<Session>),
     Check(checks::Check),
+    Checked(
+        std::result::Result<
+            (
+                tokio::task::Id,
+                Result<crate::route_authority::ReadCompletion>,
+            ),
+            tokio::task::JoinError,
+        >,
+    ),
 }
 fn event<T>(
     polled: std::task::Poll<Option<T>>,
@@ -538,6 +545,8 @@ pub(super) async fn endpoint(
     let mut handshakes: JoinSet<Result<OpenedStream>> = JoinSet::new();
     let mut forwarding: JoinSet<(Digest, Result<()>)> = JoinSet::new();
     let mut live: BTreeMap<Digest, LiveStream> = BTreeMap::new();
+    let mut reads: JoinSet<Result<crate::route_authority::ReadCompletion>> = JoinSet::new();
+    let mut pending: BTreeMap<tokio::task::Id, checks::Pending> = BTreeMap::new();
     let mut closing: Option<PendingClose> = None;
     let mut cleanup_diagnostics = 0;
     let mut schedule = Schedule::default();
@@ -568,7 +577,10 @@ pub(super) async fn endpoint(
             next=schedule.next(|class,cx|match class {
                 Dispatch::Own if own_due=>std::task::Poll::Ready(Event::Maintenance(Maintenance::Own)),
                 Dispatch::Stream if stream_due.is_some()=>std::task::Poll::Ready(Event::Maintenance(Maintenance::Stream(stream_due.expect("due stream")))),
-                Dispatch::Check=>event(check_requests.poll_recv(cx),Event::Check),
+                Dispatch::Check=>{
+                    let completed=event(reads.poll_join_next_with_id(cx),Event::Checked);
+                    if completed.is_ready() {completed} else {event(check_requests.poll_recv(cx),Event::Check)}
+                },
                 Dispatch::Handshake if !handshakes.is_empty()=>event(handshakes.poll_join_next(cx),Event::Handshake),
                 Dispatch::Incoming if !incoming.is_empty()=>event(incoming.poll_join_next(cx),Event::Incoming),
                 Dispatch::Public if public=>event(listener_requests.as_mut().expect("enabled listener").poll_recv(cx),Event::Public),
@@ -633,8 +645,34 @@ pub(super) async fn endpoint(
                 } else {retry_after=tokio::time::Instant::now()+Duration::from_millis(own.limits.idle_ms.min(1000));}
             },
             Event::Check(check)=>{
-                let receipt=checks::evaluate(&check,&mut live,&mut permission,client,guard,active);
-                if check.connected.load(Ordering::Acquire) && !check.cancelled.load(Ordering::Acquire) {let _=check.reply.send(receipt);}
+                match checks::prepare(&check,&mut live,&mut permission,client,guard,active) {
+                    Ok(checks::Preparation::Ready(read))=>{
+                        let read=*read;
+                        let exchange=read.exchange();
+                        let clock=guard.clock_source();
+                        let connected=check.connected.clone();
+                        let cancelled=check.cancelled.clone();
+                        let stream=live.get(&check.request.session.id).expect("prepared live stream");
+                        let forwarding=stream.forwarding.clone();
+                        let stream_gate=stream.gate.clone();
+                        let endpoint_gate=permission.gate.clone();
+                        let task=reads.spawn_blocking(move || exchange.run(|| {
+                            ensure!(connected.load(Ordering::Acquire) && !cancelled.load(Ordering::Acquire), "application check cancelled");
+                            ensure!(forwarding.established.load(Ordering::Acquire) && !forwarding.finished.load(Ordering::Acquire), "application stream is no longer current");
+                            crate::authority_local_transport::remaining(stream_gate.expiry()?.min(endpoint_gate.expiry()?))?;
+                            clock.health()
+                        }));
+                        pending.insert(task.id(),checks::Pending {check,read});
+                    },
+                    Ok(checks::Preparation::Complete(receipt))=>{let receipt=check.complete(Ok(*receipt));check.respond(receipt);},
+                    Err(error)=>{let receipt=check.complete(Err(error));check.respond(receipt);},
+                }
+            },
+            Event::Checked(result)=>{
+                let (id,completion)=match result {Ok(result)=>result,Err(error)=>(error.id(),Err(error.into()))};
+                let checks::Pending {check,read}=pending.remove(&id).context("application check worker has no owner")?;
+                let receipt=checks::finish(&check,read,completion,&live,&permission,client,guard,active);
+                check.respond(receipt);
             },
         }
     }Ok(())}.await;
@@ -646,6 +684,11 @@ pub(super) async fn endpoint(
     for stream in live.values() {
         stream.gate.close();
     }
+    check_requests.close();
+    while check_requests.try_recv().is_ok() {}
+    for check in pending.values() {
+        check.check.cancelled.store(true, Ordering::Release);
+    }
     incoming.abort_all();
     handshakes.abort_all();
     forwarding.abort_all();
@@ -655,6 +698,15 @@ pub(super) async fn endpoint(
     drain(&mut incoming).await;
     drain(&mut handshakes).await;
     drain(&mut forwarding).await;
+    // Blocking exchanges keep their captured absolute end (at most five seconds).
+    // Join them instead of detaching work, then discard each actor-owned challenge.
+    while reads.join_next().await.is_some() {}
+    let mut discard_error = None;
+    for (_, check) in pending {
+        if let Err(error) = client.discard_read(check.read) {
+            discard_error.get_or_insert(error);
+        }
+    }
     if let Some(mut close) = closing {
         close.attempt(client, &mut cleanup_diagnostics);
     }
@@ -665,7 +717,11 @@ pub(super) async fn endpoint(
             |client| client.stream_close(&stream.reference, stream.proof_digest),
         );
     }
-    outcome
+    outcome?;
+    if let Some(error) = discard_error {
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -10,6 +10,53 @@ pub(super) struct Observation {
     pub code: u64,
 }
 
+// The actor retains the challenge and all mutable authority state. A worker receives
+// only this immutable, bounded exchange snapshot; it cannot accept an observation.
+#[derive(Clone)]
+pub(crate) struct ReadExchange {
+    descriptor: proof::TrustDescriptor,
+    signed: Vec<u8>,
+    challenge: Vec<u8>,
+    deadline: u64,
+    prefix: proof::Prefix,
+    head: Option<crate::authority_history::TreeHead>,
+}
+pub(crate) type ReadCompletion = (transport::CertifiedReply, transport::HistoryEvidence);
+pub(crate) struct PreparedRead {
+    exchange: ReadExchange,
+    command: DomainCommand,
+    started: u64,
+}
+impl PreparedRead {
+    pub(crate) fn exchange(&self) -> ReadExchange {
+        self.exchange.clone()
+    }
+    pub(crate) fn deadline(&self) -> u64 {
+        self.exchange.deadline
+    }
+}
+impl ReadExchange {
+    pub(crate) fn run(
+        self,
+        mut current: impl FnMut() -> Result<authority_challenge::ClockHealth>,
+    ) -> Result<ReadCompletion> {
+        transport::remaining(self.deadline)?;
+        current()?.observe()?;
+        transport::exchange_read(
+            &self.descriptor,
+            &self.signed,
+            &self.challenge,
+            self.deadline,
+            Path::new("/Authority/Control.sock"),
+            &self.prefix,
+            self.head.as_ref(),
+            &mut current,
+        )
+        .map_err(Client::retry_read)
+        .context("obtain fresh Route context and history")
+    }
+}
+
 pub(super) fn issue_challenge(
     session: &mut Session,
     request: &[u8],
@@ -66,6 +113,16 @@ impl Client<'_> {
         command: DomainCommand,
         challenge_ceiling: Option<u64>,
     ) -> Result<Observation> {
+        let prepared = self.prepare_read(command, challenge_ceiling)?;
+        let completion = prepared.exchange().run(|| self.guard.health());
+        self.finish_read(prepared, completion)
+    }
+
+    pub(super) fn prepare_read(
+        &mut self,
+        command: DomainCommand,
+        challenge_ceiling: Option<u64>,
+    ) -> Result<PreparedRead> {
         ensure!(
             matches!(
                 command,
@@ -126,19 +183,49 @@ impl Client<'_> {
             challenge_ceiling,
             health,
         )?;
-        let outcome = (|| {
-            let (reply, history) = transport::exchange_read(
-                &descriptor,
-                &signed,
-                &challenge,
+        Ok(PreparedRead {
+            exchange: ReadExchange {
+                descriptor,
+                signed,
+                challenge,
                 deadline,
-                Path::new("/Authority/Control.sock"),
-                self.store.prefix(),
-                self.store.tree_head(),
-                &mut || self.guard.health(),
-            )
-            .map_err(Self::retry_read)
-            .context("obtain fresh Route context and history")?;
+                prefix: self.store.prefix().clone(),
+                head: self.store.tree_head().cloned(),
+            },
+            command,
+            started,
+        })
+    }
+
+    pub(crate) fn discard_read(&mut self, prepared: PreparedRead) -> Result<()> {
+        self.session.discard(&prepared.exchange.challenge)
+    }
+
+    pub(super) fn finish_read(
+        &mut self,
+        prepared: PreparedRead,
+        completion: Result<ReadCompletion>,
+    ) -> Result<Observation> {
+        let PreparedRead {
+            exchange,
+            command,
+            started,
+        } = prepared;
+        let ReadExchange {
+            descriptor,
+            signed,
+            challenge,
+            deadline,
+            ..
+        } = exchange;
+        let outcome = (|| {
+            self.active.check(self.guard)?;
+            transport::remaining(deadline)?;
+            ensure!(
+                self.store.resume_ordinary()?.is_none() && self.store.resume_fence()?.is_none(),
+                "fresh Route authority requester is busy"
+            );
+            let (reply, history) = completion?;
             let mut candidate = None;
             let verified = fresh::verify_response(
                 &descriptor,

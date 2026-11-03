@@ -12,6 +12,9 @@ fn check(ready: &Ready, request: &Request) -> checks::Check {
         cancelled: Arc::new(AtomicBool::new(false)),
         reply,
         timing: None,
+        _slot: Arc::new(tokio::sync::Semaphore::new(control::MAXIMUM_PENDING))
+            .try_acquire_owned()
+            .unwrap(),
     }
 }
 
