@@ -66,11 +66,13 @@ impl StreamCheck {
             .checked_sub(now.wall_ms)
             .filter(|remaining| *remaining > 0)
             .context("fresh application authority expired")?;
-        let certified_expiry = now
-            .boot_ms
-            .saturating_add(remaining)
-            .min(health.valid_until_boot_ms());
-        let deadline = certified_expiry.min(original_deadline);
+        // Gate renewal retains the certified permission lifetime, as ordinary
+        // stream maintenance does. The action assertion also ends with the
+        // current clock observation and its original read deadline.
+        let certified_expiry = now.boot_ms.saturating_add(remaining);
+        let deadline = certified_expiry
+            .min(health.valid_until_boot_ms())
+            .min(original_deadline);
         let renewal =
             (observation.disposition == Disposition::Permit).then(|| CertifiedStreamPermit {
                 session: session.clone(),

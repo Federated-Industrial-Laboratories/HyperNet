@@ -159,23 +159,36 @@ fn certified_stream_renewal_uses_exact_result_expiry_and_never_a_refusal() {
         },
     };
     let health = || {
-        authority_challenge::ClockHealth::new(1_000_000, 1000, 9000, 0)
-            .unwrap()
-            .frozen()
+        authority_challenge::ClockHealth::new(
+            1_000_000,
+            1000,
+            1000 + crate::consensus_clock::SAMPLE_LIFETIME_MS,
+            0,
+        )
+        .unwrap()
+        .frozen()
     };
-    let certified = || {
+    let certified = |original_deadline| {
         StreamCheck::certified(
             &session,
             observation(Disposition::Permit, 1_005_000),
-            2000,
+            original_deadline,
             health(),
         )
         .unwrap()
     };
-    let checked = certified();
+    // The real one-second clock observation bounds this action, not the
+    // independently certified permission used by ordinary stream maintenance.
+    let checked = certified(4000);
     assert_eq!(checked.deadline, 2000);
     assert_eq!(
         checked.renewal.unwrap().expiry_for(&session).unwrap(),
+        6000 - authority_challenge::DELTA_MS
+    );
+    let shorter_call = certified(1500);
+    assert_eq!(shorter_call.deadline, 1500);
+    assert_eq!(
+        shorter_call.renewal.unwrap().expiry_for(&session).unwrap(),
         6000 - authority_challenge::DELTA_MS
     );
     for field in 0..4 {
@@ -187,7 +200,7 @@ fn certified_stream_renewal_uses_exact_result_expiry_and_never_a_refusal() {
             3 => wrong.digest[0] ^= 1,
             _ => unreachable!(),
         }
-        assert!(certified().renewal.unwrap().expiry_for(&wrong).is_err());
+        assert!(certified(4000).renewal.unwrap().expiry_for(&wrong).is_err());
     }
     let denied = StreamCheck::certified(
         &session,
