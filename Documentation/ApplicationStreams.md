@@ -148,14 +148,20 @@ old session, or after its original absolute expiry. A client close alone cannot
 reopen a slot while old endpoint bytes might remain live. Restart never restores
 spent allowance or revives a closed generation.
 
-The endpoint rotates eight work classes: endpoint renewal, session renewal,
-authority checks, completed handshakes, attached arrivals, public arrivals,
-completed forwarding and cleanup. A continuously ready class receives a turn
-within eight work dispatches. Due sessions are ordered by their last renewal
-turn; new arrivals and serviced sessions cannot overtake older due sessions.
-With at most C active sessions, each continuously due session receives a renewal
-turn within 8*C work dispatches. These are dispatch bounds, not latency promises:
-each authority operation still has its original deadline and recovery contract.
+The endpoint rotates seven lifecycle work classes: endpoint renewal, session
+renewal, completed handshakes, attached arrivals, public arrivals, completed
+forwarding and cleanup. After each selected lifecycle event, one queued authority
+check can run before another lifecycle event. Checks alone do not wait for an
+idle class. The check queue keeps its original order and capacity. An expired or
+cancelled check retains its original outcome; selection never renews its budget.
+A continuously ready lifecycle class receives a turn within fourteen work
+dispatches, even under continuous checks. Due sessions are ordered by their last
+renewal turn; new arrivals and serviced sessions cannot overtake older due
+sessions. With at most C active sessions, each continuously due session receives
+a renewal turn within 14*C work dispatches. These are dispatch bounds, not latency
+promises: an in-flight authority operation is not preempted, and each operation
+keeps its original deadline and exact recovery contract. An unresolved ordinary
+request or fence still prevents a fresh authority check.
 
 Bounded process-local timing separates authority-check queue delay from work in
 the endpoint actor. The first 256 verified enqueues retain one numeric sample
@@ -191,7 +197,7 @@ session limit and separately bounded parser pool, plus at most one closed-sessio
 cleanup record. Cleanup preparation visits the endpoint gate and each session
 present at completion at most once, then attempts the exact close. Later arrivals
 cannot restart that pass. With C sessions at completion, cleanup receives its
-close attempt within 8*(C+2) work dispatches, or reaches its original deadline
+close attempt within 14*(C+2) work dispatches, or reaches its original deadline
 sooner. Cleanup retains its first deadline; it does not extend a session or
 certified permission. Gates still stop traffic at certified expiry, and expired
 or disconnected checks cannot obtain fresh authority. An expired or failed

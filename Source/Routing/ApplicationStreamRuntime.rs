@@ -206,10 +206,9 @@ enum Dispatch {
     Forwarding,
     Close,
 }
-const DISPATCH: [Dispatch; 8] = [
+const DISPATCH: [Dispatch; 7] = [
     Dispatch::Own,
     Dispatch::Stream,
-    Dispatch::Check,
     Dispatch::Handshake,
     Dispatch::Incoming,
     Dispatch::Public,
@@ -219,6 +218,7 @@ const DISPATCH: [Dispatch; 8] = [
 #[derive(Default)]
 struct Schedule {
     next: usize,
+    check_turn: bool,
     renewal_turn: u64,
 }
 impl Schedule {
@@ -234,20 +234,30 @@ impl Schedule {
         }))
         .await
     }
-    // No ready class waits through more than one eight-class rotation. Polling
-    // consumes only the selected existing queue entry; there is no staging queue.
+    // Interleave one queued check between non-check events. Other ready classes
+    // retain their rotation; checks alone do not wait for an idle class.
     fn poll<T>(
         &mut self,
         mut ready: impl FnMut(Dispatch) -> std::task::Poll<T>,
     ) -> std::task::Poll<T> {
+        let checked = self.check_turn;
+        if checked && let std::task::Poll::Ready(event) = ready(Dispatch::Check) {
+            self.check_turn = false;
+            return std::task::Poll::Ready(event);
+        }
         for offset in 0..DISPATCH.len() {
             let index = (self.next + offset) % DISPATCH.len();
             if let std::task::Poll::Ready(event) = ready(DISPATCH[index]) {
                 self.next = (index + 1) % DISPATCH.len();
+                self.check_turn = true;
                 return std::task::Poll::Ready(event);
             }
         }
-        std::task::Poll::Pending
+        if checked {
+            std::task::Poll::Pending
+        } else {
+            ready(Dispatch::Check)
+        }
     }
     fn renewed(&mut self) -> Result<u64> {
         self.renewal_turn = self

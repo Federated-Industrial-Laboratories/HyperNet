@@ -227,75 +227,8 @@ fn check_diagnostics_keep_early_outcomes_bounds_and_redaction_with_failed_sink()
     assert!(record.len() < 384);
 }
 
-#[tokio::test]
-async fn ready_checks_and_admissions_receive_turns_during_continuous_maintenance() {
-    use std::task::Poll;
-    let (_, _, ready, request) = fixture();
-    let (sender, mut checks) = mpsc::channel(control::MAXIMUM_PENDING);
-    let (reply, _receipt) = tokio::sync::oneshot::channel();
-    sender
-        .send(checks::Check {
-            request: request.clone(),
-            ready: Arc::new(ready),
-            connected: Arc::new(AtomicBool::new(true)),
-            cancelled: Arc::new(AtomicBool::new(false)),
-            reply,
-            timing: None,
-        })
-        .await
-        .unwrap();
-    let mut admissions = JoinSet::new();
-    let (completed, completion) = tokio::sync::oneshot::channel();
-    admissions.spawn(async move {
-        completed.send(()).unwrap();
-        17
-    });
-    tokio::time::timeout(Duration::from_secs(1), completion)
-        .await
-        .unwrap()
-        .unwrap();
-    let mut schedule = Schedule::default();
-    // Force Tokio's queue/JoinSet polls to reach their cooperative boundary.
-    // The selector must still give real queued work its promised turn.
-    for _ in 0..128 {
-        if !tokio::task::coop::has_budget_remaining() {
-            break;
-        }
-        tokio::task::consume_budget().await;
-    }
-    assert!(!tokio::task::coop::has_budget_remaining());
-    let mut seen_check = false;
-    let mut seen_admission = false;
-    let mut turns = Vec::new();
-    for _ in 0..DISPATCH.len() {
-        let selected = schedule
-            .next(|class, cx| match class {
-                Dispatch::Check => checks.poll_recv(cx).map(|check| {
-                    let check = check.expect("queued original check");
-                    assert_eq!(check.request, request);
-                    assert!(check.connected.load(Ordering::Acquire));
-                    seen_check = true;
-                    class
-                }),
-                Dispatch::Handshake => admissions.poll_join_next(cx).map(|admitted| {
-                    assert_eq!(admitted.unwrap().unwrap(), 17);
-                    seen_admission = true;
-                    class
-                }),
-                // Renewal, completed forwarding and cleanup stay continuously ready.
-                _ => Poll::Ready(class),
-            })
-            .await;
-        turns.push(selected);
-    }
-    assert!(seen_check && seen_admission);
-    assert_eq!(turns, DISPATCH);
-    assert_eq!(sender.capacity(), control::MAXIMUM_PENDING);
-    // A ready class arriving just after its turn also receives the next cycle.
-    for expected in DISPATCH {
-        assert_eq!(schedule.poll(Poll::Ready), Poll::Ready(expected));
-    }
-}
+#[path = "ApplicationStreamScheduleTests.rs"]
+mod schedule_tests;
 
 #[test]
 fn due_streams_are_serviced_before_renewed_low_ids_and_new_arrivals() {
