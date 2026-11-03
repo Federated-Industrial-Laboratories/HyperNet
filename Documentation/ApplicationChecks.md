@@ -75,6 +75,12 @@ Core invokes the existing read-only `Stream::Permit` evaluator for that exact
 live session. Before that separate fresh read, the endpoint prepares its own
 deployment gate and the selected stream gate through their existing renewal
 operations. Each gate can renew once when its normal action headroom is due.
+An exact established stream with an expired but still open cached gate can use
+this same bounded readiness renewal. Forwarding remains paused until it succeeds;
+the separate fresh action read is still required. Missing, replaced, closed,
+unestablished or finished streams, and streams beyond their fixed forwarding
+lifetime, cannot use this path. An expired caller or challenge window cannot be
+restarted by renewal.
 The caller deadline bounds waiting; it does not require a current gate to remain
 valid for that entire wait. A current gate with sufficient action headroom needs
 no preparation read. The separate fresh read and its receipt remain capped by
@@ -109,7 +115,7 @@ While its workers remain, completion has a separate dispatch class; unrelated
 synchronous admission, renewal and cleanup do not advance the actor's floor or
 consume its permission tail before completion. Clock/currentness checks,
 cancellation, control loss, original deadlines and termination remain active.
-A round does not renew any deadline or gate. After it drains, lifecycle work
+A round does not extend any caller, challenge or forwarding deadline. After it drains, lifecycle work
 retains its fair turn before another round; sustained arrivals cannot refill a
 round indefinitely. Independent authority progress can still overtake a read,
 and an expired gate still refuses it.
@@ -120,6 +126,19 @@ uses the current domain records, generations, causal floor and retained history;
 an unresolved ordinary request or fence still prevents acceptance. A response
 that has been overtaken by the current floor is refused, without rolling the floor
 back or retrying under a new deadline. Each challenge can be consumed once.
+
+A successfully verified and published `Stream::Permit` result also supplies a
+separate in-memory certified renewal bound to that exact session reference.
+After all completion checks, the actor can renew only that still-current live
+stream gate, clipped to its fixed forwarding lifetime. The receipt is first
+clipped against the old gate and the original read deadline; the renewal cannot
+extend that action's receipt. It does not renew the endpoint gate. Denied, stale,
+cancelled or failed checks supply no renewal, and completion never revives an
+expired or closed gate. Gate-renewal timing updates only after a successful
+renewal. Existing bounded check diagnostics distinguish missing, changed,
+unestablished, finished, forwarding-expired, closed and gate-expired streams
+without logging session identifiers or application payloads.
+
 Cancellation and shutdown suppress receipts. Shutdown cancels and joins the
 remaining exchanges under their original absolute ends, then discards the
 actor-owned challenges; it does not detach authority work.

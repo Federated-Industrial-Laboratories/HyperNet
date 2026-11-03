@@ -126,3 +126,94 @@ fn private_route_recurring_cost_replaces_outliers_and_excludes_other_actions() {
     assert_eq!(costs.voucher_ms(), 700);
     assert_eq!(costs.action_ms, 700);
 }
+
+#[test]
+fn certified_stream_renewal_uses_exact_result_expiry_and_never_a_refusal() {
+    let session = VersionRef {
+        kind: 173,
+        id: [1; 32],
+        generation: 1,
+        digest: [2; 32],
+    };
+    let observation = |disposition, expires| read::Observation {
+        value: None,
+        disposition,
+        code: 0,
+        statement: crate::authority_read::Statement {
+            scope: proof::Scope {
+                network: [3; 32],
+                incarnation: [4; 32],
+                configuration: [5; 32],
+                epoch: 1,
+            },
+            request: [6; 32],
+            challenge: [7; 32],
+            requester: [8; 32],
+            recipient: [8; 32],
+            height: 1,
+            node: [9; 32],
+            state: [10; 32],
+            evaluated_at_ms: 1_000_000,
+            expires_at_ms: expires,
+            result: [11; 32],
+        },
+    };
+    let health = || {
+        authority_challenge::ClockHealth::new(1_000_000, 1000, 9000, 0)
+            .unwrap()
+            .frozen()
+    };
+    let certified = || {
+        StreamCheck::certified(
+            &session,
+            observation(Disposition::Permit, 1_005_000),
+            2000,
+            health(),
+        )
+        .unwrap()
+    };
+    let checked = certified();
+    assert_eq!(checked.deadline, 2000);
+    assert_eq!(
+        checked.renewal.unwrap().expiry_for(&session).unwrap(),
+        6000 - authority_challenge::DELTA_MS
+    );
+    for field in 0..4 {
+        let mut wrong = session.clone();
+        match field {
+            0 => wrong.kind += 1,
+            1 => wrong.id[0] ^= 1,
+            2 => wrong.generation += 1,
+            3 => wrong.digest[0] ^= 1,
+            _ => unreachable!(),
+        }
+        assert!(certified().renewal.unwrap().expiry_for(&wrong).is_err());
+    }
+    let denied = StreamCheck::certified(
+        &session,
+        observation(Disposition::Refuse, 1_005_000),
+        2000,
+        health(),
+    )
+    .unwrap();
+    assert!(denied.renewal.is_none());
+    assert_eq!(denied.deadline, 2000);
+    assert!(
+        StreamCheck::certified(
+            &session,
+            observation(Disposition::Pending, 1_005_000),
+            2000,
+            health()
+        )
+        .is_err()
+    );
+    assert!(
+        StreamCheck::certified(
+            &session,
+            observation(Disposition::Permit, 999_999),
+            2000,
+            health()
+        )
+        .is_err()
+    );
+}

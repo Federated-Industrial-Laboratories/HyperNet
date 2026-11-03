@@ -325,12 +325,7 @@ fn pending_round_completion_precedes_a_long_lifecycle_turn_and_preserves_gate_ta
         }),
         Poll::Ready(Dispatch::Complete)
     );
-    assert!(
-        check
-            .completion_stream(&live, &endpoint, now + 200)
-            .unwrap()
-            .is_some()
-    );
+    assert!(check.completion_stream(&live, &endpoint, now + 200).is_ok());
     // A long intervening admission can consume a roughly 500 ms gate tail.
     // The gate still rejects at that time: scheduling never extends permission.
     assert!(

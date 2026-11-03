@@ -74,13 +74,62 @@ struct LiveStream {
     renewal_turn: u64,
     forwarding: Arc<Forwarding>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InactiveStream {
+    Missing,
+    ReferenceChanged,
+    NotEstablished,
+    ForwardingFinished,
+    ForwardingExpired,
+    GateClosed,
+    GateExpired,
+}
+impl std::fmt::Display for InactiveStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "application stream is not active: {self:?}")
+    }
+}
+impl std::error::Error for InactiveStream {}
 impl LiveStream {
-    fn check_deadline(&self, now: u64) -> Option<u64> {
-        let deadline = self.forwarding.deadline.min(self.gate.expiry().ok()?);
-        (self.forwarding.established.load(Ordering::Acquire)
-            && !self.forwarding.finished.load(Ordering::Acquire)
-            && deadline > now)
-            .then_some(deadline)
+    // An expired open gate pauses forwarding but can still receive one bounded
+    // readiness renewal. Closed or ended streams never enter that renewal path.
+    fn preparation_deadline(&self, now: u64) -> Result<u64, InactiveStream> {
+        if !self.forwarding.established.load(Ordering::Acquire) {
+            return Err(InactiveStream::NotEstablished);
+        }
+        if self.forwarding.finished.load(Ordering::Acquire) {
+            return Err(InactiveStream::ForwardingFinished);
+        }
+        if self.forwarding.deadline <= now {
+            return Err(InactiveStream::ForwardingExpired);
+        }
+        self.gate.expiry().map_err(|_| InactiveStream::GateClosed)?;
+        Ok(self.forwarding.deadline)
+    }
+    fn current_deadline(&self, now: u64) -> Result<u64, InactiveStream> {
+        let deadline = self
+            .preparation_deadline(now)?
+            .min(self.gate.expiry().map_err(|_| InactiveStream::GateClosed)?);
+        if deadline <= now {
+            return Err(InactiveStream::GateExpired);
+        }
+        Ok(deadline)
+    }
+    fn renew_checked(
+        &mut self,
+        permit: crate::route_authority::CertifiedStreamPermit,
+        receipt_end: u64,
+    ) -> Result<()> {
+        crate::authority_local_transport::remaining(receipt_end)?;
+        let now = crate::authority_challenge::boot_time_ms()?;
+        self.current_deadline(now)?;
+        let expires = permit
+            .expiry_for(&self.reference)?
+            .min(self.forwarding.deadline);
+        self.gate.renew(expires)?;
+        self.accepted_at = now;
+        self.retry_after = 0;
+        Ok(())
     }
     fn prepare_check(
         &mut self,
@@ -93,8 +142,7 @@ impl LiveStream {
         crate::authority_local_transport::remaining(deadline)?;
         let now = crate::authority_challenge::boot_time_ms()?;
         ensure!(!cancelled(), "application check cancelled");
-        self.check_deadline(now)
-            .context("application stream is no longer current")?;
+        self.preparation_deadline(now)?;
         let expiry = self.gate.expiry()?;
         if now >= refresh_at(expiry, budget.saturating_mul(2), Some(self.accepted_at)) {
             let expiry = refresh(deadline)?;
@@ -688,7 +736,7 @@ pub(super) async fn endpoint(
             Event::Checked(result)=>{
                 let (id,completion)=match result {Ok(result)=>result,Err(error)=>(error.id(),Err(error.into()))};
                 let checks::Pending {check,read}=pending.remove(&id).context("application check worker has no owner")?;
-                let receipt=checks::finish(&check,read,completion,&live,&permission,client,guard,active);
+                let receipt=checks::finish(&check,read,completion,&mut live,&permission,client,guard,active);
                 check.respond(receipt);
             },
         }

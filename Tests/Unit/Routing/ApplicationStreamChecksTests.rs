@@ -225,7 +225,7 @@ fn check_diagnostics_keep_early_outcomes_bounds_and_redaction_with_failed_sink()
         u64::MAX,
         checks::Stage::EndpointPreparation,
         Some(&Disposition::Unavailable),
-        Some((FailureCode::FreshQuorumUnavailable, Some(u64::MAX))),
+        Some((FailureCode::FreshQuorumUnavailable, Some(u64::MAX), None)),
     );
     assert!(record.len() < 384);
 }
@@ -524,7 +524,7 @@ fn longer_caller_wait_does_not_renew_current_gates() {
         .unwrap();
     let read_end = caller_end
         .min(endpoint.gate.expiry().unwrap())
-        .min(stream.check_deadline(now).unwrap());
+        .min(stream.current_deadline(now).unwrap());
     assert_eq!(read_end, old_endpoint);
     assert!(read_end < caller_end);
     assert_eq!(stream.forwarding.deadline, route_end);
@@ -567,7 +567,7 @@ fn due_check_gates_renew_once_with_the_original_wait_bound() {
     let completed = crate::authority_challenge::boot_time_ms().unwrap();
     let read_end = caller_end
         .min(endpoint.gate.expiry().unwrap())
-        .min(stream.check_deadline(completed).unwrap());
+        .min(stream.current_deadline(completed).unwrap());
     assert!(completed < read_end);
     assert_eq!(read_end, now + 1400);
     assert_eq!(stream.forwarding.deadline, route_end);
@@ -675,7 +675,7 @@ fn check_preparation_does_not_revive_cancelled_or_completed_streams() {
             .is_err()
     );
     assert_eq!(stream.gate.expiry().unwrap(), old);
-    assert_eq!(stream.check_deadline(now), None);
+    assert_eq!(stream.current_deadline(now).ok(), None);
 }
 
 #[test]
@@ -737,12 +737,12 @@ fn completion_invalidates_stream_before_join_set_is_polled() {
         renewal_turn: 0,
         forwarding: status.clone(),
     };
-    assert_eq!(stream.check_deadline(100), None);
+    assert_eq!(stream.current_deadline(100).ok(), None);
     status.established.store(true, Ordering::Release);
-    assert_eq!(stream.check_deadline(100), Some(4000));
-    assert_eq!(stream.check_deadline(4000), None);
+    assert_eq!(stream.current_deadline(100).ok(), Some(4000));
+    assert_eq!(stream.current_deadline(4000).ok(), None);
     drop(ForwardingCompletion(status, Timing::begin(0, false)));
-    assert_eq!(stream.check_deadline(100), None);
+    assert_eq!(stream.current_deadline(100).ok(), None);
 }
 
 #[tokio::test]
@@ -903,12 +903,7 @@ fn completed_exchange_requires_current_control_stream_gates_and_original_deadlin
             renewals: 0,
         };
         let mut live = BTreeMap::from([(request.session.id, stream)]);
-        assert!(
-            check
-                .completion_stream(&live, &permission, now)
-                .unwrap()
-                .is_some()
-        );
+        assert!(check.completion_stream(&live, &permission, now).is_ok());
         let mut completed_at = now;
         match fault {
             0 => check.cancelled.store(true, Ordering::Release),
@@ -936,11 +931,7 @@ fn completed_exchange_requires_current_control_stream_gates_and_original_deadlin
             _ => unreachable!(),
         }
         let result = check.completion_stream(&live, &permission, completed_at);
-        if (3..=7).contains(&fault) {
-            assert!(result.unwrap().is_none(), "fault {fault}");
-        } else {
-            assert!(result.is_err(), "fault {fault}");
-        }
+        assert!(result.is_err(), "fault {fault}");
     }
 }
 
@@ -1133,4 +1124,174 @@ async fn four_total_check_slots_include_work_draining_from_the_previous_control(
             .is_err()
     );
     assert_eq!(slots.available_permits(), control::MAXIMUM_PENDING);
+}
+
+#[test]
+fn expired_open_stream_prepares_once_without_extending_original_wait_or_lifetime() {
+    let now = crate::authority_challenge::boot_time_ms().unwrap();
+    let mut stream = prepared_stream(now.saturating_sub(1), now + 4000);
+    assert_eq!(
+        stream.current_deadline(now),
+        Err(InactiveStream::GateExpired)
+    );
+    assert_eq!(stream.preparation_deadline(now).unwrap(), now + 4000);
+    let mut calls = 0;
+    stream
+        .prepare_check(
+            now + 3000,
+            10,
+            || false,
+            |end| {
+                calls += 1;
+                assert_eq!(end, now + 3000);
+                Ok(now + 6000)
+            },
+        )
+        .unwrap();
+    assert_eq!(calls, 1);
+    assert_eq!(stream.gate.expiry().unwrap(), now + 4000);
+    assert_eq!(stream.current_deadline(now).ok(), Some(now + 4000));
+
+    for fault in 0..5 {
+        let mut stream = prepared_stream(now.saturating_sub(1), now + 4000);
+        match fault {
+            0 => stream.gate.close(),
+            1 => stream
+                .forwarding
+                .established
+                .store(false, Ordering::Release),
+            2 => stream.forwarding.finished.store(true, Ordering::Release),
+            3 => Arc::get_mut(&mut stream.forwarding).unwrap().deadline = now,
+            4 => (),
+            _ => unreachable!(),
+        }
+        let end = if fault == 4 { now } else { now + 3000 };
+        assert!(
+            stream
+                .prepare_check(end, 10, || false, |_| panic!("terminal stream renewed"))
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn certified_check_renews_exact_current_gate_but_receipt_keeps_old_clipping() {
+    for fault in 0..10 {
+        let (_, _, ready, request) = fixture();
+        let now = request.caller_started_boot_ms;
+        let (reply, _) = tokio::sync::oneshot::channel();
+        let check = checks::Check {
+            request: request.clone(),
+            ready: Arc::new(ready),
+            connected: Arc::new(AtomicBool::new(true)),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            reply,
+            timing: None,
+            _slot: Arc::new(tokio::sync::Semaphore::new(control::MAXIMUM_PENDING))
+                .try_acquire_owned()
+                .unwrap(),
+        };
+        let mut stream = prepared_stream(now + 2500, now + 4500);
+        stream.retry_after = now + 1000;
+        let permission = EndpointPermission {
+            gate: route_io::Gate::new(now + 4000),
+            accepted_at: Some(now),
+            renewals: 0,
+        };
+        let mut session = request.session.clone();
+        let mut completed_at = now;
+        let expiry = if fault == 1 { None } else { Some(now + 6000) };
+        match fault {
+            2 => session.generation += 1,
+            3 => stream.gate.close(),
+            4 => completed_at = now + 2500,
+            5 => check.cancelled.store(true, Ordering::Release),
+            6 => stream.forwarding.finished.store(true, Ordering::Release),
+            7 => check.connected.store(false, Ordering::Release),
+            8 => permission.gate.close(),
+            9 => (),
+            _ => (),
+        }
+        let mut live = BTreeMap::from([(request.session.id, stream)]);
+        let observation = crate::route_authority::StreamCheck::fixture(session, now + 3500, expiry);
+        let result = check.finish_observation(
+            observation,
+            now + 3000,
+            &mut live,
+            &permission,
+            completed_at,
+            |end| if fault == 9 { now } else { end },
+        );
+        let stream = &live[&request.session.id];
+        if fault == 0 {
+            let receipt = result.unwrap();
+            assert_eq!(receipt.disposition, Disposition::Permitted);
+            assert_eq!(receipt.not_after_boot_ms, now + 2500);
+            assert_eq!(stream.gate.expiry().unwrap(), now + 4500);
+            assert_eq!(stream.retry_after, 0);
+            assert_eq!(permission.gate.expiry().unwrap(), now + 4000);
+        } else {
+            if fault == 1 {
+                assert_eq!(result.unwrap().disposition, Disposition::Denied);
+            } else if fault == 9 {
+                assert_eq!(result.unwrap().disposition, Disposition::Expired);
+            } else {
+                assert!(result.is_err(), "fault {fault}");
+            }
+            if fault != 3 {
+                assert_eq!(stream.gate.expiry().unwrap(), now + 2500);
+            }
+            assert_eq!(stream.retry_after, now + 1000);
+        }
+    }
+}
+
+#[test]
+fn gate_installation_rechecks_the_clipped_receipt_end() {
+    let now = crate::authority_challenge::boot_time_ms().unwrap();
+    let mut stream = prepared_stream(now + 3000, now + 5000);
+    let renewal = crate::route_authority::StreamCheck::fixture(
+        stream.reference.clone(),
+        now + 4000,
+        Some(now + 5000),
+    )
+    .renewal
+    .unwrap();
+    // A live gate alone cannot extend a caller/read end exhausted after receipt calculation.
+    assert!(stream.renew_checked(renewal, now).is_err());
+    assert_eq!(stream.gate.expiry().unwrap(), now + 3000);
+}
+
+#[test]
+fn inactive_reason_is_bounded_and_preserves_not_active_receipt() {
+    let (_, _, ready, request) = fixture();
+    let (reply, _) = tokio::sync::oneshot::channel();
+    let check = checks::Check {
+        request,
+        ready: Arc::new(ready),
+        connected: Arc::new(AtomicBool::new(true)),
+        cancelled: Arc::new(AtomicBool::new(false)),
+        reply,
+        timing: Some(Timing {
+            started: 0,
+            sample: Some(256),
+        }),
+        _slot: Arc::new(tokio::sync::Semaphore::new(control::MAXIMUM_PENDING))
+            .try_acquire_owned()
+            .unwrap(),
+    };
+    let receipt = check.complete(Err(InactiveStream::GateExpired.into()));
+    assert_eq!(receipt.disposition, Disposition::NotActive);
+    assert!(receipt.authority.is_none());
+    let mut text = String::new();
+    check.record_at(
+        &mut text,
+        10,
+        checks::Stage::Outcome,
+        Some(&receipt.disposition),
+        Some((FailureCode::Other, None, Some(InactiveStream::GateExpired))),
+    );
+    assert!(text.contains("inactive=Some(GateExpired)"));
+    assert!(text.len() < 384);
+    assert!(!text.contains(&check.request.local_connection_id));
 }

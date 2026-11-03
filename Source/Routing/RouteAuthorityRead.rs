@@ -28,6 +28,14 @@ pub(crate) struct PreparedRead {
     started: u64,
 }
 impl PreparedRead {
+    pub(super) fn permit_session(&self, expected: &VersionRef) -> Result<()> {
+        ensure!(
+            matches!(&self.command, DomainCommand::Stream(streams::Command::Permit { session }) if session == expected),
+            "application check does not bind the exact stream permit"
+        );
+        Ok(())
+    }
+
     pub(crate) fn exchange(&self) -> ReadExchange {
         self.exchange.clone()
     }

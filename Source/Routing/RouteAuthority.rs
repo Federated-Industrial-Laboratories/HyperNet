@@ -25,6 +25,77 @@ use std::path::Path;
 #[path = "RouteAuthorityRead.rs"]
 mod read;
 pub(crate) use read::{PreparedRead, ReadCompletion};
+
+// Constructed only from the exact freshly verified and published permit result.
+// This is a stream-gate renewal, never a replacement action receipt or endpoint grant.
+pub(crate) struct CertifiedStreamPermit {
+    session: VersionRef,
+    expires: u64,
+}
+impl CertifiedStreamPermit {
+    pub(crate) fn expiry_for(self, session: &VersionRef) -> Result<u64> {
+        ensure!(
+            self.session == *session,
+            "certified stream permit identity changed"
+        );
+        Ok(self.expires)
+    }
+}
+pub(crate) struct StreamCheck {
+    pub authority: streams::control::Authority,
+    pub deadline: u64,
+    pub renewal: Option<CertifiedStreamPermit>,
+}
+
+impl StreamCheck {
+    fn certified(
+        session: &VersionRef,
+        observation: read::Observation,
+        original_deadline: u64,
+        health: authority_challenge::ClockHealth,
+    ) -> Result<Self> {
+        ensure!(
+            observation.disposition != Disposition::Pending,
+            "fresh application authority is pending"
+        );
+        let statement = observation.statement;
+        let now = health.observe()?;
+        let remaining = statement
+            .expires_at_ms
+            .saturating_sub(authority_challenge::DELTA_MS)
+            .checked_sub(now.wall_ms)
+            .filter(|remaining| *remaining > 0)
+            .context("fresh application authority expired")?;
+        let certified_expiry = now
+            .boot_ms
+            .saturating_add(remaining)
+            .min(health.valid_until_boot_ms());
+        let deadline = certified_expiry.min(original_deadline);
+        let renewal =
+            (observation.disposition == Disposition::Permit).then(|| CertifiedStreamPermit {
+                session: session.clone(),
+                expires: certified_expiry,
+            });
+        let authority = streams::control::Authority {
+            network: statement.scope.network,
+            incarnation: statement.scope.incarnation,
+            configuration: statement.scope.configuration,
+            epoch: statement.scope.epoch,
+            height: statement.height,
+            state: statement.state,
+            statement_digest: wire::digest(&statement.encode()?),
+            evaluated_at_ms: statement.evaluated_at_ms,
+            expires_at_ms: statement.expires_at_ms,
+            code: observation.code,
+        };
+        Ok(Self {
+            authority,
+            deadline,
+            renewal,
+        })
+    }
+}
+
 fn a(v: Vec<V>) -> V {
     V::Array(v)
 }
@@ -924,44 +995,22 @@ impl<'a> Client<'a> {
         &mut self,
         prepared: PreparedRead,
         completion: Result<ReadCompletion>,
-    ) -> Result<(streams::control::Authority, bool, u64)> {
+        session: &VersionRef,
+    ) -> Result<StreamCheck> {
+        if let Err(error) = prepared.permit_session(session) {
+            self.discard_read(prepared)?;
+            return Err(error);
+        }
         let original_deadline = prepared.deadline();
         let observation = self.finish_read(prepared, completion)?;
-        ensure!(
-            observation.disposition != Disposition::Pending,
-            "fresh application authority is pending"
-        );
-        let statement = observation.statement;
-        let health = self.guard.health()?;
-        let now = health.observe()?;
-        let remaining = statement
-            .expires_at_ms
-            .saturating_sub(authority_challenge::DELTA_MS)
-            .checked_sub(now.wall_ms)
-            .context("fresh application authority expired")?;
-        let mut deadline = now
-            .boot_ms
-            .saturating_add(remaining)
-            .min(health.valid_until_boot_ms());
-        deadline = deadline.min(original_deadline);
-        let permitted = observation.disposition == Disposition::Permit;
-        if permitted {
-            deadline = deadline.min(self.effect_deadline()?);
-        }
-        let authority = streams::control::Authority {
-            network: statement.scope.network,
-            incarnation: statement.scope.incarnation,
-            configuration: statement.scope.configuration,
-            epoch: statement.scope.epoch,
-            height: statement.height,
-            state: statement.state,
-            statement_digest: wire::digest(&statement.encode()?),
-            evaluated_at_ms: statement.evaluated_at_ms,
-            expires_at_ms: statement.expires_at_ms,
-            code: observation.code,
-        };
-        Ok((authority, permitted, deadline))
+        StreamCheck::certified(
+            session,
+            observation,
+            original_deadline,
+            self.guard.health()?,
+        )
     }
+
     pub fn stream_close(&mut self, session: &VersionRef, proof_digest: Digest) -> Result<()> {
         self.recover()?;
         // A caller can close this slot first. Resolve an unknown original close

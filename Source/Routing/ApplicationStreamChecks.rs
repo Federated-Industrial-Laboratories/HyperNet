@@ -239,23 +239,14 @@ pub(super) fn prepare(
         ))));
     }
     check.request.matches_ready(&check.ready)?;
-    let current = live
+    let stream = live
         .get_mut(&request.session.id)
-        .filter(|s| s.reference == request.session);
-    let Some(stream) = current else {
-        return Ok(Preparation::Complete(Box::new(unavailable(
-            request.clone(),
-            privacy,
-            Disposition::NotActive,
-        ))));
-    };
-    if stream.check_deadline(now).is_none() {
-        return Ok(Preparation::Complete(Box::new(unavailable(
-            request.clone(),
-            privacy,
-            Disposition::NotActive,
-        ))));
-    }
+        .ok_or(InactiveStream::Missing)?;
+    ensure!(
+        stream.reference == request.session,
+        InactiveStream::ReferenceChanged
+    );
+    stream.preparation_deadline(now)?;
     check.current(guard, active)?;
     // Readiness maintenance precedes the separate fresh check. It never supplies
     // the check result or replaces its original caller/challenge deadline.
@@ -318,12 +309,8 @@ pub(super) fn issue(
     // challenge. Recheck validity now: other preparation cannot renew this call.
     check.current(guard, active)?;
     let now = crate::authority_challenge::boot_time_ms()?;
-    let stream = check
-        .completion_stream(live, permission, now)?
-        .context("application stream is no longer current")?;
-    let stream_deadline = stream
-        .check_deadline(now)
-        .context("application stream is no longer current")?;
+    let stream = check.completion_stream(live, permission, now)?;
+    let stream_deadline = stream.current_deadline(now)?;
     let clock = guard.application_clock()?;
     ensure!(
         clock.kernel_boot == check.ready.challenge.kernel_boot,
@@ -348,75 +335,34 @@ pub(super) fn finish(
     check: &Check,
     read: PreparedRead,
     completion: Result<ReadCompletion>,
-    live: &BTreeMap<Digest, LiveStream>,
+    live: &mut BTreeMap<Digest, LiveStream>,
     permission: &EndpointPermission,
     client: &mut Client<'_>,
     guard: &Guard,
     active: &Active,
 ) -> Receipt {
-    let request = &check.request;
-    let privacy = check.ready.privacy.clone();
-    // Revalidate before consuming the challenge or publishing any learned state.
-    // These are current actor values, not the issue-time stream/gate snapshot.
+    // Revalidate before consuming the challenge or publishing learned state.
     let context = check.current(guard, active).and_then(|()| {
-        check.completion_stream(
-            live,
-            permission,
-            crate::authority_challenge::boot_time_ms()?,
-        )
+        check
+            .completion_stream(
+                live,
+                permission,
+                crate::authority_challenge::boot_time_ms()?,
+            )
+            .map(|_| ())
     });
-    let stream = match context {
-        Ok(Some(stream)) => stream,
-        Ok(None) => {
-            let discarded = client.discard_read(read);
-            return check.complete(
-                discarded.map(|()| unavailable(request.clone(), privacy, Disposition::NotActive)),
-            );
-        }
-        Err(error) => {
-            let discarded = client.discard_read(read);
-            return check.complete(discarded.and(Err(error)));
-        }
-    };
+    if let Err(error) = context {
+        let discarded = client.discard_read(read);
+        return check.complete(discarded.and(Err(error)));
+    }
     let deadline = read.deadline();
     let result = (|| -> Result<Receipt> {
-        let (authority, permitted, observed_deadline) =
-            client.finish_check_stream(read, completion)?;
-        let now = crate::authority_challenge::boot_time_ms()?;
-        active.check(guard)?;
+        let observation = client.finish_check_stream(read, completion, &check.request.session)?;
+        check.current(guard, active)?;
         let clock = guard.application_clock()?;
-        ensure!(
-            clock.kernel_boot == check.ready.challenge.kernel_boot
-                && check.connected.load(Ordering::Acquire)
-                && !check.cancelled.load(Ordering::Acquire),
-            "application check context ended"
-        );
-        let Some(stream_deadline) = stream.check_deadline(now) else {
-            return Ok(unavailable(
-                request.clone(),
-                privacy,
-                Disposition::NotActive,
-            ));
-        };
-        let not_after = clock.receipt_deadline(
-            deadline
-                .min(observed_deadline)
-                .min(stream_deadline)
-                .min(permission.gate.expiry()?),
-        );
-        if not_after <= now {
-            return Ok(unavailable(request.clone(), privacy, Disposition::Expired));
-        }
-        Ok(Receipt {
-            request: request.clone(),
-            disposition: if permitted {
-                Disposition::Permitted
-            } else {
-                Disposition::Denied
-            },
-            authority: Some(authority),
-            not_after_boot_ms: not_after,
-            privacy,
+        let now = crate::authority_challenge::boot_time_ms()?;
+        check.finish_observation(observation, deadline, live, permission, now, |end| {
+            clock.receipt_deadline(end)
         })
     })();
     check.complete(result)
@@ -428,7 +374,7 @@ impl Check {
         live: &'a BTreeMap<Digest, LiveStream>,
         permission: &EndpointPermission,
         now: u64,
-    ) -> Result<Option<&'a LiveStream>> {
+    ) -> Result<&'a LiveStream> {
         self.request.matches_ready(&self.ready)?;
         ensure!(
             self.connected.load(Ordering::Acquire) && !self.cancelled.load(Ordering::Acquire),
@@ -443,9 +389,58 @@ impl Check {
             permission.gate.expiry()? > now,
             "application endpoint permission expired"
         );
-        Ok(live.get(&self.request.session.id).filter(|stream| {
-            stream.reference == self.request.session && stream.check_deadline(now).is_some()
-        }))
+        let stream = live
+            .get(&self.request.session.id)
+            .ok_or(InactiveStream::Missing)?;
+        ensure!(
+            stream.reference == self.request.session,
+            InactiveStream::ReferenceChanged
+        );
+        stream.current_deadline(now)?;
+        Ok(stream)
+    }
+    pub(super) fn finish_observation(
+        &self,
+        observation: crate::route_authority::StreamCheck,
+        original_deadline: u64,
+        live: &mut BTreeMap<Digest, LiveStream>,
+        permission: &EndpointPermission,
+        now: u64,
+        receipt_deadline: impl FnOnce(u64) -> u64,
+    ) -> Result<Receipt> {
+        let stream = self.completion_stream(live, permission, now)?;
+        // Clip against the OLD gate before installing the separately certified
+        // renewal. This action cannot borrow lifetime from its own gate renewal.
+        let not_after = receipt_deadline(
+            original_deadline
+                .min(observation.deadline)
+                .min(stream.current_deadline(now)?)
+                .min(permission.gate.expiry()?),
+        );
+        if not_after <= now {
+            return Ok(unavailable(
+                self.request.clone(),
+                self.ready.privacy.clone(),
+                Disposition::Expired,
+            ));
+        }
+        let permitted = observation.renewal.is_some();
+        if let Some(renewal) = observation.renewal {
+            live.get_mut(&self.request.session.id)
+                .expect("checked live stream")
+                .renew_checked(renewal, not_after)?;
+        }
+        Ok(Receipt {
+            request: self.request.clone(),
+            disposition: if permitted {
+                Disposition::Permitted
+            } else {
+                Disposition::Denied
+            },
+            authority: Some(observation.authority),
+            not_after_boot_ms: not_after,
+            privacy: self.ready.privacy.clone(),
+        })
     }
     pub(super) fn respond(self, receipt: Receipt) {
         if self.connected.load(Ordering::Acquire) && !self.cancelled.load(Ordering::Acquire) {
@@ -456,7 +451,7 @@ impl Check {
         &self,
         stage: Stage,
         disposition: Option<&Disposition>,
-        failure: Option<(FailureCode, Option<u64>)>,
+        failure: Option<(FailureCode, Option<u64>, Option<InactiveStream>)>,
     ) {
         if let Some(timing) = self.timing
             && timing.sample.is_some()
@@ -473,16 +468,17 @@ impl Check {
         now: u64,
         stage: Stage,
         disposition: Option<&Disposition>,
-        failure: Option<(FailureCode, Option<u64>)>,
+        failure: Option<(FailureCode, Option<u64>, Option<InactiveStream>)>,
     ) {
         if let Some(timing) = self.timing
             && let Some(sample) = timing.sample
         {
             let reason = failure.map(|f| f.0);
             let fresh_read_code = failure.and_then(|f| f.1);
+            let inactive = failure.and_then(|f| f.2);
             let _ = writeln!(
                 output,
-                "HyperNet application check: sample={sample} stage={stage:?} elapsedMs={} callerStartedBootMs={} deadlineBootMs={} disposition={disposition:?} reason={reason:?} freshReadCode={fresh_read_code:?} bootMs={now}",
+                "HyperNet application check: sample={sample} stage={stage:?} elapsedMs={} callerStartedBootMs={} deadlineBootMs={} disposition={disposition:?} reason={reason:?} freshReadCode={fresh_read_code:?} inactive={inactive:?} bootMs={now}",
                 now.saturating_sub(timing.started),
                 self.request.caller_started_boot_ms,
                 self.request.caller_deadline_boot_ms
@@ -496,13 +492,18 @@ impl Check {
                 error
                     .downcast_ref::<crate::authority_local_transport::FreshReadUnavailable>()
                     .map(|e| e.code),
+                error.downcast_ref::<InactiveStream>().copied(),
             )
         });
-        let receipt = result.unwrap_or_else(|_| {
+        let receipt = result.unwrap_or_else(|error| {
             unavailable(
                 self.request.clone(),
                 self.ready.privacy.clone(),
-                Disposition::Unavailable,
+                if error.is::<InactiveStream>() {
+                    Disposition::NotActive
+                } else {
+                    Disposition::Unavailable
+                },
             )
         });
         self.record(Stage::Outcome, Some(&receipt.disposition), failure);
