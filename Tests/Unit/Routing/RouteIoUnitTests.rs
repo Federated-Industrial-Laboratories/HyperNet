@@ -1,6 +1,81 @@
 // SPDX-License-Identifier: MIT
 // Unit tests for RouteIo.
 use super::*;
+
+#[test]
+fn paired_gate_renewal_is_all_or_neither_under_current_original_bounds() {
+    for fault in 0..7 {
+        let now = crate::authority_challenge::boot_time_ms().unwrap();
+        let first = Gate::new(now + 3000);
+        let second = Gate::new(now + 4000);
+        match fault {
+            1 => first.close(),
+            2 => second.close(),
+            3 => second.0.send_modify(|p| p.expires = now),
+            _ => (),
+        }
+        let before_first = *first.0.borrow();
+        let before_second = *second.0.borrow();
+        let result = first.renew_pair(
+            if fault == 4 { &first } else { &second },
+            now + 5000,
+            if fault == 5 { now } else { now + 6000 },
+            if fault == 6 { now } else { now + 2000 },
+        );
+        if fault == 0 {
+            assert!(result.is_ok());
+            assert_eq!(first.expiry().unwrap(), now + 5000);
+            assert_eq!(second.expiry().unwrap(), now + 6000);
+        } else {
+            assert!(result.is_err(), "fault {fault}");
+            assert_eq!(
+                (first.0.borrow().expires, first.0.borrow().closed),
+                (before_first.expires, before_first.closed)
+            );
+            assert_eq!(
+                (second.0.borrow().expires, second.0.borrow().closed),
+                (before_second.expires, before_second.closed)
+            );
+        }
+    }
+}
+
+#[test]
+fn paired_gate_renewal_orders_reversed_concurrent_callers_consistently() {
+    let now = crate::authority_challenge::boot_time_ms().unwrap();
+    let signal = Arc::new(tokio::sync::Notify::new());
+    let first = Gate::with_signal(now + 10_000, signal.clone());
+    let second = Gate::with_signal(now + 10_000, signal);
+    let start = Arc::new(std::sync::Barrier::new(3));
+    let (sender, done) = std::sync::mpsc::channel();
+    let workers = [false, true].map(|reversed| {
+        let (a, b) = if reversed {
+            (second.clone(), first.clone())
+        } else {
+            (first.clone(), second.clone())
+        };
+        let start = start.clone();
+        let sender = sender.clone();
+        std::thread::spawn(move || {
+            start.wait();
+            for _ in 0..32 {
+                a.renew_pair(&b, now + 10_000, now + 10_000, now + 5000)
+                    .unwrap();
+            }
+            sender.send(()).unwrap();
+        })
+    });
+    start.wait();
+    for _ in 0..2 {
+        done.recv_timeout(Duration::from_secs(2)).unwrap();
+    }
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    assert_eq!(first.expiry().unwrap(), now + 10_000);
+    assert_eq!(second.expiry().unwrap(), now + 10_000);
+}
+
 #[tokio::test]
 async fn private_route_raw_boundary_renews_both_pollers_and_cannot_rearm() {
     let (socket, mut peer) = tokio::io::duplex(128);

@@ -295,7 +295,7 @@ pub(super) fn prepare(
     let reference = stream.reference.clone();
     stream.prepare_check(
         preparation_end,
-        client.operation_budget_ms(),
+        client.stream_renewal_budget_ms(),
         || !check.connected.load(Ordering::Acquire) || check.cancelled.load(Ordering::Acquire),
         |deadline| {
             check.current(guard, active)?;
@@ -362,7 +362,8 @@ pub(super) fn finish(
     read: PreparedRead,
     completion: Result<ReadCompletion>,
     live: &mut BTreeMap<Digest, LiveStream>,
-    permission: &EndpointPermission,
+    permission: &mut EndpointPermission,
+    profile: &[u8],
     client: &mut Client<'_>,
     guard: &Guard,
     active: &Active,
@@ -398,9 +399,15 @@ pub(super) fn finish(
         check.current(guard, active)?;
         let clock = guard.application_clock()?;
         let now = crate::authority_challenge::boot_time_ms()?;
-        check.finish_observation(observation, deadline, live, permission, now, |end| {
-            clock.receipt_deadline(end)
-        })
+        check.finish_observation(
+            observation,
+            deadline,
+            live,
+            permission,
+            profile,
+            now,
+            |end| clock.receipt_deadline(end),
+        )
     })();
     check.complete(result)
 }
@@ -453,12 +460,14 @@ impl Check {
         stream.current_deadline(now)?;
         Ok(stream)
     }
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn finish_observation(
         &self,
         observation: crate::route_authority::StreamCheck,
         original_deadline: u64,
         live: &mut BTreeMap<Digest, LiveStream>,
-        permission: &EndpointPermission,
+        permission: &mut EndpointPermission,
+        profile: &[u8],
         now: u64,
         receipt_deadline: impl FnOnce(u64) -> u64,
     ) -> Result<Receipt> {
@@ -480,9 +489,15 @@ impl Check {
         }
         let permitted = observation.renewal.is_some();
         if let Some(renewal) = observation.renewal {
+            let endpoint = observation
+                .endpoint_renewal
+                .context("fresh stream permit omitted endpoint renewal")?;
             live.get_mut(&self.request.session.id)
                 .expect("checked live stream")
-                .renew_checked(renewal, not_after)?;
+                .renew_checked(renewal, endpoint, profile, permission, not_after, || {
+                    !self.connected.load(Ordering::Acquire)
+                        || self.cancelled.load(Ordering::Acquire)
+                })?;
         }
         Ok(Receipt {
             request: self.request.clone(),

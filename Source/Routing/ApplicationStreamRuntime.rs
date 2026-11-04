@@ -118,17 +118,26 @@ impl LiveStream {
     fn renew_checked(
         &mut self,
         permit: crate::route_authority::CertifiedStreamPermit,
+        endpoint: crate::route_authority::CertifiedEndpointPermit,
+        profile: &[u8],
+        permission: &mut EndpointPermission,
         receipt_end: u64,
+        cancelled: impl FnOnce() -> bool,
     ) -> Result<()> {
         crate::authority_local_transport::remaining(receipt_end)?;
-        let now = crate::authority_challenge::boot_time_ms()?;
-        self.current_deadline(now)?;
         let expires = permit
             .expiry_for(&self.reference)?
             .min(self.forwarding.deadline);
-        self.gate.renew(expires)?;
-        self.accepted_at = now;
+        let endpoint_expiry = endpoint.expiry_for(profile)?;
+        ensure!(!cancelled(), "application check cancelled");
+        self.current_deadline(crate::authority_challenge::boot_time_ms()?)?;
+        let installed =
+            self.gate
+                .renew_pair(&permission.gate, expires, endpoint_expiry, receipt_end)?;
+        self.accepted_at = installed;
         self.retry_after = 0;
+        permission.accepted_at = Some(installed);
+        permission.renewals = permission.renewals.saturating_add(1);
         Ok(())
     }
     fn prepare_check(
@@ -379,6 +388,7 @@ fn maintenance(
     live: &BTreeMap<Digest, LiveStream>,
     close: Option<&PendingClose>,
     own_budget: u64,
+    stream_budget: u64,
     action_budget: u64,
 ) -> Result<Maintenance> {
     // Cleanup prepares each existing gate at most once. The captured turn
@@ -398,7 +408,7 @@ fn maintenance(
     if let Some(id) = due_stream(
         live,
         now,
-        action_budget.saturating_add(close_budget),
+        stream_budget.saturating_add(close_budget),
         close.map_or(u64::MAX, |close| close.renewal_turn),
     ) {
         return Ok(Maintenance::Stream(id));
@@ -617,8 +627,8 @@ pub(super) async fn endpoint(
         let now=crate::authority_challenge::boot_time_ms()?;
         let close_budget=closing.as_ref().filter(|close|now<close.deadline).map_or(0,|_|client.operation_budget_ms());
         let own_due=permission.refresh_due(now,client.own_renewal_budget_ms().saturating_add(close_budget))?;
-        let stream_due=due_stream(&live,now,client.operation_budget_ms().saturating_add(close_budget),u64::MAX);
-        let close_work=closing.as_ref().filter(|close|now>=close.retry_after).map(|close|maintenance(now,&permission,&live,Some(close),client.own_renewal_budget_ms(),client.operation_budget_ms())).transpose()?;
+        let stream_due=due_stream(&live,now,client.stream_renewal_budget_ms().saturating_add(close_budget),u64::MAX);
+        let close_work=closing.as_ref().filter(|close|now>=close.retry_after).map(|close|maintenance(now,&permission,&live,Some(close),client.own_renewal_budget_ms(),client.stream_renewal_budget_ms(),client.operation_budget_ms())).transpose()?;
         let public=listener.is_some();
         let (listener_tasks,mut listener_requests)=listener.as_mut().map(|l|(&mut l.tasks,&mut l.requests)).unzip();
         let next=tokio::select! {
@@ -732,7 +742,7 @@ pub(super) async fn endpoint(
                 let (id,completion)=match result {Ok(result)=>result,Err(error)=>(error.id(),checks::ExchangeCompletion {result:Err(error.into()),started:None,completed:None})};
                 let checks::Pending {check,read}=pending.remove(&id).context("application check worker has no owner")?;
                 check.record_exchange(&completion);
-                let receipt=checks::finish(&check,read,completion.result,&mut live,&permission,client,guard,active);
+                let receipt=checks::finish(&check,read,completion.result,&mut live,&mut permission,&own.envelope,client,guard,active);
                 check.respond(receipt);
             },
         }

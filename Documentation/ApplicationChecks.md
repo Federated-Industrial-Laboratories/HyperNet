@@ -120,6 +120,12 @@ retains its fair turn before another round; sustained arrivals cannot refill a
 round indefinitely. Independent authority progress can still overtake a read,
 and an expired gate still refuses it.
 
+Stream-renewal scheduling uses the observed cost of successful stream-permission
+checks. Before the first such observation it retains the ordinary action-cost
+fallback. Admission, cleanup and endpoint lookups do not replace an established
+stream-renewal estimate. Cleanup keeps its separate action reservation, and
+certified expiry remains the enforced limit regardless of scheduling estimates.
+
 On completion the actor rechecks the current control generation, exact session,
 forwarding state, gates, consent and clock before accepting evidence. Verification
 uses the current domain records, generations, causal floor and retained history;
@@ -127,15 +133,20 @@ an unresolved ordinary request or fence still prevents acceptance. A response
 that has been overtaken by the current floor is refused, without rolling the floor
 back or retrying under a new deadline. Each challenge can be consumed once.
 
-A successfully verified and published `Stream::Permit` result also supplies a
-separate in-memory certified renewal bound to that exact session reference.
-After all completion checks, the actor can renew only that still-current live
-stream gate, clipped to its fixed forwarding lifetime. The receipt is first
-clipped against the old gate and the original read deadline; the renewal cannot
-extend that action's receipt. It does not renew the endpoint gate. Denied, stale,
-cancelled or failed checks supply no renewal, and completion never revives an
-expired or closed gate. Gate-renewal timing updates only after a successful
-renewal. Existing bounded check diagnostics distinguish missing, changed,
+A successfully verified and published `Stream::Permit` result also supplies
+in-memory certified renewals bound to the exact session and receiving endpoint.
+The stream decision includes the endpoint's route lookup and its expiry bound.
+Endpoint renewal additionally requires the freshly verified registered profile
+to match the local profile envelope exactly. It cannot use an unrelated result
+or the last expiry observed by the client.
+
+After all completion checks, the actor can renew those still-current gates; the
+stream gate remains clipped to its fixed forwarding lifetime. The receipt is
+first clipped against both old gates and the original read deadline; renewal
+cannot extend that action's receipt. Denied, stale, cancelled or failed checks
+supply no renewal, and completion never revives an expired or closed gate.
+Gate-renewal timing updates only after a successful renewal. Existing bounded
+check diagnostics distinguish missing, changed,
 unestablished, finished, forwarding-expired, closed and gate-expired streams
 without logging session identifiers or application payloads.
 

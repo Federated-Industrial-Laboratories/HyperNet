@@ -41,15 +41,47 @@ impl CertifiedStreamPermit {
         Ok(self.expires)
     }
 }
+// This binding is derived only after a fresh stream permit has been published.
+#[derive(Clone, Copy)]
+struct EndpointBinding(Digest);
+impl EndpointBinding {
+    fn checked(
+        route: &VersionRef,
+        expected_service: Digest,
+        registered: &[u8],
+        configured: &[u8],
+    ) -> Result<Self> {
+        ensure!(
+            route.kind == 165 && route.id == expected_service && registered == configured,
+            "certified endpoint differs from exact local route consent"
+        );
+        Ok(Self(wire::digest(configured)))
+    }
+}
+pub(crate) struct CertifiedEndpointPermit {
+    binding: EndpointBinding,
+    expires: u64,
+}
+impl CertifiedEndpointPermit {
+    pub(crate) fn expiry_for(self, configured: &[u8]) -> Result<u64> {
+        ensure!(
+            self.binding.0 == wire::digest(configured),
+            "certified endpoint profile changed"
+        );
+        Ok(self.expires)
+    }
+}
 pub(crate) struct StreamCheck {
     pub authority: streams::control::Authority,
     pub deadline: u64,
     pub renewal: Option<CertifiedStreamPermit>,
+    pub endpoint_renewal: Option<CertifiedEndpointPermit>,
 }
 
 impl StreamCheck {
     fn certified(
         session: &VersionRef,
+        endpoint: Option<EndpointBinding>,
         observation: read::Observation,
         original_deadline: u64,
         health: authority_challenge::ClockHealth,
@@ -70,6 +102,14 @@ impl StreamCheck {
         // stream maintenance does. The action assertion also ends with the
         // current clock observation and its original read deadline.
         let certified_expiry = now.boot_ms.saturating_add(remaining);
+        let endpoint_renewal = if observation.disposition == Disposition::Permit {
+            Some(CertifiedEndpointPermit {
+                binding: endpoint.context("fresh stream permit omitted exact endpoint binding")?,
+                expires: certified_expiry,
+            })
+        } else {
+            None
+        };
         let deadline = certified_expiry
             .min(health.valid_until_boot_ms())
             .min(original_deadline);
@@ -94,6 +134,7 @@ impl StreamCheck {
             authority,
             deadline,
             renewal,
+            endpoint_renewal,
         })
     }
 }
@@ -174,9 +215,10 @@ struct OperationCosts {
     action_ms: u64,
     own_ms: Option<u64>,
     voucher_ms: Option<u64>,
+    stream_ms: Option<u64>,
 }
 impl OperationCosts {
-    fn observe(&mut self, command: &DomainCommand, own: Digest, elapsed: u64) {
+    fn observe(&mut self, command: &DomainCommand, own: Digest, elapsed: u64, permitted: bool) {
         // These predict scheduling only; the certified expiry remains the I/O limit.
         self.action_ms = elapsed;
         match command {
@@ -186,12 +228,18 @@ impl OperationCosts {
             DomainCommand::Route(routes::Command::VoucherContext { .. }) => {
                 self.voucher_ms = Some(elapsed);
             }
+            DomainCommand::Stream(streams::Command::Permit { .. }) if permitted => {
+                self.stream_ms = Some(elapsed);
+            }
             _ => {}
         }
     }
     fn voucher_ms(&self) -> u64 {
         // A retained voucher can admit before its first renewal in this process.
         self.voucher_ms.unwrap_or(self.action_ms)
+    }
+    fn stream_ms(&self) -> u64 {
+        self.stream_ms.unwrap_or(self.action_ms)
     }
 }
 impl<'a> Client<'a> {
@@ -662,12 +710,16 @@ impl<'a> Client<'a> {
                 &operation.command,
                 self.config.profile.identity.service,
                 authority_challenge::boot_time_ms()?.saturating_sub(started),
+                true,
             );
         }
         outcome
     }
     pub fn operation_budget_ms(&self) -> u64 {
         self.costs.action_ms
+    }
+    pub(crate) fn stream_renewal_budget_ms(&self) -> u64 {
+        self.costs.stream_ms()
     }
     pub fn voucher_renewal_budget_ms(&self) -> u64 {
         self.costs.voucher_ms()
@@ -1006,8 +1058,40 @@ impl<'a> Client<'a> {
         }
         let original_deadline = prepared.deadline();
         let observation = self.finish_read(prepared, completion, trace)?;
+        let endpoint = if observation.disposition == Disposition::Permit {
+            let (state, _) = self.disk.context();
+            let current = state.record(173, session.id)?;
+            ensure!(
+                current.reference == *session,
+                "certified stream session changed"
+            );
+            let stream =
+                streams::Session::parse(&current.payload, state.network, state.incarnation)?;
+            let current = state.record(172, stream.proof.service.id)?;
+            ensure!(
+                current.reference == stream.proof.service,
+                "certified application service changed"
+            );
+            let service =
+                streams::Service::parse(&current.payload, state.network, state.incarnation)?;
+            let route = state.record(165, service.registration.route.id)?;
+            ensure!(
+                route.reference == service.registration.route,
+                "certified endpoint route changed"
+            );
+            let registered = self.registered(route.reference.id)?;
+            Some(EndpointBinding::checked(
+                &route.reference,
+                self.config.profile.identity.service,
+                &registered.envelope,
+                &self.config.profile.envelope,
+            )?)
+        } else {
+            None
+        };
         StreamCheck::certified(
             session,
+            endpoint,
             observation,
             original_deadline,
             self.guard.health()?,

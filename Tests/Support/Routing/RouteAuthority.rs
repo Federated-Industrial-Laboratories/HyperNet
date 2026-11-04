@@ -30,6 +30,10 @@ impl StreamCheck {
             },
             deadline,
             renewal: expiry.map(|expires| CertifiedStreamPermit { session, expires }),
+            endpoint_renewal: expiry.map(|expires| CertifiedEndpointPermit {
+                binding: EndpointBinding(wire::digest(b"Exact endpoint profile")),
+                expires,
+            }),
         }
     }
 }

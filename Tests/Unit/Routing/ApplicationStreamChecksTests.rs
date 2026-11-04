@@ -373,19 +373,19 @@ fn close_preparation_has_one_finite_pass_despite_continuously_due_gates() {
     );
     let reference = close.reference.clone();
     assert_eq!(
-        maintenance(now, &endpoint, &live, Some(&close), 100, 100).unwrap(),
+        maintenance(now, &endpoint, &live, Some(&close), 100, 100, 100).unwrap(),
         Maintenance::Own
     );
     endpoint.renewals += 1;
     for expected in 1..=3 {
         assert_eq!(
-            maintenance(now, &endpoint, &live, Some(&close), 100, 100).unwrap(),
+            maintenance(now, &endpoint, &live, Some(&close), 100, 100, 100).unwrap(),
             Maintenance::Stream([expected; 32])
         );
         live.get_mut(&[expected; 32]).unwrap().renewal_turn = schedule.renewed().unwrap();
     }
     assert_eq!(
-        maintenance(now, &endpoint, &live, Some(&close), 100, 100).unwrap(),
+        maintenance(now, &endpoint, &live, Some(&close), 100, 100, 100).unwrap(),
         Maintenance::Close,
         "already visited gates cannot restart the preparation pass"
     );
@@ -412,14 +412,14 @@ fn completed_stream_burst_yields_to_due_renewals_then_closes_without_starvation(
     }
     live.insert([9; 32], prepared_stream(now + 150, now + 10_000));
     assert_eq!(
-        maintenance(now, &endpoint, &live, None, 100, 100).unwrap(),
+        maintenance(now, &endpoint, &live, None, 100, 100, 100).unwrap(),
         Maintenance::Own,
         "completed forwarding cannot outrank an already due endpoint renewal"
     );
     endpoint.gate.renew(now + 5000).unwrap();
     endpoint.accepted_at = Some(now);
     assert_eq!(
-        maintenance(now, &endpoint, &live, None, 100, 100).unwrap(),
+        maintenance(now, &endpoint, &live, None, 100, 100, 100).unwrap(),
         Maintenance::Stream([9; 32]),
         "finished streams must not consume renewal turns"
     );
@@ -435,7 +435,7 @@ fn completed_stream_burst_yields_to_due_renewals_then_closes_without_starvation(
             0,
         );
         assert_eq!(
-            maintenance(now, &endpoint, &live, Some(&close), 100, 100).unwrap(),
+            maintenance(now, &endpoint, &live, Some(&close), 100, 100, 100).unwrap(),
             Maintenance::Close,
             "fresh headroom must release each bounded close turn"
         );
@@ -456,7 +456,7 @@ fn pending_close_reserves_one_action_before_each_renewal_latest_start() {
     let _activity = endpoint.gate.activity().unwrap();
     let mut live = BTreeMap::from([([9; 32], prepared_stream(now + 250, now + 10_000))]);
     assert_eq!(
-        maintenance(now, &endpoint, &live, None, 100, 100).unwrap(),
+        maintenance(now, &endpoint, &live, None, 100, 100, 100).unwrap(),
         Maintenance::Wait
     );
     let close = PendingClose::completed(
@@ -467,14 +467,14 @@ fn pending_close_reserves_one_action_before_each_renewal_latest_start() {
         0,
     );
     assert_eq!(
-        maintenance(now, &endpoint, &live, Some(&close), 100, 100).unwrap(),
+        maintenance(now, &endpoint, &live, Some(&close), 100, 100, 100).unwrap(),
         Maintenance::Own
     );
     assert_eq!(endpoint.gate.expiry().unwrap(), now + 250);
     endpoint.gate.renew(now + 5000).unwrap();
     endpoint.accepted_at = Some(now);
     assert_eq!(
-        maintenance(now, &endpoint, &live, Some(&close), 100, 100).unwrap(),
+        maintenance(now, &endpoint, &live, Some(&close), 100, 100, 100).unwrap(),
         Maintenance::Stream([9; 32])
     );
     assert_eq!(live[&[9; 32]].gate.expiry().unwrap(), now + 250);
@@ -482,7 +482,16 @@ fn pending_close_reserves_one_action_before_each_renewal_latest_start() {
     stream.gate.renew(now + 5000).unwrap();
     stream.accepted_at = now;
     assert_eq!(
-        maintenance(close.deadline, &endpoint, &live, Some(&close), 100, 100).unwrap(),
+        maintenance(
+            close.deadline,
+            &endpoint,
+            &live,
+            Some(&close),
+            100,
+            100,
+            100
+        )
+        .unwrap(),
         Maintenance::Close,
         "an expired close gets its original failing attempt, not a renewed window"
     );
@@ -1256,8 +1265,38 @@ fn expired_open_stream_prepares_once_without_extending_original_wait_or_lifetime
 }
 
 #[test]
-fn certified_check_renews_exact_current_gate_but_receipt_keeps_old_clipping() {
-    for fault in 0..10 {
+fn stream_renewal_budget_keeps_cleanup_reservation_separate() {
+    let base = crate::authority_challenge::boot_time_ms().unwrap();
+    let mut stream = prepared_stream(base + 1000, base + 20_000);
+    stream.accepted_at = base;
+    stream.renewal_turn = 1;
+    let id = stream.reference.id;
+    let close = PendingClose {
+        reference: stream.reference.clone(),
+        proof_digest: stream.proof_digest,
+        deadline: base + 10_000,
+        retry_after: 0,
+        own_renewals: 0,
+        renewal_turn: 2,
+    };
+    let live = BTreeMap::from([(id, stream)]);
+    let permission = EndpointPermission {
+        gate: route_io::Gate::new(base + 20_000),
+        accepted_at: Some(base),
+        renewals: 0,
+    };
+    assert!(matches!(
+        maintenance(base + 600, &permission, &live, None, 100, 100, 5000).unwrap(),
+        Maintenance::Wait
+    ));
+    assert!(
+        matches!(maintenance(base + 600, &permission, &live, Some(&close), 100, 100, 5000).unwrap(), Maintenance::Stream(selected) if selected == id)
+    );
+}
+
+#[test]
+fn certified_check_renews_exact_current_gates_but_receipt_keeps_old_clipping() {
+    for fault in 0..13 {
         let (_, _, ready, request) = fixture();
         let now = request.caller_started_boot_ms;
         let (reply, _) = tokio::sync::oneshot::channel();
@@ -1274,7 +1313,7 @@ fn certified_check_renews_exact_current_gate_but_receipt_keeps_old_clipping() {
         };
         let mut stream = prepared_stream(now + 2500, now + 4500);
         stream.retry_after = now + 1000;
-        let permission = EndpointPermission {
+        let mut permission = EndpointPermission {
             gate: route_io::Gate::new(now + 4000),
             accepted_at: Some(now),
             renewals: 0,
@@ -1290,7 +1329,9 @@ fn certified_check_renews_exact_current_gate_but_receipt_keeps_old_clipping() {
             6 => stream.forwarding.finished.store(true, Ordering::Release),
             7 => check.connected.store(false, Ordering::Release),
             8 => permission.gate.close(),
-            9 => (),
+            9 | 10 => (),
+            11 => completed_at = now + 4000,
+            12 => permission.gate.renew(now + 1500).unwrap(),
             _ => (),
         }
         let mut live = BTreeMap::from([(request.session.id, stream)]);
@@ -1299,18 +1340,27 @@ fn certified_check_renews_exact_current_gate_but_receipt_keeps_old_clipping() {
             observation,
             now + 3000,
             &mut live,
-            &permission,
+            &mut permission,
+            if fault == 10 {
+                b"Other endpoint profile"
+            } else {
+                b"Exact endpoint profile"
+            },
             completed_at,
             |end| if fault == 9 { now } else { end },
         );
         let stream = &live[&request.session.id];
-        if fault == 0 {
+        if fault == 0 || fault == 12 {
             let receipt = result.unwrap();
             assert_eq!(receipt.disposition, Disposition::Permitted);
-            assert_eq!(receipt.not_after_boot_ms, now + 2500);
+            assert_eq!(
+                receipt.not_after_boot_ms,
+                now + if fault == 12 { 1500 } else { 2500 }
+            );
             assert_eq!(stream.gate.expiry().unwrap(), now + 4500);
             assert_eq!(stream.retry_after, 0);
-            assert_eq!(permission.gate.expiry().unwrap(), now + 4000);
+            assert_eq!(permission.gate.expiry().unwrap(), now + 6000);
+            assert_eq!(permission.renewals, 1);
         } else {
             if fault == 1 {
                 assert_eq!(result.unwrap().disposition, Disposition::Denied);
@@ -1323,6 +1373,10 @@ fn certified_check_renews_exact_current_gate_but_receipt_keeps_old_clipping() {
                 assert_eq!(stream.gate.expiry().unwrap(), now + 2500);
             }
             assert_eq!(stream.retry_after, now + 1000);
+            if fault != 8 {
+                assert_eq!(permission.gate.expiry().unwrap(), now + 4000);
+            }
+            assert_eq!(permission.renewals, 0);
         }
     }
 }
@@ -1331,15 +1385,30 @@ fn certified_check_renews_exact_current_gate_but_receipt_keeps_old_clipping() {
 fn gate_installation_rechecks_the_clipped_receipt_end() {
     let now = crate::authority_challenge::boot_time_ms().unwrap();
     let mut stream = prepared_stream(now + 3000, now + 5000);
-    let renewal = crate::route_authority::StreamCheck::fixture(
+    let observation = crate::route_authority::StreamCheck::fixture(
         stream.reference.clone(),
         now + 4000,
         Some(now + 5000),
-    )
-    .renewal
-    .unwrap();
+    );
+    let mut permission = EndpointPermission {
+        gate: route_io::Gate::new(now + 4000),
+        accepted_at: Some(now),
+        renewals: 0,
+    };
     // A live gate alone cannot extend a caller/read end exhausted after receipt calculation.
-    assert!(stream.renew_checked(renewal, now).is_err());
+    assert!(
+        stream
+            .renew_checked(
+                observation.renewal.unwrap(),
+                observation.endpoint_renewal.unwrap(),
+                b"Exact endpoint profile",
+                &mut permission,
+                now,
+                || false,
+            )
+            .is_err()
+    );
+    assert_eq!(permission.gate.expiry().unwrap(), now + 4000);
     assert_eq!(stream.gate.expiry().unwrap(), now + 3000);
 }
 

@@ -353,6 +353,9 @@ impl Client<'_> {
                 &command,
                 self.config.profile.identity.service,
                 authority_challenge::boot_time_ms()?.saturating_sub(started),
+                outcome
+                    .as_ref()
+                    .is_ok_and(|observation| observation.disposition == Disposition::Permit),
             );
         }
         outcome.map_err(Self::retry_read)

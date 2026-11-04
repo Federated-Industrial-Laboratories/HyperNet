@@ -152,17 +152,85 @@ fn private_route_recurring_cost_replaces_outliers_and_excludes_other_actions() {
     });
     let unrelated = DomainCommand::Route(routes::Command::Lookup { service: [6; 32] });
     let mut costs = OperationCosts::default();
-    costs.observe(&lookup, own, 1800);
-    costs.observe(&voucher, own, 1700);
-    costs.observe(&unrelated, own, 4500);
+    costs.observe(&lookup, own, 1800, true);
+    costs.observe(&voucher, own, 1700, true);
+    costs.observe(&unrelated, own, 4500, true);
     assert_eq!(costs.own_ms, Some(1800));
     assert_eq!(costs.voucher_ms(), 1700);
     assert_eq!(costs.action_ms, 4500);
-    costs.observe(&lookup, own, 650);
-    costs.observe(&voucher, own, 700);
+    costs.observe(&lookup, own, 650, true);
+    costs.observe(&voucher, own, 700, true);
     assert_eq!(costs.own_ms, Some(650));
     assert_eq!(costs.voucher_ms(), 700);
     assert_eq!(costs.action_ms, 700);
+}
+
+#[test]
+fn stream_renewal_estimate_excludes_unrelated_work_and_refusals() {
+    let own = [3; 32];
+    let session = VersionRef {
+        kind: 173,
+        id: [4; 32],
+        generation: 1,
+        digest: [5; 32],
+    };
+    let permit = DomainCommand::Stream(streams::Command::Permit {
+        session: session.clone(),
+    });
+    let cleanup = DomainCommand::Stream(streams::Command::RetirementContext { session });
+    let lookup = DomainCommand::Route(routes::Command::Lookup { service: own });
+    let mut costs = OperationCosts::default();
+    costs.observe(&cleanup, own, 4500, true);
+    assert_eq!(costs.stream_ms(), 4500);
+    costs.observe(&permit, own, 180, false);
+    assert!(costs.stream_ms.is_none());
+    costs.observe(&permit, own, 170, true);
+    costs.observe(&cleanup, own, 4600, true);
+    assert_eq!(costs.stream_ms(), 170);
+    assert_eq!(costs.action_ms, 4600);
+    costs.observe(&lookup, own, 80, true);
+    assert_eq!(costs.own_ms, Some(80));
+    assert_eq!(costs.stream_ms(), 170);
+    costs.observe(&permit, own, 4900, false);
+    assert_eq!(costs.stream_ms(), 170);
+    costs.observe(&permit, own, 120, true);
+    assert_eq!(costs.stream_ms(), 120);
+}
+
+#[test]
+fn certified_endpoint_binding_rejects_another_route_or_local_profile() {
+    let route = VersionRef {
+        kind: 165,
+        id: [7; 32],
+        generation: 1,
+        digest: [8; 32],
+    };
+    let profile = b"Exact endpoint profile";
+    let binding = EndpointBinding::checked(&route, route.id, profile, profile).unwrap();
+    assert_eq!(
+        CertifiedEndpointPermit {
+            binding,
+            expires: 7000
+        }
+        .expiry_for(profile)
+        .unwrap(),
+        7000
+    );
+    assert!(
+        CertifiedEndpointPermit {
+            binding,
+            expires: 7000
+        }
+        .expiry_for(b"Other profile")
+        .is_err()
+    );
+    assert!(EndpointBinding::checked(&route, [9; 32], profile, profile).is_err());
+    assert!(
+        EndpointBinding::checked(&route, route.id, b"Other registered envelope", profile).is_err()
+    );
+    let mut wrong_kind = route.clone();
+    wrong_kind.kind = 172;
+    assert!(EndpointBinding::checked(&wrong_kind, route.id, profile, profile).is_err());
 }
 
 #[test]
@@ -209,6 +277,7 @@ fn certified_stream_renewal_uses_exact_result_expiry_and_never_a_refusal() {
     let certified = |original_deadline| {
         StreamCheck::certified(
             &session,
+            Some(EndpointBinding(wire::digest(b"Exact endpoint profile"))),
             observation(Disposition::Permit, 1_005_000),
             original_deadline,
             health(),
@@ -219,6 +288,14 @@ fn certified_stream_renewal_uses_exact_result_expiry_and_never_a_refusal() {
     // independently certified permission used by ordinary stream maintenance.
     let checked = certified(4000);
     assert_eq!(checked.deadline, 2000);
+    assert_eq!(
+        checked
+            .endpoint_renewal
+            .unwrap()
+            .expiry_for(b"Exact endpoint profile")
+            .unwrap(),
+        6000 - authority_challenge::DELTA_MS
+    );
     assert_eq!(
         checked.renewal.unwrap().expiry_for(&session).unwrap(),
         6000 - authority_challenge::DELTA_MS
@@ -242,16 +319,29 @@ fn certified_stream_renewal_uses_exact_result_expiry_and_never_a_refusal() {
     }
     let denied = StreamCheck::certified(
         &session,
+        None,
         observation(Disposition::Refuse, 1_005_000),
         2000,
         health(),
     )
     .unwrap();
     assert!(denied.renewal.is_none());
+    assert!(denied.endpoint_renewal.is_none());
     assert_eq!(denied.deadline, 2000);
     assert!(
         StreamCheck::certified(
             &session,
+            None,
+            observation(Disposition::Permit, 1_005_000),
+            2000,
+            health()
+        )
+        .is_err()
+    );
+    assert!(
+        StreamCheck::certified(
+            &session,
+            Some(EndpointBinding(wire::digest(b"Exact endpoint profile"))),
             observation(Disposition::Pending, 1_005_000),
             2000,
             health()
@@ -261,6 +351,7 @@ fn certified_stream_renewal_uses_exact_result_expiry_and_never_a_refusal() {
     assert!(
         StreamCheck::certified(
             &session,
+            Some(EndpointBinding(wire::digest(b"Exact endpoint profile"))),
             observation(Disposition::Permit, 999_999),
             2000,
             health()
