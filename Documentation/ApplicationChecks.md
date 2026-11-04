@@ -116,7 +116,16 @@ publication still run for each result; parsed permission decisions are not cache
 
 Checks run in finite rounds. The actor captures at most four checks already
 available, performs every captured check's necessary gate preparation, then
-revalidates and issues their fresh challenges. No later arrival joins that round.
+revalidates and issues their fresh challenges. Before the first completion,
+unused slots may accept later checks whose exact stream and endpoint gates are
+already current. There are at most four total admissions per round, including
+failed or deferred attempts; completing a check never opens another slot.
+Later reads are clipped to the latest original deadline of the initial issued
+batch, as well as their own caller, clock and gate bounds. They cannot extend
+the round. An expired open gate defers at most one queue-head check, retaining
+its original permit and request until the next ordinary round. No later check
+bypasses that held head. Cancellation, changed identity, closed streams and
+expired caller deadlines retain their existing refusal paths.
 While its workers remain, completion has a separate dispatch class; unrelated
 synchronous admission, renewal and cleanup do not advance the actor's floor or
 consume its permission tail before completion. Clock/currentness checks,
@@ -233,7 +242,7 @@ connection or session. One admission permit follows each check through the
 endpoint queue, its worker and finalization, so queued and in-flight work together
 never exceed four, including across reconnects. The framed-reader queue also
 holds at most four bounded frames. Overflow receives a bounded unavailable
-response; it cannot create an unbounded task or authority queue. Finite captured
+response; it cannot create an unbounded task or authority queue. Finite
 read rounds alternate with the existing bounded lifecycle rotation; completions
 are drained before the next lifecycle turn. Termination closes gates and cancels
 pending checks before joining workers.

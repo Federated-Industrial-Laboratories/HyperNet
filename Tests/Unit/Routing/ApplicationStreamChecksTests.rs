@@ -1465,3 +1465,84 @@ fn inactive_reason_is_bounded_and_preserves_not_active_receipt() {
     assert!(text.len() < 384);
     assert!(!text.contains(&check.request.local_connection_id));
 }
+
+#[test]
+fn issue_only_defers_expired_open_gates_but_not_terminal_context_failures() {
+    for fault in 0..13 {
+        let (_, _, ready, request) = fixture();
+        let now = request.caller_started_boot_ms;
+        let (reply, _receipt) = tokio::sync::oneshot::channel();
+        let mut check = checks::Check {
+            request: request.clone(),
+            ready: Arc::new(ready),
+            connected: Arc::new(AtomicBool::new(true)),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            reply,
+            timing: None,
+            _slot: Arc::new(tokio::sync::Semaphore::new(control::MAXIMUM_PENDING))
+                .try_acquire_owned()
+                .unwrap(),
+        };
+        let stream = prepared_stream(now + 3000, request.caller_deadline_boot_ms);
+        let permission = EndpointPermission {
+            gate: route_io::Gate::new(if fault == 0 { now } else { now + 3000 }),
+            accepted_at: Some(now),
+            renewals: 0,
+        };
+        let mut live = BTreeMap::from([(request.session.id, stream)]);
+        let mut inspected_at = now;
+        match fault {
+            0 => {}
+            1 => live.get_mut(&request.session.id).unwrap().gate = route_io::Gate::new(now),
+            2 => check.cancelled.store(true, Ordering::Release),
+            3 => check.connected.store(false, Ordering::Release),
+            4 => {
+                Arc::get_mut(&mut check.ready)
+                    .unwrap()
+                    .challenge
+                    .control_generation += 1
+            }
+            5 => {
+                live.get_mut(&request.session.id)
+                    .unwrap()
+                    .reference
+                    .generation += 1
+            }
+            6 => {
+                live.remove(&request.session.id);
+            }
+            7 => live[&request.session.id]
+                .forwarding
+                .finished
+                .store(true, Ordering::Release),
+            8 => live[&request.session.id]
+                .forwarding
+                .established
+                .store(false, Ordering::Release),
+            9 => live[&request.session.id].gate.close(),
+            10 => permission.gate.close(),
+            11 => inspected_at = request.caller_deadline_boot_ms,
+            12 => {
+                Arc::get_mut(&mut live.get_mut(&request.session.id).unwrap().forwarding)
+                    .unwrap()
+                    .deadline = now
+            }
+            _ => unreachable!(),
+        }
+        let failure = check
+            .completion_stream(&live, &permission, inspected_at)
+            .err()
+            .unwrap();
+        assert_eq!(
+            checks::needs_preparation(&failure),
+            fault < 2,
+            "fault {fault}: {failure}"
+        );
+        assert_eq!(
+            check.request, request,
+            "deferral never changes caller identity or end"
+        );
+        assert_eq!(permission.renewals, 0);
+        assert_eq!(permission.accepted_at, Some(now));
+    }
+}

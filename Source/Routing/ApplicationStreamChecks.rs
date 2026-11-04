@@ -314,7 +314,7 @@ pub(super) fn prepare(
     Ok(Preparation::Ready)
 }
 
-// Capture once: a draining round never admits later arrivals or extends its end.
+// Capture the initial batch. Only issue-only slots may join before its first completion.
 pub(super) fn cohort(first: Check, queue: &mut mpsc::Receiver<Check>) -> Vec<Check> {
     let mut checks = Vec::with_capacity(control::MAXIMUM_PENDING);
     checks.push(first);
@@ -325,6 +325,37 @@ pub(super) fn cohort(first: Check, queue: &mut mpsc::Receiver<Check>) -> Vec<Che
     checks
 }
 
+#[derive(Debug)]
+struct EndpointPermissionExpired;
+impl std::fmt::Display for EndpointPermissionExpired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("application endpoint permission expired")
+    }
+}
+impl std::error::Error for EndpointPermissionExpired {}
+
+pub(super) fn needs_preparation(error: &anyhow::Error) -> bool {
+    error.is::<EndpointPermissionExpired>()
+        || error.downcast_ref::<InactiveStream>() == Some(&InactiveStream::GateExpired)
+}
+
+pub(super) fn issue_current(
+    check: &Check,
+    end: u64,
+    live: &BTreeMap<Digest, LiveStream>,
+    permission: &EndpointPermission,
+    client: &mut Client<'_>,
+    guard: &Guard,
+    active: &Active,
+) -> Result<PreparedRead> {
+    check.record(Stage::Dequeued, None, None);
+    // This path may sign a new challenge, but never prepares gates or recovers
+    // ordinary effects. All existing issue checks remain authoritative.
+    client.before(end, |client| {
+        issue(check, live, permission, client, guard, active)
+    })
+}
+
 pub(super) fn issue(
     check: &Check,
     live: &BTreeMap<Digest, LiveStream>,
@@ -333,8 +364,8 @@ pub(super) fn issue(
     guard: &Guard,
     active: &Active,
 ) -> Result<PreparedRead> {
-    // Every member's readiness work has finished before any member issues a
-    // challenge. Recheck validity now: other preparation cannot renew this call.
+    // Captured members have finished readiness work. Later issue-only members
+    // must use already-current gates; neither path can renew this call here.
     check.current(guard, active)?;
     let now = crate::authority_challenge::boot_time_ms()?;
     let stream = check.completion_stream(live, permission, now)?;
@@ -480,10 +511,7 @@ impl Check {
                 && now < self.request.caller_deadline_boot_ms,
             "application check deadline expired"
         );
-        ensure!(
-            permission.gate.expiry()? > now,
-            "application endpoint permission expired"
-        );
+        ensure!(permission.gate.expiry()? > now, EndpointPermissionExpired);
         let stream = live
             .get(&self.request.session.id)
             .ok_or(InactiveStream::Missing)?;

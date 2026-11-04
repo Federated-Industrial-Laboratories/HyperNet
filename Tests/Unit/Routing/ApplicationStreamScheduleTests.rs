@@ -335,3 +335,148 @@ fn pending_round_completion_precedes_a_long_lifecycle_turn_and_preserves_gate_ta
     );
     assert_eq!(endpoint.gate.expiry().unwrap(), now + 500);
 }
+
+#[test]
+fn unused_slots_issue_without_floor_mutation_then_completion_closes_admission() {
+    use crate::authority_floor::tests::{read::Read, setup};
+    let (_directory, sample, mut session, mut store) = setup();
+    let first = Read::new(&store, &mut session, sample);
+    let prefix = store.prefix().clone();
+    let now = sample.observe().unwrap();
+    let mut schedule = Schedule::default();
+    schedule.begin_round(1);
+    schedule.initial_issue(now.boot_ms + 1000);
+    assert_eq!(
+        schedule.poll(true, |class| match class {
+            Dispatch::Fill | Dispatch::Close => Poll::Ready(class),
+            _ => Poll::Pending,
+        }),
+        Poll::Ready(Dispatch::Fill)
+    );
+    assert_eq!(
+        schedule.admit_fill(now.boot_ms + 10),
+        Some(now.boot_ms + 1000)
+    );
+    let later = crate::authority_challenge::ClockHealth::new(
+        now.wall_ms + 10,
+        now.boot_ms + 10,
+        now.boot_ms + 30_010,
+        100,
+    )
+    .unwrap()
+    .frozen();
+    let second = Read::new(&store, &mut session, later);
+    assert_eq!(
+        store.prefix(),
+        &prefix,
+        "challenge issuance cannot publish authority"
+    );
+    assert!(store.resume_ordinary().unwrap().is_none());
+    assert!(store.resume_fence().unwrap().is_none());
+    assert_eq!(
+        schedule.poll(true, |class| match class {
+            Dispatch::Complete | Dispatch::Fill | Dispatch::Close => Poll::Ready(class),
+            _ => Poll::Pending,
+        }),
+        Poll::Ready(Dispatch::Complete)
+    );
+    assert!(schedule.fill_end(now.boot_ms + 20).is_none());
+    store
+        .accept_read(first.verify(&store), &mut session, later, 0, |_, _| Ok(()))
+        .unwrap();
+    // A second already-issued read still validates against the actor's current
+    // floor. Slot filling does not retain the old floor as an authority cache.
+    store
+        .accept_read(second.verify(&store), &mut session, later, 0, |_, _| Ok(()))
+        .unwrap();
+    assert_eq!(
+        schedule.poll(true, |class| match class {
+            Dispatch::Fill | Dispatch::Close => Poll::Ready(class),
+            _ => Poll::Pending,
+        }),
+        Poll::Pending
+    );
+    assert_eq!(
+        schedule.poll(false, |class| match class {
+            Dispatch::Check | Dispatch::Close => Poll::Ready(class),
+            _ => Poll::Pending,
+        }),
+        Poll::Ready(Dispatch::Close)
+    );
+}
+
+#[test]
+fn late_admissions_share_fixed_round_end_and_never_refill_finished_slots() {
+    let mut schedule = Schedule::default();
+    schedule.begin_round(1);
+    schedule.initial_issue(500);
+    for expected in 2..=control::MAXIMUM_PENDING {
+        assert_eq!(schedule.admit_fill(100 + expected as u64), Some(500));
+        assert_eq!(schedule.round_admissions, expected);
+        assert_eq!(schedule.round_end, 500);
+    }
+    assert!(schedule.admit_fill(200).is_none());
+    assert!(
+        schedule
+            .poll(true, |class| match class {
+                Dispatch::Fill => Poll::Ready(class),
+                _ => Poll::Pending,
+            })
+            .is_pending()
+    );
+    schedule.begin_round(1);
+    schedule.initial_issue(500);
+    assert!(schedule.admit_fill(500).is_none());
+    assert_eq!(schedule.round_admissions, 1);
+    assert_eq!(
+        schedule.poll(true, |class| match class {
+            Dispatch::Complete | Dispatch::Fill => Poll::Ready(class),
+            _ => Poll::Pending,
+        }),
+        Poll::Ready(Dispatch::Complete)
+    );
+    assert!(
+        schedule.admit_fill(400).is_none(),
+        "completion closes even unused slots"
+    );
+}
+
+#[tokio::test]
+async fn deferred_head_keeps_original_permit_and_precedes_later_arrivals_after_lifecycle() {
+    let (_, _, ready, request) = fixture();
+    let slots = Arc::new(tokio::sync::Semaphore::new(control::MAXIMUM_PENDING));
+    let mut held = check(&ready, &request);
+    held._slot = slots.clone().try_acquire_owned().unwrap();
+    let original = held.request.clone();
+    let (sender, mut queue) = mpsc::channel(control::MAXIMUM_PENDING);
+    for nonce in 1..control::MAXIMUM_PENDING {
+        let mut next = check(&ready, &request);
+        next.request.nonce = [nonce as u8; 32];
+        next._slot = slots.clone().try_acquire_owned().unwrap();
+        sender.try_send(next).unwrap();
+    }
+    assert!(slots.clone().try_acquire_owned().is_err());
+    let mut schedule = Schedule::default();
+    schedule.begin_round(1);
+    schedule.initial_issue(request.caller_deadline_boot_ms);
+    schedule.admit_fill(request.caller_started_boot_ms).unwrap();
+    // Readiness is deferred until workers have drained, rather than repeatedly
+    // dequeuing the head or letting later requests bypass its original permit.
+    schedule.round_open = false;
+    assert!(schedule.poll(true, |_| Poll::<()>::Pending).is_pending());
+    assert_eq!(
+        schedule.poll(false, |class| match class {
+            Dispatch::Check | Dispatch::Own => Poll::Ready(class),
+            _ => Poll::Pending,
+        }),
+        Poll::Ready(Dispatch::Own)
+    );
+    held.cancelled.store(true, Ordering::Release);
+    let cohort = checks::cohort(held, &mut queue);
+    assert_eq!(cohort[0].request, original);
+    assert!(cohort[0].cancelled.load(Ordering::Acquire));
+    assert_eq!(cohort.len(), control::MAXIMUM_PENDING);
+    assert!(slots.clone().try_acquire_owned().is_err());
+    drop(cohort);
+    assert_eq!(slots.available_permits(), control::MAXIMUM_PENDING);
+}

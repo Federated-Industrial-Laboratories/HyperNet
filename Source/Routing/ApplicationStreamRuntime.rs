@@ -255,6 +255,7 @@ enum Dispatch {
     Own,
     Stream,
     Check,
+    Fill,
     Complete,
     Handshake,
     Incoming,
@@ -276,6 +277,9 @@ struct Schedule {
     next: usize,
     check_turn: bool,
     renewal_turn: u64,
+    round_admissions: usize,
+    round_end: u64,
+    round_open: bool,
 }
 impl Schedule {
     async fn next<T>(
@@ -291,7 +295,8 @@ impl Schedule {
         }))
         .await
     }
-    // A finite captured read round owns the actor until its workers drain.
+    // A finite read round owns the actor until its workers drain. Before its
+    // first completion, only issue-only work can fill its unused slots.
     // Completion never starts another round. Between rounds the existing
     // lifecycle rotation retains its turn, even under continuous check arrival.
     fn poll<T>(
@@ -300,10 +305,15 @@ impl Schedule {
         mut ready: impl FnMut(Dispatch) -> std::task::Poll<T>,
     ) -> std::task::Poll<T> {
         if let std::task::Poll::Ready(completed) = ready(Dispatch::Complete) {
+            self.round_open = false;
             return std::task::Poll::Ready(completed);
         }
         if reading {
-            return std::task::Poll::Pending;
+            return if self.round_open && self.round_admissions < streams::control::MAXIMUM_PENDING {
+                ready(Dispatch::Fill)
+            } else {
+                std::task::Poll::Pending
+            };
         }
         let checked = self.check_turn;
         if checked && let std::task::Poll::Ready(event) = ready(Dispatch::Check) {
@@ -323,6 +333,25 @@ impl Schedule {
         } else {
             ready(Dispatch::Check)
         }
+    }
+    fn begin_round(&mut self, count: usize) {
+        self.round_admissions = count;
+        self.round_end = 0;
+        self.round_open = true;
+    }
+    fn initial_issue(&mut self, end: u64) {
+        self.round_end = self.round_end.max(end);
+    }
+    fn fill_end(&self, now: u64) -> Option<u64> {
+        (self.round_open
+            && self.round_admissions < streams::control::MAXIMUM_PENDING
+            && now < self.round_end)
+            .then_some(self.round_end)
+    }
+    fn admit_fill(&mut self, now: u64) -> Option<u64> {
+        let end = self.fill_end(now)?;
+        self.round_admissions += 1;
+        Some(end)
     }
     fn renewed(&mut self) -> Result<u64> {
         self.renewal_turn = self
@@ -609,6 +638,7 @@ pub(super) async fn endpoint(
     let mut live: BTreeMap<Digest, LiveStream> = BTreeMap::new();
     let mut reads: JoinSet<checks::ExchangeCompletion> = JoinSet::new();
     let mut pending: BTreeMap<tokio::task::Id, checks::Pending> = BTreeMap::new();
+    let mut held_check: Option<checks::Check> = None;
     let mut closing: Option<PendingClose> = None;
     let mut cleanup_diagnostics = 0;
     let mut schedule = Schedule::default();
@@ -630,6 +660,7 @@ pub(super) async fn endpoint(
         let stream_due=due_stream(&live,now,client.stream_renewal_budget_ms().saturating_add(close_budget),u64::MAX);
         let close_work=closing.as_ref().filter(|close|now>=close.retry_after).map(|close|maintenance(now,&permission,&live,Some(close),client.own_renewal_budget_ms(),client.stream_renewal_budget_ms(),client.operation_budget_ms())).transpose()?;
         let public=listener.is_some();
+        let can_fill=held_check.is_none() && schedule.fill_end(now).is_some();
         let (listener_tasks,mut listener_requests)=listener.as_mut().map(|l|(&mut l.tasks,&mut l.requests)).unzip();
         let next=tokio::select! {
             biased;
@@ -640,7 +671,11 @@ pub(super) async fn endpoint(
                 Dispatch::Own if own_due=>std::task::Poll::Ready(Event::Maintenance(Maintenance::Own)),
                 Dispatch::Stream if stream_due.is_some()=>std::task::Poll::Ready(Event::Maintenance(Maintenance::Stream(stream_due.expect("due stream")))),
                 Dispatch::Complete=>event(reads.poll_join_next_with_id(cx),Event::Checked),
-                Dispatch::Check=>event(check_requests.poll_recv(cx),Event::Check),
+                Dispatch::Check=>match held_check.take() {
+                    Some(check)=>std::task::Poll::Ready(Event::Check(check)),
+                    None=>event(check_requests.poll_recv(cx),Event::Check),
+                },
+                Dispatch::Fill if can_fill=>event(check_requests.poll_recv(cx),Event::Check),
                 Dispatch::Handshake if !handshakes.is_empty()=>event(handshakes.poll_join_next(cx),Event::Handshake),
                 Dispatch::Incoming if !incoming.is_empty()=>event(incoming.poll_join_next(cx),Event::Incoming),
                 Dispatch::Public if public=>event(listener_requests.as_mut().expect("enabled listener").poll_recv(cx),Event::Public),
@@ -706,20 +741,44 @@ pub(super) async fn endpoint(
             },
             Event::Check(check)=>{
                 let mut prepared=Vec::with_capacity(streams::control::MAXIMUM_PENDING);
-                for check in checks::cohort(check,&mut check_requests) {
-                    match checks::prepare(&check,&mut live,&mut permission,client,guard,active) {
-                        Ok(checks::Preparation::Ready)=>prepared.push(check),
-                        Ok(checks::Preparation::Complete(receipt))=>{let receipt=check.complete(Ok(*receipt));check.respond(receipt);},
-                        Err(error)=>{let receipt=check.complete(Err(error));check.respond(receipt);},
+                let fill_end=if pending.is_empty() {
+                    let cohort=checks::cohort(check,&mut check_requests);
+                    schedule.begin_round(cohort.len());
+                    for check in cohort {
+                        match checks::prepare(&check,&mut live,&mut permission,client,guard,active) {
+                            Ok(checks::Preparation::Ready)=>prepared.push(check),
+                            Ok(checks::Preparation::Complete(receipt))=>{let receipt=check.complete(Ok(*receipt));check.respond(receipt);},
+                            Err(error)=>{let receipt=check.complete(Err(error));check.respond(receipt);},
+                        }
                     }
-                }
-                // Readiness may learn a new floor. Finish all of it before any
-                // challenge captures that floor, then issue this finite cohort.
+                    None
+                } else {
+                    let Some(end)=schedule.admit_fill(crate::authority_challenge::boot_time_ms()?) else {
+                        schedule.round_open=false;
+                        held_check=Some(check);
+                        continue;
+                    };
+                    prepared.push(check);
+                    Some(end)
+                };
+                // Readiness for the initial batch finishes before any challenge.
+                // Filling an unused slot only issues against current gates and
+                // cannot publish a floor or extend this already fixed round end.
                 for check in prepared {
-                    let read=match checks::issue(&check,&live,&permission,client,guard,active) {
+                    let issued=match fill_end {
+                        Some(end)=>checks::issue_current(&check,end,&live,&permission,client,guard,active),
+                        None=>checks::issue(&check,&live,&permission,client,guard,active),
+                    };
+                    let read=match issued {
                         Ok(read)=>read,
+                        Err(error) if fill_end.is_some() && checks::needs_preparation(&error)=>{
+                            schedule.round_open=false;
+                            held_check=Some(check);
+                            continue;
+                        },
                         Err(error)=>{let receipt=check.complete(Err(error));check.respond(receipt);continue;},
                     };
+                    if fill_end.is_none() { schedule.initial_issue(read.deadline()); }
                     let exchange=read.exchange();
                     let clock=guard.clock_source();
                     let connected=check.connected.clone();
@@ -756,6 +815,9 @@ pub(super) async fn endpoint(
         stream.gate.close();
     }
     check_requests.close();
+    if let Some(check) = held_check.take() {
+        check.cancelled.store(true, Ordering::Release);
+    }
     while check_requests.try_recv().is_ok() {}
     for check in pending.values() {
         check.check.cancelled.store(true, Ordering::Release);
