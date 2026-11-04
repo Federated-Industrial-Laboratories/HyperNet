@@ -147,6 +147,11 @@ uses the current domain records, generations, causal floor and retained history;
 an unresolved ordinary request or fence still prevents acceptance. A response
 that has been overtaken by the current floor is refused, without rolling the floor
 back or retrying under a new deadline. Each challenge can be consumed once.
+The request's signed minimum is the floor known when it was issued. Concurrent
+requests with that same lower bound may each certify the same newer prefix;
+publishing one does not invalidate another result that still satisfies the current
+certified prefix, history and generation checks. Old or conflicting results and
+history proofs bound to an earlier retained prefix remain refused.
 
 A successfully verified and published `Stream::Permit` result also supplies
 in-memory certified renewals bound to the exact session and receiving endpoint.

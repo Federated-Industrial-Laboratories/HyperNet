@@ -52,8 +52,7 @@ impl Store {
         );
         ensure!(
             result.request.scope == *self.descriptor.scope()
-                && result.point().prefix().scope() == self.descriptor.scope()
-                && result.request.minimum_height >= self.floor.height(),
+                && result.point().prefix().scope() == self.descriptor.scope(),
             "fresh read context or causal floor differs"
         );
         if let Some(history) = result.history() {
@@ -62,6 +61,8 @@ impl Store {
                 "fresh read history differs from retained prefix"
             );
         }
+        // The signed minimum is the floor at issue, not the certified result's
+        // height. Another pending read may have published the same newer prefix.
         result.extends(&self.floor)
     }
     fn advance_read(&mut self, result: &VerifiedRead, wall: u64) -> Result<()> {

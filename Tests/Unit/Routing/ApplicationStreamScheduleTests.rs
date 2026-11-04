@@ -217,7 +217,10 @@ fn read_round_prevents_lifecycle_floor_change_between_issue_and_completion() {
                     |_, _| -> anyhow::Result<()> { panic!("interleaved stale read was accepted") },
                 )
                 .unwrap_err();
-            assert!(error.to_string().contains("causal floor"), "{error:#}");
+            assert!(
+                error.to_string().contains("below the accepted"),
+                "{error:#}"
+            );
             continue;
         }
         // An unfinished worker does not yield the authority actor to lifecycle
