@@ -19,6 +19,8 @@ pub(super) enum Stage {
     ExchangeStart,
     ExchangeComplete,
     FinalizeStart,
+    DomainStart,
+    DomainComplete,
     PublishStart,
     PublishComplete,
     Outcome,
@@ -387,14 +389,17 @@ pub(super) fn finish(
     let result = (|| -> Result<Receipt> {
         let observation =
             client.finish_check_stream(read, completion, &check.request.session, |stage| {
-                check.record(
-                    match stage {
-                        ReadStage::PublishStart => Stage::PublishStart,
-                        ReadStage::PublishComplete => Stage::PublishComplete,
-                    },
-                    None,
-                    None,
-                );
+                let stage = match stage {
+                    ReadStage::DomainStart => Stage::DomainStart,
+                    ReadStage::DomainComplete => Stage::DomainComplete,
+                    ReadStage::PublishStart => Stage::PublishStart,
+                    ReadStage::PublishComplete => Stage::PublishComplete,
+                    ReadStage::Signatures(statistics) => {
+                        check.record_signatures(statistics);
+                        return;
+                    }
+                };
+                check.record(stage, None, None);
             })?;
         check.current(guard, active)?;
         let clock = guard.application_clock()?;
@@ -415,6 +420,35 @@ pub(super) fn finish(
 impl Check {
     pub(super) fn sampled(&self) -> bool {
         self.timing.is_some_and(|timing| timing.sample.is_some())
+    }
+
+    fn record_signatures(&self, statistics: wire::SignatureStatistics) {
+        if self.sampled()
+            && let Ok(now) = crate::authority_challenge::boot_time_ms()
+        {
+            let mut line = DiagnosticLine::new();
+            self.record_signatures_at(&mut line, now, statistics);
+            diagnostic_line(line);
+        }
+    }
+
+    pub(super) fn record_signatures_at(
+        &self,
+        output: &mut impl std::fmt::Write,
+        now: u64,
+        statistics: wire::SignatureStatistics,
+    ) {
+        if let Some(sample) = self.timing.and_then(|timing| timing.sample) {
+            let _ = writeln!(
+                output,
+                "HyperNet application check: sample={sample} stage=Signatures lookups={} hits={} strictCalls={} strictNs={} evictions={} bootMs={now}",
+                statistics.lookups,
+                statistics.hits,
+                statistics.strict_verifications,
+                statistics.strict_verification_ns,
+                statistics.evictions,
+            );
+        }
     }
 
     pub(super) fn record_exchange(&self, completion: &ExchangeCompletion) {

@@ -243,6 +243,8 @@ fn check_diagnostics_keep_early_outcomes_bounds_and_redaction_with_failed_sink()
         checks::Stage::ExchangeStart,
         checks::Stage::ExchangeComplete,
         checks::Stage::FinalizeStart,
+        checks::Stage::DomainStart,
+        checks::Stage::DomainComplete,
         checks::Stage::PublishStart,
         checks::Stage::PublishComplete,
     ] {
@@ -277,8 +279,8 @@ fn check_diagnostics_keep_early_outcomes_bounds_and_redaction_with_failed_sink()
     assert_eq!(receipt.disposition, Disposition::Unavailable);
     assert!(receipt.authority.is_none());
     let text = output;
-    assert_eq!(text.matches("sample=7 ").count(), 9);
-    assert_eq!(text.matches("deadlineBootMs=200 ").count(), 9);
+    assert_eq!(text.matches("sample=7 ").count(), 11);
+    assert_eq!(text.matches("deadlineBootMs=200 ").count(), 11);
     assert!(text.contains("elapsedMs=100 "));
     assert!(text.contains("disposition=Some(Expired)"));
     assert!(text.contains("disposition=Some(NotActive)"));
@@ -300,14 +302,32 @@ fn check_diagnostics_keep_early_outcomes_bounds_and_redaction_with_failed_sink()
         Some((FailureCode::FreshQuorumUnavailable, Some(u64::MAX), None)),
     );
     assert!(record.len() < 384);
+    let statistics = wire::SignatureStatistics {
+        lookups: u64::MAX,
+        hits: u64::MAX,
+        strict_verifications: u64::MAX,
+        strict_verification_ns: u64::MAX,
+        evictions: u64::MAX,
+    };
+    record.clear();
+    maximum.record_signatures_at(&mut record, u64::MAX, statistics);
+    assert!(record.len() < 384);
+    assert!(record.contains("sample=256 stage=Signatures lookups="));
+    assert!(record.contains("strictCalls=") && record.contains("strictNs="));
+    assert!(!record.contains(&request.local_connection_id));
+    assert!(!record.contains("nonce") && !record.contains("session"));
+    maximum.record_signatures_at(&mut Closed, u64::MAX, statistics);
     maximum.timing.as_mut().unwrap().sample = None;
     let mut exhausted = String::new();
     for stage in [
         checks::Stage::ExchangeComplete,
+        checks::Stage::DomainStart,
+        checks::Stage::DomainComplete,
         checks::Stage::PublishComplete,
     ] {
         maximum.record_at(&mut exhausted, u64::MAX, stage, None, None);
     }
+    maximum.record_signatures_at(&mut exhausted, u64::MAX, statistics);
     assert!(exhausted.is_empty());
 }
 

@@ -13,6 +13,7 @@ fn durable_acceptance_timing_closes_on_success_and_failure_without_repeating_wor
                 order.borrow_mut().push(match stage {
                     ReadStage::PublishStart => "start",
                     ReadStage::PublishComplete => "complete",
+                    _ => panic!("unexpected acceptance stage"),
                 })
             },
             || {

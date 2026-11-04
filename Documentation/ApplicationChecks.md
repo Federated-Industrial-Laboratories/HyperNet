@@ -154,7 +154,12 @@ The first 256 check samples can report queue, preparation, worker exchange, acto
 finalization and durable-acceptance boundaries. Worker timestamps are captured
 in the worker and reported after it rejoins the actor; output order is not event
 order. The durable-acceptance span includes floor and domain-state publication
-and their required checks, rather than only filesystem synchronization. Errors
+and their required checks, rather than only filesystem synchronization. Nested
+domain-validation boundaries distinguish current-policy evaluation from response
+authentication. Signature counters cover fresh-read validation, durable acceptance
+and acknowledgement on the finalizing thread without resetting its counters.
+They report actual strict verification time and cache activity, excluding worker,
+replica and subsequent endpoint-proof extraction work. Errors
 can leave later stages absent. Missing diagnostic timestamps do not alter an
 operation's result, permission or deadline.
 

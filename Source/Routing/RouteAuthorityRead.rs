@@ -24,8 +24,11 @@ pub(crate) struct ReadExchange {
 pub(crate) type ReadCompletion = (transport::CertifiedReply, transport::HistoryEvidence);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ReadStage {
+    DomainStart,
+    DomainComplete,
     PublishStart,
     PublishComplete,
+    Signatures(wire::SignatureStatistics),
 }
 
 // This span includes durable floor acceptance, domain publication and final checks.
@@ -232,6 +235,7 @@ impl Client<'_> {
         completion: Result<ReadCompletion>,
         mut trace: impl FnMut(ReadStage),
     ) -> Result<Observation> {
+        let signatures = wire::signature_statistics();
         let PreparedRead {
             exchange,
             command,
@@ -264,24 +268,29 @@ impl Client<'_> {
                     ancestry: &history.nodes,
                 },
                 |request, result, statement| {
-                    let (state, records) = self.disk.context();
-                    let selected = fresh::verify_domain(
-                        &self.guard.bootstrap,
-                        state,
-                        records,
-                        request,
-                        result,
-                        statement,
-                        &[],
-                    )?;
-                    ensure!(
-                        selected.updates.is_empty(),
-                        "fresh Route context changes domain state"
-                    );
-                    result::minimum(&selected.versions, self.store.generations())?;
-                    let versions = selected.versions.clone();
-                    candidate = Some(selected);
-                    Ok(versions)
+                    trace(ReadStage::DomainStart);
+                    let result = (|| {
+                        let (state, records) = self.disk.context();
+                        let selected = fresh::verify_domain(
+                            &self.guard.bootstrap,
+                            state,
+                            records,
+                            request,
+                            result,
+                            statement,
+                            &[],
+                        )?;
+                        ensure!(
+                            selected.updates.is_empty(),
+                            "fresh Route context changes domain state"
+                        );
+                        result::minimum(&selected.versions, self.store.generations())?;
+                        let versions = selected.versions.clone();
+                        candidate = Some(selected);
+                        Ok(versions)
+                    })();
+                    trace(ReadStage::DomainComplete);
+                    result
                 },
             )
             .context("verify fresh Route authority context")?;
@@ -346,18 +355,24 @@ impl Client<'_> {
             observation.value = Some(value);
             Ok(observation)
         })();
-        if outcome.is_err() {
-            self.session.discard(&challenge)?;
-        } else {
-            self.costs.observe(
-                &command,
-                self.config.profile.identity.service,
-                authority_challenge::boot_time_ms()?.saturating_sub(started),
-                outcome
-                    .as_ref()
-                    .is_ok_and(|observation| observation.disposition == Disposition::Permit),
-            );
-        }
-        outcome.map_err(Self::retry_read)
+        let result = (|| {
+            if outcome.is_err() {
+                self.session.discard(&challenge)?;
+            } else {
+                self.costs.observe(
+                    &command,
+                    self.config.profile.identity.service,
+                    authority_challenge::boot_time_ms()?.saturating_sub(started),
+                    outcome
+                        .as_ref()
+                        .is_ok_and(|observation| observation.disposition == Disposition::Permit),
+                );
+            }
+            outcome.map_err(Self::retry_read)
+        })();
+        trace(ReadStage::Signatures(
+            wire::signature_statistics().since(signatures),
+        ));
+        result
     }
 }
