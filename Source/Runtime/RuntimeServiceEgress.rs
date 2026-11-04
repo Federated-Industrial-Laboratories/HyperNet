@@ -115,6 +115,7 @@ async fn connection(mut client: UnixStream, config: Arc<Configuration>) -> Resul
         TcpStream::connect(address),
     )
     .await??;
+    remote.set_nodelay(true)?;
     let reply = wire::encode(&wire::Value::Array(vec![
         wire::Value::Uint(201),
         wire::Value::Uint(1),
