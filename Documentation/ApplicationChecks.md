@@ -108,6 +108,12 @@ The endpoint actor alone issues and consumes challenges, owns requester state,
 and publishes durable authority and domain state. Maintenance keeps the same
 synchronous prepare/exchange/finish composition.
 
+Fresh and ordered domain-result validation share the same governance replacement
+step. It indexes the exact returned record identities and parses each retained
+record once while selecting replacements. Unrelated retained records remain
+unchanged. Current policy evaluation, retained-generation checks and durable
+publication still run for each result; parsed permission decisions are not cached.
+
 Checks run in finite rounds. The actor captures at most four checks already
 available, performs every captured check's necessary gate preparation, then
 revalidates and issues their fresh challenges. No later arrival joins that round.

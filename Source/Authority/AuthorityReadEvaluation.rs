@@ -2,9 +2,7 @@
 // Pure evaluators and independent consumers share the same exact current authorization checks.
 use super::*;
 use crate::{
-    authority_membership::{self as membership, Reservations},
-    authority_objects::Object,
-    trust_bootstrap::Verified,
+    authority_membership::Reservations, authority_objects::Object, trust_bootstrap::Verified,
 };
 
 pub(crate) fn evaluate_domain(
@@ -97,19 +95,13 @@ pub fn verify_domain(
     exact.extend(returned.iter().map(|r| r.reference.clone()));
     exact.sort_by_key(VersionRef::index);
     ensure!(exact == versions, "fresh domain record closure differs");
-    let mut selected = prior_records.to_vec();
-    for (reference, bytes) in gov_refs.iter().zip(&governance) {
-        selected.retain(|old| {
-            !crate::authority_governance::Governance::record_versions(
-                scope.network,
-                scope.incarnation,
-                std::slice::from_ref(old),
-            )
-            .is_ok_and(|v| v[0].index() == reference.index())
-        });
-        selected.push(bytes.clone());
-    }
-    membership::sort_records(&mut selected)?;
+    let selected = domains::result::replace_governance(
+        scope.network,
+        scope.incarnation,
+        prior_records,
+        &governance,
+        &gov_refs,
+    )?;
     let source = domains::result::merge(bootstrap, &selected)?;
     let mut state = prior_state.clone();
     for record in returned {
