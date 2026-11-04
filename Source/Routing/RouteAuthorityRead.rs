@@ -22,6 +22,23 @@ pub(crate) struct ReadExchange {
     head: Option<crate::authority_history::TreeHead>,
 }
 pub(crate) type ReadCompletion = (transport::CertifiedReply, transport::HistoryEvidence);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReadStage {
+    PublishStart,
+    PublishComplete,
+}
+
+// This span includes durable floor acceptance, domain publication and final checks.
+// Its observer cannot replace an outcome or turn a failed publication into success.
+pub(super) fn observe_acceptance<T>(
+    mut trace: impl FnMut(ReadStage),
+    accept: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    trace(ReadStage::PublishStart);
+    let result = accept();
+    trace(ReadStage::PublishComplete);
+    result
+}
 pub(crate) struct PreparedRead {
     exchange: ReadExchange,
     command: DomainCommand,
@@ -123,7 +140,7 @@ impl Client<'_> {
     ) -> Result<Observation> {
         let prepared = self.prepare_read(command, challenge_ceiling)?;
         let completion = prepared.exchange().run(|| self.guard.health());
-        self.finish_read(prepared, completion)
+        self.finish_read(prepared, completion, |_| {})
     }
 
     pub(super) fn prepare_read(
@@ -213,6 +230,7 @@ impl Client<'_> {
         &mut self,
         prepared: PreparedRead,
         completion: Result<ReadCompletion>,
+        mut trace: impl FnMut(ReadStage),
     ) -> Result<Observation> {
         let PreparedRead {
             exchange,
@@ -275,12 +293,14 @@ impl Client<'_> {
                 code: verified.result.code,
             };
             if verified.result.disposition != Disposition::Permit {
-                let consumed = self.store.observe_read_consumed(
-                    verified,
-                    &mut self.session,
-                    self.guard.health()?,
-                    0,
-                )?;
+                let consumed = observe_acceptance(&mut trace, || {
+                    self.store.observe_read_consumed(
+                        verified,
+                        &mut self.session,
+                        self.guard.health()?,
+                        0,
+                    )
+                })?;
                 transport::acknowledge_read(
                     &consumed,
                     &self.config.key,
@@ -295,19 +315,21 @@ impl Client<'_> {
                 .saturating_sub(authority_challenge::DELTA_MS);
             let candidate = candidate.context("fresh Route permit omitted verified context")?;
             transport::remaining(deadline)?;
-            let (value, consumed) = self.store.accept_read_consumed(
-                verified,
-                &mut self.session,
-                self.guard.health()?,
-                0,
-                |_, _| {
-                    self.active.check(self.guard)?;
-                    self.disk.publish(candidate.state, candidate.records)?;
-                    self.active.check(self.guard)?;
-                    transport::remaining(deadline)?;
-                    Ok(candidate.value)
-                },
-            )?;
+            let (value, consumed) = observe_acceptance(&mut trace, || {
+                self.store.accept_read_consumed(
+                    verified,
+                    &mut self.session,
+                    self.guard.health()?,
+                    0,
+                    |_, _| {
+                        self.active.check(self.guard)?;
+                        self.disk.publish(candidate.state, candidate.records)?;
+                        self.active.check(self.guard)?;
+                        transport::remaining(deadline)?;
+                        Ok(candidate.value)
+                    },
+                )
+            })?;
             transport::acknowledge_read(
                 &consumed,
                 &self.config.key,

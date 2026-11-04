@@ -24,7 +24,7 @@ use anyhow::{Context, Result, ensure};
 use std::path::Path;
 #[path = "RouteAuthorityRead.rs"]
 mod read;
-pub(crate) use read::{PreparedRead, ReadCompletion};
+pub(crate) use read::{PreparedRead, ReadCompletion, ReadStage};
 
 // Constructed only from the exact freshly verified and published permit result.
 // This is a stream-gate renewal, never a replacement action receipt or endpoint grant.
@@ -998,13 +998,14 @@ impl<'a> Client<'a> {
         prepared: PreparedRead,
         completion: Result<ReadCompletion>,
         session: &VersionRef,
+        trace: impl FnMut(ReadStage),
     ) -> Result<StreamCheck> {
         if let Err(error) = prepared.permit_session(session) {
             self.discard_read(prepared)?;
             return Err(error);
         }
         let original_deadline = prepared.deadline();
-        let observation = self.finish_read(prepared, completion)?;
+        let observation = self.finish_read(prepared, completion, trace)?;
         StreamCheck::certified(
             session,
             observation,

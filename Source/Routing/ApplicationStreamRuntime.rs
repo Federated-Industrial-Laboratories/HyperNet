@@ -331,13 +331,7 @@ enum Event {
     Public(Queued<Session>),
     Check(checks::Check),
     Checked(
-        std::result::Result<
-            (
-                tokio::task::Id,
-                Result<crate::route_authority::ReadCompletion>,
-            ),
-            tokio::task::JoinError,
-        >,
+        std::result::Result<(tokio::task::Id, checks::ExchangeCompletion), tokio::task::JoinError>,
     ),
 }
 fn event<T>(
@@ -603,7 +597,7 @@ pub(super) async fn endpoint(
     let mut handshakes: JoinSet<Result<OpenedStream>> = JoinSet::new();
     let mut forwarding: JoinSet<(Digest, Result<()>)> = JoinSet::new();
     let mut live: BTreeMap<Digest, LiveStream> = BTreeMap::new();
-    let mut reads: JoinSet<Result<crate::route_authority::ReadCompletion>> = JoinSet::new();
+    let mut reads: JoinSet<checks::ExchangeCompletion> = JoinSet::new();
     let mut pending: BTreeMap<tokio::task::Id, checks::Pending> = BTreeMap::new();
     let mut closing: Option<PendingClose> = None;
     let mut cleanup_diagnostics = 0;
@@ -724,19 +718,21 @@ pub(super) async fn endpoint(
                     let forwarding=stream.forwarding.clone();
                     let stream_gate=stream.gate.clone();
                     let endpoint_gate=permission.gate.clone();
-                    let task=reads.spawn_blocking(move || exchange.run(|| {
+                    let sampled=check.sampled();
+                    let task=reads.spawn_blocking(move || checks::ExchangeCompletion::capture(sampled,crate::authority_challenge::boot_time_ms,|| exchange.run(|| {
                         ensure!(connected.load(Ordering::Acquire) && !cancelled.load(Ordering::Acquire), "application check cancelled");
                         ensure!(forwarding.established.load(Ordering::Acquire) && !forwarding.finished.load(Ordering::Acquire), "application stream is no longer current");
                         crate::authority_local_transport::remaining(stream_gate.expiry()?.min(endpoint_gate.expiry()?))?;
                         clock.health()
-                    }));
+                    })));
                     pending.insert(task.id(),checks::Pending {check,read});
                 }
             },
             Event::Checked(result)=>{
-                let (id,completion)=match result {Ok(result)=>result,Err(error)=>(error.id(),Err(error.into()))};
+                let (id,completion)=match result {Ok(result)=>result,Err(error)=>(error.id(),checks::ExchangeCompletion {result:Err(error.into()),started:None,completed:None})};
                 let checks::Pending {check,read}=pending.remove(&id).context("application check worker has no owner")?;
-                let receipt=checks::finish(&check,read,completion,&mut live,&permission,client,guard,active);
+                check.record_exchange(&completion);
+                let receipt=checks::finish(&check,read,completion.result,&mut live,&permission,client,guard,active);
                 check.respond(receipt);
             },
         }

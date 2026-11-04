@@ -139,6 +139,14 @@ renewal. Existing bounded check diagnostics distinguish missing, changed,
 unestablished, finished, forwarding-expired, closed and gate-expired streams
 without logging session identifiers or application payloads.
 
+The first 256 check samples can report queue, preparation, worker exchange, actor
+finalization and durable-acceptance boundaries. Worker timestamps are captured
+in the worker and reported after it rejoins the actor; output order is not event
+order. The durable-acceptance span includes floor and domain-state publication
+and their required checks, rather than only filesystem synchronization. Errors
+can leave later stages absent. Missing diagnostic timestamps do not alter an
+operation's result, permission or deadline.
+
 Cancellation and shutdown suppress receipts. Shutdown cancels and joins the
 remaining exchanges under their original absolute ends, then discards the
 actor-owned challenges; it does not detach authority work.

@@ -3,6 +3,44 @@
 use super::*;
 
 #[test]
+fn durable_acceptance_timing_closes_on_success_and_failure_without_repeating_work() {
+    use std::cell::RefCell;
+    let order = RefCell::new(Vec::new());
+    for fail in [false, true] {
+        order.borrow_mut().clear();
+        let result = read::observe_acceptance(
+            |stage| {
+                order.borrow_mut().push(match stage {
+                    ReadStage::PublishStart => "start",
+                    ReadStage::PublishComplete => "complete",
+                })
+            },
+            || {
+                order.borrow_mut().push("accept");
+                if fail {
+                    Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into())
+                } else {
+                    Ok(17)
+                }
+            },
+        );
+        assert_eq!(*order.borrow(), ["start", "accept", "complete"]);
+        if fail {
+            assert_eq!(
+                result
+                    .unwrap_err()
+                    .downcast_ref::<std::io::Error>()
+                    .unwrap()
+                    .kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+        } else {
+            assert_eq!(result.unwrap(), 17);
+        }
+    }
+}
+
+#[test]
 fn check_readiness_challenges_keep_original_window_through_authority_uncertainty() {
     let fixture = proof::tests::Fixture::new(1_000_000);
     let started = 1000;

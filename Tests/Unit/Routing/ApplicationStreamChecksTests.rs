@@ -146,6 +146,70 @@ fn actor_diagnostics_preserve_single_execution_and_typed_failure() {
 }
 
 #[test]
+fn exchange_timestamps_preserve_results_when_clock_fails_or_sampling_ends() {
+    use std::cell::Cell;
+    let calls = Cell::new(0);
+    let clock_calls = Cell::new(0);
+    let completion = checks::ExchangeCompletion::capture(
+        true,
+        || {
+            let next = clock_calls.get() + 1;
+            clock_calls.set(next);
+            Ok(if next == 1 { 120 } else { 180 })
+        },
+        || {
+            assert_eq!(clock_calls.get(), 1);
+            calls.set(calls.get() + 1);
+            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe).into())
+        },
+    );
+    assert_eq!(
+        (completion.started, completion.completed),
+        (Some(120), Some(180))
+    );
+    assert_eq!(clock_calls.get(), 2);
+    assert_eq!(
+        completion
+            .result
+            .err()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap()
+            .kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+    for sampled in [true, false] {
+        clock_calls.set(0);
+        let completion = checks::ExchangeCompletion::capture(
+            sampled,
+            || {
+                clock_calls.set(clock_calls.get() + 1);
+                anyhow::bail!("diagnostic clock unavailable")
+            },
+            || {
+                calls.set(calls.get() + 1);
+                Ok((
+                    crate::authority_local_transport::CertifiedReply {
+                        node: vec![1],
+                        certificate: vec![2],
+                        result: vec![3],
+                    },
+                    crate::authority_local_transport::HistoryEvidence::direct(vec![]),
+                ))
+            },
+        );
+        assert!(completion.started.is_none() && completion.completed.is_none());
+        assert_eq!(clock_calls.get(), if sampled { 2 } else { 0 });
+        let (reply, _) = completion.result.unwrap();
+        assert_eq!(
+            (reply.node, reply.certificate, reply.result),
+            (vec![1], vec![2], vec![3])
+        );
+    }
+    assert_eq!(calls.get(), 3);
+}
+
+#[test]
 fn check_diagnostics_keep_early_outcomes_bounds_and_redaction_with_failed_sink() {
     struct Closed;
     impl std::fmt::Write for Closed {
@@ -173,7 +237,15 @@ fn check_diagnostics_keep_early_outcomes_bounds_and_redaction_with_failed_sink()
         }),
     };
     let mut output = String::new();
-    for stage in [checks::Stage::Enqueued, checks::Stage::Dequeued] {
+    for stage in [
+        checks::Stage::Enqueued,
+        checks::Stage::Dequeued,
+        checks::Stage::ExchangeStart,
+        checks::Stage::ExchangeComplete,
+        checks::Stage::FinalizeStart,
+        checks::Stage::PublishStart,
+        checks::Stage::PublishComplete,
+    ] {
         check.record_at(&mut output, 210, stage, None, None);
     }
     for disposition in [Disposition::Expired, Disposition::NotActive] {
@@ -205,8 +277,8 @@ fn check_diagnostics_keep_early_outcomes_bounds_and_redaction_with_failed_sink()
     assert_eq!(receipt.disposition, Disposition::Unavailable);
     assert!(receipt.authority.is_none());
     let text = output;
-    assert_eq!(text.matches("sample=7 ").count(), 4);
-    assert_eq!(text.matches("deadlineBootMs=200 ").count(), 4);
+    assert_eq!(text.matches("sample=7 ").count(), 9);
+    assert_eq!(text.matches("deadlineBootMs=200 ").count(), 9);
     assert!(text.contains("elapsedMs=100 "));
     assert!(text.contains("disposition=Some(Expired)"));
     assert!(text.contains("disposition=Some(NotActive)"));
@@ -228,6 +300,15 @@ fn check_diagnostics_keep_early_outcomes_bounds_and_redaction_with_failed_sink()
         Some((FailureCode::FreshQuorumUnavailable, Some(u64::MAX), None)),
     );
     assert!(record.len() < 384);
+    maximum.timing.as_mut().unwrap().sample = None;
+    let mut exhausted = String::new();
+    for stage in [
+        checks::Stage::ExchangeComplete,
+        checks::Stage::PublishComplete,
+    ] {
+        maximum.record_at(&mut exhausted, u64::MAX, stage, None, None);
+    }
+    assert!(exhausted.is_empty());
 }
 
 #[path = "ApplicationStreamScheduleTests.rs"]

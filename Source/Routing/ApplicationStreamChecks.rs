@@ -4,7 +4,7 @@ use super::*;
 use crate::authority_domains::streams::control::{
     self, Cancel, Challenge, Disposition, Privacy, Ready, Receipt, Request,
 };
-use crate::route_authority::{PreparedRead, ReadCompletion};
+use crate::route_authority::{PreparedRead, ReadCompletion, ReadStage};
 use std::sync::atomic::AtomicBool;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 
@@ -16,7 +16,33 @@ pub(super) enum Stage {
     EndpointPreparation,
     StreamPreparation,
     FreshRead,
+    ExchangeStart,
+    ExchangeComplete,
+    FinalizeStart,
+    PublishStart,
+    PublishComplete,
     Outcome,
+}
+pub(super) struct ExchangeCompletion {
+    pub result: Result<ReadCompletion>,
+    pub started: Option<u64>,
+    pub completed: Option<u64>,
+}
+impl ExchangeCompletion {
+    pub(super) fn capture(
+        sampled: bool,
+        mut clock: impl FnMut() -> Result<u64>,
+        exchange: impl FnOnce() -> Result<ReadCompletion>,
+    ) -> Self {
+        let started = sampled.then(|| clock().ok()).flatten();
+        let result = exchange();
+        let completed = sampled.then(|| clock().ok()).flatten();
+        Self {
+            result,
+            started,
+            completed,
+        }
+    }
 }
 pub(super) struct Check {
     pub request: Request,
@@ -341,6 +367,7 @@ pub(super) fn finish(
     guard: &Guard,
     active: &Active,
 ) -> Receipt {
+    check.record(Stage::FinalizeStart, None, None);
     // Revalidate before consuming the challenge or publishing learned state.
     let context = check.current(guard, active).and_then(|()| {
         check
@@ -357,7 +384,17 @@ pub(super) fn finish(
     }
     let deadline = read.deadline();
     let result = (|| -> Result<Receipt> {
-        let observation = client.finish_check_stream(read, completion, &check.request.session)?;
+        let observation =
+            client.finish_check_stream(read, completion, &check.request.session, |stage| {
+                check.record(
+                    match stage {
+                        ReadStage::PublishStart => Stage::PublishStart,
+                        ReadStage::PublishComplete => Stage::PublishComplete,
+                    },
+                    None,
+                    None,
+                );
+            })?;
         check.current(guard, active)?;
         let clock = guard.application_clock()?;
         let now = crate::authority_challenge::boot_time_ms()?;
@@ -369,6 +406,23 @@ pub(super) fn finish(
 }
 
 impl Check {
+    pub(super) fn sampled(&self) -> bool {
+        self.timing.is_some_and(|timing| timing.sample.is_some())
+    }
+
+    pub(super) fn record_exchange(&self, completion: &ExchangeCompletion) {
+        for (stage, captured) in [
+            (Stage::ExchangeStart, completion.started),
+            (Stage::ExchangeComplete, completion.completed),
+        ] {
+            if let Some(now) = captured {
+                let mut line = DiagnosticLine::new();
+                self.record_at(&mut line, now, stage, None, None);
+                diagnostic_line(line);
+            }
+        }
+    }
+
     pub(super) fn completion_stream<'a>(
         &self,
         live: &'a BTreeMap<Digest, LiveStream>,
