@@ -9,6 +9,28 @@ use std::sync::atomic::AtomicBool;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 
 static CHECK_SAMPLES: AtomicU64 = AtomicU64::new(0);
+static NEXT_CHECK_SAMPLE: AtomicU64 = AtomicU64::new(0);
+pub(super) fn sample_check(now: u64, samples: &AtomicU64, next: &AtomicU64) -> Timing {
+    let sample = if samples.load(Ordering::Relaxed) < 256
+        && next
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |due| {
+                if now >= due {
+                    now.checked_add(1000)
+                } else {
+                    None
+                }
+            })
+            .is_ok()
+    {
+        Timing::counted(now, samples, 256).sample
+    } else {
+        None
+    };
+    Timing {
+        started: now,
+        sample,
+    }
+}
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Stage {
     Enqueued,
@@ -226,7 +248,10 @@ pub(super) async fn exchange(
                 };
                 let cancelled = Arc::new(AtomicBool::new(false));
                 let (reply, receiver) = oneshot::channel();
-                let timing = crate::authority_challenge::boot_time_ms().ok().map(|now| Timing::counted(now, &CHECK_SAMPLES, 256));
+                let timing = DIAGNOSTICS.get().is_some_and(Option::is_some)
+                    .then(|| crate::authority_challenge::boot_time_ms().ok())
+                    .flatten()
+                    .map(|now| sample_check(now, &CHECK_SAMPLES, &NEXT_CHECK_SAMPLE));
                 let check = Check { request: request.clone(), ready: ready.clone(), connected: connected.0.clone(), cancelled: cancelled.clone(), reply, timing, _slot: permit };
                 check.record(Stage::Enqueued, None, None);
                 slot.send(check);
@@ -617,6 +642,11 @@ impl Check {
         }
     }
     pub(super) fn complete(&self, result: Result<Receipt>) -> Receipt {
+        let pending_stage = result
+            .as_ref()
+            .err()
+            .and_then(|error| error.downcast_ref::<crate::route_authority::ReadPending>())
+            .map(|pending| pending.stage);
         let failure = result.as_ref().err().map(|error| {
             (
                 failure_code(error),
@@ -637,8 +667,41 @@ impl Check {
                 },
             )
         });
+        if receipt.disposition != Disposition::Permitted
+            && let Some((sample, now)) = failure_sample()
+        {
+            let mut line = DiagnosticLine::new();
+            self.record_failure_at(
+                &mut line,
+                sample,
+                now,
+                &receipt.disposition,
+                failure,
+                pending_stage,
+            );
+            diagnostic_line(line);
+        }
         self.record(Stage::Outcome, Some(&receipt.disposition), failure);
         receipt
+    }
+    pub(super) fn record_failure_at(
+        &self,
+        output: &mut impl std::fmt::Write,
+        sample: u64,
+        now: u64,
+        disposition: &Disposition,
+        failure: Option<(FailureCode, Option<u64>, Option<InactiveStream>)>,
+        pending_stage: Option<crate::route_authority::ReadPendingStage>,
+    ) {
+        let _ = writeln!(
+            output,
+            "HyperNet application check failure: sample={sample} callerStartedBootMs={} deadlineBootMs={} disposition={disposition:?} reason={:?} pendingStage={pending_stage:?} freshReadCode={:?} inactive={:?} bootMs={now}",
+            self.request.caller_started_boot_ms,
+            self.request.caller_deadline_boot_ms,
+            failure.map(|value| value.0),
+            failure.and_then(|value| value.1),
+            failure.and_then(|value| value.2),
+        );
     }
     fn current(&self, guard: &Guard, active: &Active) -> Result<()> {
         crate::authority_local_transport::remaining(self.request.caller_deadline_boot_ms)?;

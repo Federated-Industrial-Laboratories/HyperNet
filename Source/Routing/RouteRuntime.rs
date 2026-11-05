@@ -119,6 +119,8 @@ impl std::error::Error for Phase {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FailureCode {
+    PendingOrdinary,
+    PendingFence,
     ObservationExpired,
     ChallengeExpired,
     FreshQuorumUnavailable,
@@ -138,6 +140,12 @@ enum FailureCode {
     Other,
 }
 fn failure_code(error: &anyhow::Error) -> FailureCode {
+    if let Some(pending) = error.downcast_ref::<crate::route_authority::ReadPending>() {
+        return match pending.kind {
+            crate::route_authority::ReadPendingKind::Ordinary => FailureCode::PendingOrdinary,
+            crate::route_authority::ReadPendingKind::Fence => FailureCode::PendingFence,
+        };
+    }
     if error.is::<crate::consensus_clock::ObservationExpired>() {
         return FailureCode::ObservationExpired;
     }

@@ -107,18 +107,32 @@ fn stalled_diagnostic_sink_does_not_hold_producers_or_retime_records() {
 #[test]
 fn timing_caps_are_independent_and_do_not_reset_when_exhausted() {
     let checks = AtomicU64::new(0);
+    let next = AtomicU64::new(0);
     let actor = AtomicU64::new(0);
     let session = AtomicU64::new(0);
+    let failures = AtomicU64::new(0);
     for expected in 1..=256 {
-        assert_eq!(Timing::counted(7, &checks, 256).sample, Some(expected));
+        let now = (expected - 1) * 1000;
+        let selected = checks::sample_check(now, &checks, &next);
+        assert_eq!(selected.sample, Some(expected));
+        assert_eq!(selected.started, now);
+        for skipped in [now, now + 1, now + 999, now.saturating_sub(1)] {
+            assert!(
+                checks::sample_check(skipped, &checks, &next)
+                    .sample
+                    .is_none()
+            );
+        }
     }
-    for _ in 0..4 {
-        assert!(Timing::counted(7, &checks, 256).sample.is_none());
+    for now in [256_000, 300_000, u64::MAX] {
+        assert!(checks::sample_check(now, &checks, &next).sample.is_none());
     }
     for expected in 1..=64 {
         assert_eq!(Timing::counted(7, &actor, 64).sample, Some(expected));
+        assert_eq!(Timing::counted(7, &failures, 64).sample, Some(expected));
     }
     assert!(Timing::counted(7, &actor, 64).sample.is_none());
+    assert!(Timing::counted(7, &failures, 64).sample.is_none());
     assert_eq!(Timing::counted(7, &session, 64).sample, Some(1));
     assert_eq!(checks.load(Ordering::Relaxed), 256);
     assert_eq!(actor.load(Ordering::Relaxed), 64);
@@ -329,6 +343,89 @@ fn check_diagnostics_keep_early_outcomes_bounds_and_redaction_with_failed_sink()
     }
     maximum.record_signatures_at(&mut exhausted, u64::MAX, statistics);
     assert!(exhausted.is_empty());
+
+    // Failure records remain available without a timing sample and never expose
+    // the pending request or reinterpret the public unavailable disposition.
+    use crate::route_authority::{ReadPending, ReadPendingKind, ReadPendingStage};
+    for stage in [ReadPendingStage::Issue, ReadPendingStage::Finish] {
+        for kind in [ReadPendingKind::Ordinary, ReadPendingKind::Fence] {
+            let error: anyhow::Error = ReadPending { stage, kind }.into();
+            let reason = failure_code(&error);
+            assert!(matches!(
+                (kind, reason),
+                (ReadPendingKind::Ordinary, FailureCode::PendingOrdinary)
+                    | (ReadPendingKind::Fence, FailureCode::PendingFence)
+            ));
+            let receipt = maximum.complete(Err(error));
+            assert_eq!(receipt.request, maximum.request);
+            assert_eq!(receipt.disposition, Disposition::Unavailable);
+            assert_eq!(receipt.not_after_boot_ms, u64::MAX);
+            assert!(receipt.authority.is_none());
+            record.clear();
+            maximum.record_failure_at(
+                &mut record,
+                64,
+                u64::MAX,
+                &receipt.disposition,
+                Some((reason, None, None)),
+                Some(stage),
+            );
+            assert!(record.len() < 384);
+            assert!(record.contains("pendingStage=Some("));
+            assert!(!record.contains(&request.local_connection_id));
+            assert!(!record.contains("nonce") && !record.contains("session"));
+            maximum.record_failure_at(
+                &mut Closed,
+                64,
+                u64::MAX,
+                &receipt.disposition,
+                Some((reason, None, None)),
+                Some(stage),
+            );
+        }
+    }
+}
+
+#[test]
+fn cleanup_failure_records_are_fixed_bounded_and_ignore_a_failed_sink() {
+    use crate::route_authority::{CleanupStage, PendingState};
+    struct Closed;
+    impl std::fmt::Write for Closed {
+        fn write_str(&mut self, _: &str) -> std::fmt::Result {
+            Err(std::fmt::Error)
+        }
+    }
+    let secret = "private refusal bytes must not appear";
+    let error = anyhow::anyhow!(secret);
+    for stage in [
+        CleanupStage::Recover,
+        CleanupStage::Context,
+        CleanupStage::Parse,
+        CleanupStage::OrdinaryClose,
+    ] {
+        for pending in [
+            PendingState::None,
+            PendingState::Ordinary,
+            PendingState::Fence,
+            PendingState::Both,
+            PendingState::Unavailable,
+        ] {
+            let record = CleanupFailureRecord {
+                sample: 64,
+                now: u64::MAX,
+                deadline: u64::MAX,
+                stage,
+                pending,
+                reason: failure_code(&error),
+            };
+            let mut line = String::new();
+            record.write(&mut line);
+            assert!(line.len() < 256);
+            assert!(line.contains("reason=Other"));
+            assert!(!line.contains(secret));
+            record.write(&mut Closed);
+        }
+    }
 }
 
 #[path = "ApplicationStreamScheduleTests.rs"]
@@ -873,6 +970,7 @@ async fn check_exchange_correlates_receipts_and_rejects_second_pending_session()
         )
         .await
     });
+    let diagnostics_enabled = DIAGNOSTICS.get().is_some_and(Option::is_some);
     route_io::send(&mut companion, &control::encode(&request).unwrap())
         .await
         .unwrap();
@@ -881,8 +979,11 @@ async fn check_exchange_correlates_receipts_and_rejects_second_pending_session()
         .unwrap()
         .unwrap();
     assert_eq!(check.request, request);
-    let queued_timing = check.timing.expect("clock available at verified enqueue");
-    assert!(queued_timing.started >= request.caller_started_boot_ms);
+    assert!(!diagnostics_enabled || check.timing.is_some());
+    if let Some(queued_timing) = check.timing {
+        assert!(queued_timing.started >= request.caller_started_boot_ms);
+        assert!(queued_timing.started <= crate::authority_challenge::boot_time_ms().unwrap());
+    }
     let mut second = request.clone();
     second.nonce = [12; 32];
     route_io::send(&mut companion, &control::encode(&second).unwrap())

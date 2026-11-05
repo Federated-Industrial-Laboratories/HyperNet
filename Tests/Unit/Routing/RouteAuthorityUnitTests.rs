@@ -3,6 +3,99 @@
 use super::*;
 
 #[test]
+fn pending_read_diagnostics_preserve_exact_requests_and_existing_refusals() {
+    use crate::authority_floor::tests::{prepare, setup};
+    for mode in 0..4 {
+        let (directory, sample, _, mut store) = setup();
+        if mode == 1 || mode == 3 {
+            prepare(&mut store, sample);
+        }
+        if mode >= 2 {
+            let old = store.stream_metadata().unwrap().unwrap();
+            let prior = old.state().unwrap();
+            let scope = store.descriptor().scope();
+            let signed = wire::sign_envelope(
+                &wire::encode(&a(vec![
+                    V::Uint(57),
+                    V::Uint(1),
+                    b(&scope.network),
+                    b(&scope.incarnation),
+                    b(&store.requester()),
+                    b(&[96; 32]),
+                    V::Uint(scope.epoch),
+                    V::Uint(store.prefix().height()),
+                    V::Uint(prior.generation),
+                    b(&prior.generation_id),
+                    b(&wire::digest(old.canonical())),
+                ]))
+                .unwrap(),
+                &ed25519_dalek::SigningKey::from_bytes(&[1; 32]),
+            )
+            .unwrap();
+            store.prepare_fence(&signed, old.canonical()).unwrap();
+        }
+        let ordinary = store
+            .resume_ordinary()
+            .unwrap()
+            .map(|request| request.signed().to_vec());
+        let fence = store
+            .resume_fence()
+            .unwrap()
+            .map(|request| request.signed().to_vec());
+        let expected = [
+            PendingState::None,
+            PendingState::Ordinary,
+            PendingState::Fence,
+            PendingState::Both,
+        ][mode];
+        assert_eq!(PendingState::inspect(&store), expected);
+        for stage in [ReadPendingStage::Issue, ReadPendingStage::Finish] {
+            let result = require_read_idle(&store, stage);
+            if mode == 0 {
+                result.unwrap();
+            } else {
+                let error = result.unwrap_err();
+                let pending = error.downcast_ref::<ReadPending>().unwrap();
+                assert_eq!(pending.stage, stage);
+                assert_eq!(
+                    pending.kind,
+                    if mode == 2 {
+                        ReadPendingKind::Fence
+                    } else {
+                        ReadPendingKind::Ordinary
+                    }
+                );
+                assert_eq!(
+                    error.to_string(),
+                    match stage {
+                        ReadPendingStage::Issue => "fresh application authority requester is busy",
+                        ReadPendingStage::Finish => "fresh Route authority requester is busy",
+                    }
+                );
+            }
+        }
+        assert_eq!(
+            store
+                .resume_ordinary()
+                .unwrap()
+                .map(|request| request.signed().to_vec()),
+            ordinary
+        );
+        assert_eq!(
+            store
+                .resume_fence()
+                .unwrap()
+                .map(|request| request.signed().to_vec()),
+            fence
+        );
+        // A failed diagnostic inspection is unknown, never an empty requester.
+        std::fs::remove_file(directory.0.join("AuthorityFloor.json")).unwrap();
+        assert_eq!(PendingState::inspect(&store), PendingState::Unavailable);
+        assert!(require_read_idle(&store, ReadPendingStage::Issue).is_err());
+    }
+}
+
+#[test]
 fn durable_acceptance_timing_closes_on_success_and_failure_without_repeating_work() {
     use std::cell::RefCell;
     let order = RefCell::new(Vec::new());

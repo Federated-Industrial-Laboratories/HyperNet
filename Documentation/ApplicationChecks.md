@@ -170,8 +170,12 @@ check diagnostics distinguish missing, changed,
 unestablished, finished, forwarding-expired, closed and gate-expired streams
 without logging session identifiers or application payloads.
 
-The first 256 check samples can report queue, preparation, worker exchange, actor
-finalization and durable-acceptance boundaries. Worker timestamps are captured
+Check timing admits at most one sampled attempt per 1,000 ms, with a process
+ceiling of 256 samples. Selection at admission preserves the same sample through
+queue, preparation, worker exchange, actor finalization and durable acceptance;
+it does not require the selected attempt to succeed. This spreads successful
+samples across sustained work instead of exhausting the budget during startup.
+Worker timestamps are captured
 in the worker and reported after it rejoins the actor; output order is not event
 order. The durable-acceptance span includes floor and domain-state publication
 and their required checks, rather than only filesystem synchronization. Nested
@@ -182,6 +186,21 @@ They report actual strict verification time and cache activity, excluding worker
 replica and subsequent endpoint-proof extraction work. Errors
 can leave later stages absent. Missing diagnostic timestamps do not alter an
 operation's result, permission or deadline.
+
+A separate shared ceiling of 64 failure records covers unsuccessful check
+outcomes and stream cleanup, including after timing samples stop. Check records
+use fixed failure categories; pending ordinary and fence guards distinguish
+issue from finalization without exposing retained requests. Cleanup records name
+the failing recovery, retirement-context, target-parse or ordinary-close stage,
+and whether the requester retains an ordinary request, a fence, both or neither.
+An unsuccessful local state inspection reports `Unavailable`, never an empty
+requester. This inspection runs only for a selected cleanup failure, does not
+recover or change state, and cannot replace the original error. A cleanup stage
+alone does not prove that an ordinary effect was submitted or committed.
+No error prose, session identities or payloads enter these records. All records
+use the existing bounded, nonblocking diagnostic writer; dropped records do not
+establish success. Sampling, inspection and output do not change permission,
+deadlines, pending-request exclusion or recovery behavior.
 
 Cancellation and shutdown suppress receipts. Shutdown cancels and joins the
 remaining exchanges under their original absolute ends, then discards the

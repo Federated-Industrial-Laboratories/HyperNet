@@ -15,6 +15,55 @@ enum Activity {
     Cleanup,
 }
 static ACTIVITY_SAMPLES: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+static FAILURE_SAMPLES: AtomicU64 = AtomicU64::new(0);
+fn failure_sample() -> Option<(u64, u64)> {
+    if !DIAGNOSTICS.get().is_some_and(Option::is_some)
+        || FAILURE_SAMPLES.load(Ordering::Relaxed) >= 64
+    {
+        return None;
+    }
+    let now = crate::authority_challenge::boot_time_ms().ok()?;
+    Timing::counted(now, &FAILURE_SAMPLES, 64)
+        .sample
+        .map(|sample| (sample, now))
+}
+struct CleanupFailureRecord {
+    sample: u64,
+    now: u64,
+    deadline: u64,
+    stage: crate::route_authority::CleanupStage,
+    pending: crate::route_authority::PendingState,
+    reason: FailureCode,
+}
+impl CleanupFailureRecord {
+    fn write(&self, output: &mut impl std::fmt::Write) {
+        let _ = writeln!(
+            output,
+            "HyperNet application cleanup failure: sample={} stage={:?} pending={:?} reason={:?} deadlineBootMs={} bootMs={}",
+            self.sample, self.stage, self.pending, self.reason, self.deadline, self.now
+        );
+    }
+}
+fn cleanup_failure(
+    stage: crate::route_authority::CleanupStage,
+    client: &Client<'_>,
+    error: &anyhow::Error,
+    deadline: u64,
+) {
+    if let Some((sample, now)) = failure_sample() {
+        let record = CleanupFailureRecord {
+            sample,
+            now,
+            deadline,
+            stage,
+            pending: client.pending_diagnostic(),
+            reason: failure_code(error),
+        };
+        let mut line = DiagnosticLine::new();
+        record.write(&mut line);
+        diagnostic_line(line);
+    }
+}
 fn observed<T>(
     activity: Activity,
     deadline: u64,
@@ -207,7 +256,9 @@ impl PendingClose {
             |reference, proof_digest, deadline| {
                 observed(Activity::Cleanup, deadline, None, || {
                     client.before(deadline, |client| {
-                        client.stream_close(reference, proof_digest)
+                        client.stream_close(reference, proof_digest, |stage, client, error| {
+                            cleanup_failure(stage, client, error, deadline);
+                        })
                     })
                 })
             },
@@ -845,10 +896,16 @@ pub(super) async fn endpoint(
     }
     // Failed closure retains a spent slot until its original wall-clock expiry.
     for stream in live.values() {
-        let _ = client.before(
-            crate::authority_challenge::boot_time_ms()?.saturating_add(1000),
-            |client| client.stream_close(&stream.reference, stream.proof_digest),
-        );
+        let deadline = crate::authority_challenge::boot_time_ms()?.saturating_add(1000);
+        let _ = client.before(deadline, |client| {
+            client.stream_close(
+                &stream.reference,
+                stream.proof_digest,
+                |stage, client, error| {
+                    cleanup_failure(stage, client, error, deadline);
+                },
+            )
+        });
     }
     outcome?;
     if let Some(error) = discard_error {

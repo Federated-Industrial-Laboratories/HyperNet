@@ -251,10 +251,7 @@ impl Client<'_> {
         let outcome = (|| {
             self.active.check(self.guard)?;
             transport::remaining(deadline)?;
-            ensure!(
-                self.store.resume_ordinary()?.is_none() && self.store.resume_fence()?.is_none(),
-                "fresh Route authority requester is busy"
-            );
+            require_read_idle(&self.store, ReadPendingStage::Finish)?;
             let (reply, history) = completion?;
             let mut candidate = None;
             let verified = fresh::verify_response(

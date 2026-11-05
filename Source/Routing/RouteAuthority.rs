@@ -26,6 +26,80 @@ use std::path::Path;
 mod read;
 pub(crate) use read::{PreparedRead, ReadCompletion, ReadStage};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReadPendingStage {
+    Issue,
+    Finish,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReadPendingKind {
+    Ordinary,
+    Fence,
+}
+#[derive(Debug)]
+pub(crate) struct ReadPending {
+    pub stage: ReadPendingStage,
+    pub kind: ReadPendingKind,
+}
+impl std::fmt::Display for ReadPending {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output.write_str(match self.stage {
+            ReadPendingStage::Issue => "fresh application authority requester is busy",
+            ReadPendingStage::Finish => "fresh Route authority requester is busy",
+        })
+    }
+}
+impl std::error::Error for ReadPending {}
+fn require_read_idle(store: &Store, stage: ReadPendingStage) -> Result<()> {
+    if store.resume_ordinary()?.is_some() {
+        return Err(ReadPending {
+            stage,
+            kind: ReadPendingKind::Ordinary,
+        }
+        .into());
+    }
+    if store.resume_fence()?.is_some() {
+        return Err(ReadPending {
+            stage,
+            kind: ReadPendingKind::Fence,
+        }
+        .into());
+    }
+    Ok(())
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CleanupStage {
+    Recover,
+    Context,
+    Parse,
+    OrdinaryClose,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PendingState {
+    None,
+    Ordinary,
+    Fence,
+    Both,
+    Unavailable,
+}
+impl PendingState {
+    fn inspect(store: &Store) -> Self {
+        let state = (|| -> Result<_> {
+            Ok((
+                store.resume_ordinary()?.is_some(),
+                store.resume_fence()?.is_some(),
+            ))
+        })();
+        match state {
+            Ok((false, false)) => Self::None,
+            Ok((true, false)) => Self::Ordinary,
+            Ok((false, true)) => Self::Fence,
+            Ok((true, true)) => Self::Both,
+            Err(_) => Self::Unavailable,
+        }
+    }
+}
+
 // Constructed only from the exact freshly verified and published permit result.
 // This is a stream-gate renewal, never a replacement action receipt or endpoint grant.
 pub(crate) struct CertifiedStreamPermit {
@@ -1030,10 +1104,7 @@ impl<'a> Client<'a> {
         caller_started_boot_ms: u64,
     ) -> Result<PreparedRead> {
         self.active.check(self.guard)?;
-        ensure!(
-            self.store.resume_ordinary()?.is_none() && self.store.resume_fence()?.is_none(),
-            "fresh application authority requester is busy"
-        );
+        require_read_idle(&self.store, ReadPendingStage::Issue)?;
         self.prepare_read(
             DomainCommand::Stream(streams::Command::Permit {
                 session: session.clone(),
@@ -1098,17 +1169,36 @@ impl<'a> Client<'a> {
         )
     }
 
-    pub fn stream_close(&mut self, session: &VersionRef, proof_digest: Digest) -> Result<()> {
-        self.recover()?;
-        // A caller can close this slot first. Resolve an unknown original close
-        // before reading its current generation or preparing another exact close.
-        self.domain_action(DomainCommand::Stream(streams::Command::RetirementContext {
-            session: session.clone(),
-        }))?;
-        if let Some(session) = retirement_target(self.disk.context().0, session, proof_digest)? {
-            self.domain_action(DomainCommand::Stream(streams::Command::Close { session }))?;
+    pub(crate) fn pending_diagnostic(&self) -> PendingState {
+        PendingState::inspect(&self.store)
+    }
+    pub(crate) fn stream_close(
+        &mut self,
+        session: &VersionRef,
+        proof_digest: Digest,
+        report: impl FnOnce(CleanupStage, &Self, &anyhow::Error),
+    ) -> Result<()> {
+        let mut stage = CleanupStage::Recover;
+        let result = (|| {
+            self.recover()?;
+            // A caller can close this slot first. Resolve an unknown original close
+            // before reading its current generation or preparing another exact close.
+            stage = CleanupStage::Context;
+            self.domain_action(DomainCommand::Stream(streams::Command::RetirementContext {
+                session: session.clone(),
+            }))?;
+            stage = CleanupStage::Parse;
+            if let Some(session) = retirement_target(self.disk.context().0, session, proof_digest)?
+            {
+                stage = CleanupStage::OrdinaryClose;
+                self.domain_action(DomainCommand::Stream(streams::Command::Close { session }))?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = &result {
+            report(stage, self, error);
         }
-        Ok(())
+        result
     }
     pub fn reader(&mut self, envelope: &[u8]) -> Result<Vec<u8>> {
         self.recover()?;
