@@ -270,25 +270,54 @@ pub(crate) fn acknowledge_read(
 }
 fn ready(stream: &UnixStream, event: libc::c_short, deadline: u64) -> Result<()> {
     loop {
-        let remaining = remaining(deadline)?;
+        let wait_ms = remaining(deadline)?;
         let mut descriptor = libc::pollfd {
             fd: stream.as_raw_fd(),
             events: event,
             revents: 0,
         };
-        let status =
-            unsafe { libc::poll(&mut descriptor, 1, remaining.min(i32::MAX as u64) as i32) };
-        if status < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
-            continue;
+        let status = unsafe { libc::poll(&mut descriptor, 1, wait_ms.min(i32::MAX as u64) as i32) };
+        if status < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error.into());
         }
-        ensure!(
-            status > 0
-                && descriptor.revents & event != 0
-                && descriptor.revents & (libc::POLLERR | libc::POLLNVAL) == 0,
-            "private control readiness failed or timed out"
-        );
+        if status == 0 {
+            return Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into());
+        }
+        remaining(deadline)?;
+        return ready_events(stream, event, descriptor.revents);
+    }
+}
+fn ready_events(stream: &UnixStream, event: libc::c_short, events: libc::c_short) -> Result<()> {
+    if events & libc::POLLNVAL != 0 {
+        return Err(std::io::Error::from_raw_os_error(libc::EBADF).into());
+    }
+    // A closed peer can leave a complete response buffered. Drain it before
+    // observing EOF or a pending socket error; normal reply verification still applies.
+    if event == libc::POLLIN && events & libc::POLLIN != 0 {
         return Ok(());
     }
+    if events & libc::POLLERR != 0
+        && let Some(error) = stream.take_error()?
+    {
+        return Err(error.into());
+    }
+    if events & libc::POLLHUP != 0 {
+        return Err(if event == libc::POLLIN {
+            ControlClosed::Read
+        } else {
+            ControlClosed::Write
+        }
+        .into());
+    }
+    ensure!(
+        events & event != 0 && events & libc::POLLERR == 0,
+        "private control readiness failed or timed out"
+    );
+    Ok(())
 }
 fn write_all(stream: &mut UnixStream, mut bytes: &[u8], deadline: u64) -> Result<()> {
     while !bytes.is_empty() {

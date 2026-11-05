@@ -3,6 +3,35 @@
 use super::*;
 
 #[test]
+fn only_typed_control_closure_enters_fresh_authority_recovery() {
+    use crate::{authority_local_transport::ControlClosed, route_runtime::ReadRetry};
+    for error in [
+        anyhow::Error::from(ControlClosed::Read),
+        anyhow::Error::from(ControlClosed::Write),
+        std::io::Error::from(std::io::ErrorKind::ConnectionReset).into(),
+        std::io::Error::from(std::io::ErrorKind::ConnectionAborted).into(),
+        std::io::Error::from(std::io::ErrorKind::BrokenPipe).into(),
+    ] {
+        let error = Client::retry_read(error.context("obtain current context"));
+        assert_eq!(
+            error.downcast_ref::<ReadRetry>(),
+            Some(&ReadRetry::TransportClosed)
+        );
+        assert!(crate::authority_local_transport::transport_closed(&error));
+    }
+    for error in [
+        std::io::Error::from(std::io::ErrorKind::TimedOut).into(),
+        std::io::Error::from_raw_os_error(libc::EBADF).into(),
+        std::io::Error::from(std::io::ErrorKind::PermissionDenied).into(),
+        anyhow::anyhow!("private control readiness failed or timed out"),
+        anyhow::anyhow!("private control read closed"),
+        anyhow::anyhow!("invalid signed response"),
+    ] {
+        assert!(!Client::retry_read(error).is::<ReadRetry>());
+    }
+}
+
+#[test]
 fn pending_read_diagnostics_preserve_exact_requests_and_existing_refusals() {
     use crate::authority_floor::tests::{prepare, setup};
     for mode in 0..4 {

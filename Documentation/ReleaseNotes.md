@@ -28,6 +28,11 @@ identify their exact artifacts separately from earlier release evidence.
   renewal before a separate fresh check. Closed or ended streams cannot revive.
   Bounded inactive-stream diagnostics distinguish these lifecycle states.
 
+- Private authority readiness preserves typed peer closure and socket reset.
+  Fresh-authority recovery can suspend and reopen the endpoint after these
+  transport failures. Buffered replies are drained before closure. Timeout,
+  invalid descriptors and invalid signed replies remain distinct failures;
+  recovery does not extend deadlines or preserve old admissions.
 - A signed acknowledgement releases only the exact completed read after its
   authorised recipient consumes the verified result. It binds the original scope,
   read, statement, result and deadline. Pending reads and lost responses retain

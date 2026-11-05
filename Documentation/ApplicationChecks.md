@@ -255,6 +255,15 @@ Verified refusals retain their structured disposition, refusal code, scope,
 epoch, height, state digest, statement digest, evaluation time and original
 statement expiry. Error strings are not authority evidence.
 
+Private authority transport retains typed peer-closure and reset errors during
+socket readiness waits. Readable buffered responses are drained and verified
+before closure is reported. A recognised closure during fresh authority work
+uses the existing endpoint suspension and fresh-observation recovery: gates close,
+old admissions do not survive, and retained ordinary operations keep their exact
+identity. Recovery does not replay application effects or extend caller, challenge
+or permit deadlines. Readiness timeout, invalid descriptors, unexplained socket
+errors and invalid signed responses do not acquire transport-closure retry status.
+
 After consuming a verified read, Core sends a signed local cleanup acknowledgement
 for that exact completed collection. Cleanup cannot authorize or repeat a check.
 It does not wait for a reply; a lost or unsupported acknowledgement leaves the

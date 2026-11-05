@@ -25,6 +25,81 @@ fn closed_control_socket_preserves_typed_failure_without_replaying_io() {
     }
 }
 #[test]
+fn readiness_hangup_preserves_buffered_reply_and_classifies_terminal_io() {
+    let (mut client, mut server) = UnixStream::pair().unwrap();
+    client.set_nonblocking(true).unwrap();
+    server.write_all(b"reply").unwrap();
+    drop(server);
+    let end = boot_time_ms().unwrap() + 1000;
+    ready(&client, libc::POLLIN, end).unwrap();
+    let mut reply = [0; 5];
+    read_all(&mut client, &mut reply, end).unwrap();
+    assert_eq!(&reply, b"reply");
+    assert_eq!(
+        read_all(&mut client, &mut [0], end)
+            .unwrap_err()
+            .downcast_ref::<ControlClosed>(),
+        Some(&ControlClosed::Read)
+    );
+    assert!(transport_closed(
+        &ready(&client, libc::POLLOUT, end).unwrap_err()
+    ));
+
+    // Dropping an unread request produces a socket reset rather than clean EOF.
+    let (mut client, server) = UnixStream::pair().unwrap();
+    client.set_nonblocking(true).unwrap();
+    client.write_all(b"request").unwrap();
+    drop(server);
+    let error = ready(&client, libc::POLLOUT, end).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::ConnectionReset
+    );
+    assert!(transport_closed(&error));
+}
+
+#[test]
+fn readiness_flags_distinguish_hangup_from_invalid_or_unknown_failures() {
+    let (client, _server) = UnixStream::pair().unwrap();
+    for (event, closed) in [
+        (libc::POLLIN, ControlClosed::Read),
+        (libc::POLLOUT, ControlClosed::Write),
+    ] {
+        for flags in [libc::POLLHUP, libc::POLLHUP | libc::POLLERR] {
+            let error = ready_events(&client, event, flags).unwrap_err();
+            assert_eq!(error.downcast_ref::<ControlClosed>(), Some(&closed));
+            assert!(transport_closed(&error));
+        }
+        let invalid = ready_events(&client, event, event | libc::POLLNVAL).unwrap_err();
+        assert_eq!(
+            invalid
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(libc::EBADF)
+        );
+        assert!(!transport_closed(&invalid));
+        assert!(!transport_closed(
+            &ready_events(&client, event, libc::POLLERR).unwrap_err()
+        ));
+        assert!(!transport_closed(
+            &ready_events(&client, event, 0).unwrap_err()
+        ));
+    }
+    // Readable data takes precedence over hangup/reset; the actual read and
+    // signed response verification determine whether the response is complete.
+    ready_events(
+        &client,
+        libc::POLLIN,
+        libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+    )
+    .unwrap();
+    assert!(!transport_closed(
+        &ready(&client, libc::POLLOUT, boot_time_ms().unwrap()).unwrap_err()
+    ));
+}
+
+#[test]
 fn fresh_read_capacity_reuses_exact_packet_and_original_deadline() {
     use std::{
         os::unix::{fs::PermissionsExt, net::UnixListener},
@@ -263,7 +338,8 @@ fn drip_reads_do_not_extend_the_original_transport_deadline() {
     });
     let start = boot_time_ms().unwrap();
     let mut bytes = [0; 10];
-    assert!(read_all(&mut client, &mut bytes, start + 55).is_err());
+    let error = read_all(&mut client, &mut bytes, start + 55).unwrap_err();
+    assert!(!transport_closed(&error), "expiry is not a peer closure");
     assert!(boot_time_ms().unwrap() - start < 500);
     drop(client);
     sender.join().unwrap();
