@@ -12,11 +12,15 @@ identify their exact artifacts separately from earlier release evidence.
 ### Changes and compatibility
 
 - Application authority checks overlap in finite rounds of at most four queued
-  and active checks in total. The endpoint prepares the captured gates before
-  issuing challenges and drains the round before unrelated admission, renewal
-  or cleanup. Lifecycle work retains its next fair turn. The endpoint actor
-  still verifies current authority and publishes durable state; expiry,
-  cancellation, current floors and original caller deadlines remain enforced.
+  and active checks in total. Read-only renewal of an established stream can
+  start a round and share its four exchange slots with already-current checks.
+  Completion closes admission; completed slots do not refill and the original
+  round end does not extend. A later check without the existing gate or round
+  headroom waits at the original FIFO head for normal preparation. The actor
+  retains challenge preparation, current
+  authority verification and durable publication. Expiry, cancellation, current
+  floors and original caller deadlines remain enforced. Unestablished streams,
+  endpoint renewal and authority-changing cleanup retain exclusive turns.
 - A fresh successful stream permit can renew the same still-current stream gate
   from its exact certified result. The action receipt keeps its original deadline
   and old-gate clipping; endpoint permission and fixed forwarding lifetime do not
@@ -46,6 +50,9 @@ identify their exact artifacts separately from earlier release evidence.
   proof generation and signed-proof digest; a reused slot is left unchanged.
   The one held cleanup preserves its original deadline and uses bounded backoff.
   Any unknown signed Close outcome must resolve before another is prepared.
+  A check blocked by that pending ordinary Close keeps its place at the queue
+  head within its original deadline; later checks cannot overtake it. Recovery
+  retains both ordinary-operation and retirement-fence exclusion.
 - Bounded capacity diagnostics report retained count and bytes, incoming charge,
   earliest expiry and fixed ceilings without payloads or requester identities.
 

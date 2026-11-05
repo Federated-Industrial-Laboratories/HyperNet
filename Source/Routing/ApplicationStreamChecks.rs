@@ -355,8 +355,18 @@ impl std::fmt::Display for EndpointPermissionExpired {
 }
 impl std::error::Error for EndpointPermissionExpired {}
 
+#[derive(Debug)]
+struct CheckReadinessDue;
+impl std::fmt::Display for CheckReadinessDue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("application check needs readiness headroom")
+    }
+}
+impl std::error::Error for CheckReadinessDue {}
+
 pub(super) fn needs_preparation(error: &anyhow::Error) -> bool {
     error.is::<EndpointPermissionExpired>()
+        || error.is::<CheckReadinessDue>()
         || error.downcast_ref::<InactiveStream>() == Some(&InactiveStream::GateExpired)
 }
 
@@ -370,6 +380,15 @@ pub(super) fn issue_current(
     active: &Active,
 ) -> Result<PreparedRead> {
     check.record(Stage::Dequeued, None, None);
+    check.current(guard, active)?;
+    check.issue_readiness(
+        live,
+        permission,
+        crate::authority_challenge::boot_time_ms()?,
+        end,
+        client.own_renewal_budget_ms(),
+        client.stream_renewal_budget_ms(),
+    )?;
     // This path may sign a new challenge, but never prepares gates or recovers
     // ordinary effects. All existing issue checks remain authoritative.
     client.before(end, |client| {
@@ -524,6 +543,35 @@ impl Check {
                 diagnostic_line(line);
             }
         }
+    }
+
+    pub(super) fn issue_readiness(
+        &self,
+        live: &BTreeMap<Digest, LiveStream>,
+        permission: &EndpointPermission,
+        now: u64,
+        round_end: u64,
+        own_budget: u64,
+        stream_budget: u64,
+    ) -> Result<()> {
+        // Terminal context failures take precedence over scheduling deferral.
+        let stream = self.completion_stream(live, permission, now)?;
+        let stream_budget = stream_budget.saturating_mul(2);
+        ensure!(
+            now < refresh_at(
+                permission.gate.expiry()?,
+                own_budget.saturating_mul(2),
+                permission.accepted_at,
+            ) && now
+                < refresh_at(
+                    stream.gate.expiry()?,
+                    stream_budget,
+                    Some(stream.accepted_at),
+                )
+                && now < refresh_at(round_end, stream_budget, None),
+            CheckReadinessDue
+        );
+        Ok(())
     }
 
     pub(super) fn completion_stream<'a>(

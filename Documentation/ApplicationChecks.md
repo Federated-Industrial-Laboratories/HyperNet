@@ -124,7 +124,12 @@ already current. There are at most four total admissions per round, including
 failed or deferred attempts; completing a check never opens another slot.
 Later reads are clipped to the latest original deadline of the initial issued
 batch, as well as their own caller, clock and gate bounds. They cannot extend
-the round. An expired open gate defers at most one queue-head check, retaining
+the round. A later check defers when an open gate is expired or reaches the same
+readiness threshold used during preparation: twice its observed renewal cost
+plus the existing dispatch allowance, retaining the accepted-proof fallback.
+It also defers when the fixed round reaches that stream-read headroom threshold.
+These checks precede challenge creation and never renew a gate in an active round.
+Deferral holds at most one queue-head check, retaining
 its original permit and request until the next ordinary round. No later check
 bypasses that held head. Cancellation, changed identity, closed streams and
 expired caller deadlines retain their existing refusal paths.

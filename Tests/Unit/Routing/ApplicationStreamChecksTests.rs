@@ -1764,7 +1764,7 @@ fn issue_only_defers_expired_open_gates_but_not_terminal_context_failures() {
             _ => unreachable!(),
         }
         let failure = check
-            .completion_stream(&live, &permission, inspected_at)
+            .issue_readiness(&live, &permission, inspected_at, inspected_at, 100, 100)
             .err()
             .unwrap();
         assert_eq!(
@@ -1778,5 +1778,142 @@ fn issue_only_defers_expired_open_gates_but_not_terminal_context_failures() {
         );
         assert_eq!(permission.renewals, 0);
         assert_eq!(permission.accepted_at, Some(now));
+    }
+}
+
+#[test]
+fn issue_only_requires_gate_and_fixed_round_headroom_before_challenge() {
+    for bound in 0..3 {
+        let (_, _, ready, request) = fixture();
+        let now = request.caller_started_boot_ms;
+        let (reply, _receipt) = tokio::sync::oneshot::channel();
+        let check = checks::Check {
+            request: request.clone(),
+            ready: Arc::new(ready),
+            connected: Arc::new(AtomicBool::new(true)),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            reply,
+            timing: None,
+            _slot: Arc::new(tokio::sync::Semaphore::new(control::MAXIMUM_PENDING))
+                .try_acquire_owned()
+                .unwrap(),
+        };
+        let endpoint_expiry = now + if bound == 0 { 1000 } else { 4000 };
+        let stream_expiry = now + if bound == 1 { 1000 } else { 4000 };
+        let round_end = now + if bound == 2 { 1000 } else { 4000 };
+        let mut stream = prepared_stream(stream_expiry, request.caller_deadline_boot_ms);
+        stream.accepted_at = now;
+        let permission = EndpointPermission {
+            gate: route_io::Gate::new(endpoint_expiry),
+            accepted_at: Some(now),
+            renewals: 7,
+        };
+        let live = BTreeMap::from([(request.session.id, stream)]);
+        // Own renewal costs 200 ms; a stream read costs 100 ms. Preparation
+        // reserves twice that cost and the existing 100 ms dispatch allowance.
+        let due = now + if bound == 0 { 500 } else { 700 };
+        check
+            .issue_readiness(&live, &permission, due - 1, round_end, 200, 100)
+            .unwrap();
+        for inspected_at in [due, due + 1] {
+            check
+                .completion_stream(&live, &permission, inspected_at)
+                .unwrap();
+            let failure = check
+                .issue_readiness(&live, &permission, inspected_at, round_end, 200, 100)
+                .unwrap_err();
+            assert!(checks::needs_preparation(&failure), "bound {bound}");
+        }
+        assert_eq!(check.request, request);
+        assert_eq!(permission.gate.expiry().unwrap(), endpoint_expiry);
+        assert_eq!(permission.accepted_at, Some(now));
+        assert_eq!(permission.renewals, 7);
+        assert_eq!(
+            live[&request.session.id].gate.expiry().unwrap(),
+            stream_expiry
+        );
+        assert_eq!(live[&request.session.id].accepted_at, now);
+    }
+}
+
+#[test]
+fn issue_only_preserves_accepted_gate_fallback_and_original_caller_end() {
+    for endpoint in [false, true] {
+        let (_, _, ready, request) = fixture();
+        let now = request.caller_started_boot_ms;
+        let (reply, _receipt) = tokio::sync::oneshot::channel();
+        let mut check = checks::Check {
+            request: request.clone(),
+            ready: Arc::new(ready),
+            connected: Arc::new(AtomicBool::new(true)),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            reply,
+            timing: None,
+            _slot: Arc::new(tokio::sync::Semaphore::new(control::MAXIMUM_PENDING))
+                .try_acquire_owned()
+                .unwrap(),
+        };
+        let mut stream = prepared_stream(
+            now + if endpoint { 5000 } else { 400 },
+            request.caller_deadline_boot_ms,
+        );
+        stream.accepted_at = now;
+        let permission = EndpointPermission {
+            gate: route_io::Gate::new(now + if endpoint { 400 } else { 5000 }),
+            accepted_at: Some(now),
+            renewals: 0,
+        };
+        let live = BTreeMap::from([(request.session.id, stream)]);
+        let (own_budget, stream_budget) = if endpoint { (1000, 100) } else { (100, 1000) };
+        let round_end = now + 5000;
+        // An overdrawn estimate preserves the first half of a newly accepted
+        // proof, exactly as preparation does; it does not force immediate deferral.
+        check
+            .issue_readiness(
+                &live,
+                &permission,
+                now + 199,
+                round_end,
+                own_budget,
+                stream_budget,
+            )
+            .unwrap();
+        let failure = check
+            .issue_readiness(
+                &live,
+                &permission,
+                now + 200,
+                round_end,
+                own_budget,
+                stream_budget,
+            )
+            .unwrap_err();
+        assert!(checks::needs_preparation(&failure));
+        assert_eq!(check.request, request);
+        check.request.caller_deadline_boot_ms = now + 150;
+        let original = check.request.clone();
+        check
+            .issue_readiness(
+                &live,
+                &permission,
+                now + 149,
+                round_end,
+                own_budget,
+                stream_budget,
+            )
+            .unwrap();
+        let failure = check
+            .issue_readiness(
+                &live,
+                &permission,
+                now + 150,
+                round_end,
+                own_budget,
+                stream_budget,
+            )
+            .unwrap_err();
+        assert!(!checks::needs_preparation(&failure));
+        assert_eq!(check.request, original);
+        assert_eq!(permission.renewals, 0);
     }
 }

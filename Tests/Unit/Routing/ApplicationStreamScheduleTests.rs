@@ -558,8 +558,23 @@ async fn deferred_head_keeps_original_permit_and_precedes_later_arrivals_after_l
     assert!(slots.clone().try_acquire_owned().is_err());
     let mut schedule = Schedule::default();
     schedule.begin_round(1);
-    schedule.initial_issue(request.caller_deadline_boot_ms);
-    schedule.admit_fill(request.caller_started_boot_ms).unwrap();
+    let now = request.caller_started_boot_ms;
+    let round_end = now + 200;
+    schedule.initial_issue(round_end);
+    let admitted_end = schedule.admit_fill(now).unwrap();
+    let mut stream = prepared_stream(now + 4000, request.caller_deadline_boot_ms);
+    stream.accepted_at = now;
+    let live = BTreeMap::from([(request.session.id, stream)]);
+    let permission = EndpointPermission {
+        gate: route_io::Gate::new(now + 4000),
+        accepted_at: Some(now),
+        renewals: 0,
+    };
+    let failure = held
+        .issue_readiness(&live, &permission, now, admitted_end, 100, 100)
+        .unwrap_err();
+    assert!(checks::needs_preparation(&failure));
+    assert_eq!(schedule.round_end, round_end);
     // Readiness is deferred until workers have drained, rather than repeatedly
     // dequeuing the head or letting later requests bypass its original permit.
     schedule.round_open = false;
@@ -576,6 +591,11 @@ async fn deferred_head_keeps_original_permit_and_precedes_later_arrivals_after_l
     assert_eq!(cohort[0].request, original);
     assert!(cohort[0].cancelled.load(Ordering::Acquire));
     assert_eq!(cohort.len(), control::MAXIMUM_PENDING);
+    assert_eq!(permission.renewals, 0);
+    assert_eq!(
+        cohort[0].request.caller_deadline_boot_ms,
+        original.caller_deadline_boot_ms
+    );
     assert!(slots.clone().try_acquire_owned().is_err());
     drop(cohort);
     assert_eq!(slots.available_permits(), control::MAXIMUM_PENDING);
