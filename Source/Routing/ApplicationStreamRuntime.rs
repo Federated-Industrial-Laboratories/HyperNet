@@ -232,6 +232,14 @@ struct PendingClose {
     renewal_turn: u64,
 }
 impl PendingClose {
+    fn ordinary(&self, client: &Client<'_>) -> Option<Digest> {
+        // An unreadable or different requester state is not eligible to wait.
+        // Its normal issue/finish guard remains authoritative.
+        client
+            .pending_stream_close(&self.reference, self.proof_digest)
+            .ok()
+            .flatten()
+    }
     fn completed(
         stream: LiveStream,
         now: u64,
@@ -292,6 +300,59 @@ impl PendingClose {
         // held retirement retains its target and first deadline between attempts.
         self.retry_after = finished.saturating_add(READ_RETRY_MS).min(self.deadline);
         expired
+    }
+}
+struct HeldCheck {
+    check: checks::Check,
+    close: Option<(Digest, u64)>,
+}
+impl HeldCheck {
+    fn ready(check: checks::Check) -> Self {
+        Self { check, close: None }
+    }
+    fn defer_close(&mut self, now: u64, ordinary: Option<Digest>, end: u64) -> bool {
+        let Some(ordinary) = ordinary else {
+            return false;
+        };
+        if !self.check.can_wait(now) || now >= end {
+            return false;
+        }
+        match self.close {
+            Some((original, original_end)) => original == ordinary && now < original_end,
+            None => {
+                self.close = Some((
+                    ordinary,
+                    end.min(self.check.request.caller_deadline_boot_ms),
+                ));
+                true
+            }
+        }
+    }
+    fn waiting(&self, now: u64, ordinary: Option<Digest>) -> bool {
+        self.check.can_wait(now)
+            && self
+                .close
+                .is_some_and(|(original, end)| now < end && ordinary == Some(original))
+    }
+    fn into_check(self, now: u64) -> Option<checks::Check> {
+        if self.close.is_some_and(|(_, end)| now >= end) {
+            let result = if now >= self.check.request.caller_deadline_boot_ms {
+                Ok(checks::unavailable(
+                    self.check.request.clone(),
+                    self.check.ready.privacy.clone(),
+                    streams::control::Disposition::Expired,
+                ))
+            } else {
+                Err(anyhow::anyhow!(
+                    "application check close recovery deadline expired"
+                ))
+            };
+            let receipt = self.check.complete(result);
+            self.check.respond(receipt);
+            None
+        } else {
+            Some(self.check)
+        }
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -418,7 +479,7 @@ enum Event {
     Handshake(std::result::Result<Result<OpenedStream>, tokio::task::JoinError>),
     Incoming(std::result::Result<Result<Session>, tokio::task::JoinError>),
     Public(Queued<Session>),
-    Check(checks::Check),
+    Check(HeldCheck),
     Checked(
         std::result::Result<(tokio::task::Id, checks::ExchangeCompletion), tokio::task::JoinError>,
     ),
@@ -689,7 +750,7 @@ pub(super) async fn endpoint(
     let mut live: BTreeMap<Digest, LiveStream> = BTreeMap::new();
     let mut reads: JoinSet<checks::ExchangeCompletion> = JoinSet::new();
     let mut pending: BTreeMap<tokio::task::Id, checks::Pending> = BTreeMap::new();
-    let mut held_check: Option<checks::Check> = None;
+    let mut held_check: Option<HeldCheck> = None;
     let mut closing: Option<PendingClose> = None;
     let mut cleanup_diagnostics = 0;
     let mut schedule = Schedule::default();
@@ -712,6 +773,7 @@ pub(super) async fn endpoint(
         let close_work=closing.as_ref().filter(|close|now>=close.retry_after).map(|close|maintenance(now,&permission,&live,Some(close),client.own_renewal_budget_ms(),client.stream_renewal_budget_ms(),client.operation_budget_ms())).transpose()?;
         let public=listener.is_some();
         let can_fill=held_check.is_none() && schedule.fill_end(now).is_some();
+        let holding_close=held_check.as_ref().filter(|held|held.close.is_some() && held.check.can_wait(now)).is_some_and(|held|held.waiting(now,closing.as_ref().and_then(|close|close.ordinary(client))));
         let (listener_tasks,mut listener_requests)=listener.as_mut().map(|l|(&mut l.tasks,&mut l.requests)).unzip();
         let next=tokio::select! {
             biased;
@@ -722,11 +784,11 @@ pub(super) async fn endpoint(
                 Dispatch::Own if own_due=>std::task::Poll::Ready(Event::Maintenance(Maintenance::Own)),
                 Dispatch::Stream if stream_due.is_some()=>std::task::Poll::Ready(Event::Maintenance(Maintenance::Stream(stream_due.expect("due stream")))),
                 Dispatch::Complete=>event(reads.poll_join_next_with_id(cx),Event::Checked),
-                Dispatch::Check=>match held_check.take() {
+                Dispatch::Check if !holding_close=>match held_check.take() {
                     Some(check)=>std::task::Poll::Ready(Event::Check(check)),
-                    None=>event(check_requests.poll_recv(cx),Event::Check),
+                    None=>event(check_requests.poll_recv(cx),|check|Event::Check(HeldCheck::ready(check))),
                 },
-                Dispatch::Fill if can_fill=>event(check_requests.poll_recv(cx),Event::Check),
+                Dispatch::Fill if can_fill=>event(check_requests.poll_recv(cx),|check|Event::Check(HeldCheck::ready(check))),
                 Dispatch::Handshake if !handshakes.is_empty()=>event(handshakes.poll_join_next(cx),Event::Handshake),
                 Dispatch::Incoming if !incoming.is_empty()=>event(incoming.poll_join_next(cx),Event::Incoming),
                 Dispatch::Public if public=>event(listener_requests.as_mut().expect("enabled listener").poll_recv(cx),Event::Public),
@@ -790,7 +852,14 @@ pub(super) async fn endpoint(
                     handshakes.spawn(hello(session,application.clone(),ready.clone(),permission.gate.clone()));
                 } else {retry_after=tokio::time::Instant::now()+Duration::from_millis(own.limits.idle_ms.min(1000));}
             },
-            Event::Check(check)=>{
+            Event::Check(mut held)=>{
+                let now=crate::authority_challenge::boot_time_ms()?;
+                if pending.is_empty() && let Some(close)=closing.as_ref()
+                    && held.defer_close(now,close.ordinary(client),close.deadline) {
+                    held_check=Some(held);
+                    continue;
+                }
+                let Some(check)=held.into_check(now) else {continue};
                 let mut prepared=Vec::with_capacity(streams::control::MAXIMUM_PENDING);
                 let fill_end=if pending.is_empty() {
                     let cohort=checks::cohort(check,&mut check_requests);
@@ -806,7 +875,7 @@ pub(super) async fn endpoint(
                 } else {
                     let Some(end)=schedule.admit_fill(crate::authority_challenge::boot_time_ms()?) else {
                         schedule.round_open=false;
-                        held_check=Some(check);
+                        held_check=Some(HeldCheck::ready(check));
                         continue;
                     };
                     prepared.push(check);
@@ -824,7 +893,7 @@ pub(super) async fn endpoint(
                         Ok(read)=>read,
                         Err(error) if fill_end.is_some() && checks::needs_preparation(&error)=>{
                             schedule.round_open=false;
-                            held_check=Some(check);
+                            held_check=Some(HeldCheck::ready(check));
                             continue;
                         },
                         Err(error)=>{let receipt=check.complete(Err(error));check.respond(receipt);continue;},
@@ -867,7 +936,7 @@ pub(super) async fn endpoint(
     }
     check_requests.close();
     if let Some(check) = held_check.take() {
-        check.cancelled.store(true, Ordering::Release);
+        check.check.cancelled.store(true, Ordering::Release);
     }
     while check_requests.try_recv().is_ok() {}
     for check in pending.values() {

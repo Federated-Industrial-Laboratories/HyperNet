@@ -474,6 +474,16 @@ pub(super) fn finish(
 }
 
 impl Check {
+    // Scheduling may retain only a live, originally bounded request. Full
+    // current authority and stream validation still runs before issue/finish.
+    pub(super) fn can_wait(&self, now: u64) -> bool {
+        self.request.caller_started_boot_ms <= now
+            && now < self.request.caller_deadline_boot_ms
+            && self.connected.load(Ordering::Acquire)
+            && !self.cancelled.load(Ordering::Acquire)
+            && self.request.matches_ready(&self.ready).is_ok()
+    }
+
     pub(super) fn sampled(&self) -> bool {
         self.timing.is_some_and(|timing| timing.sample.is_some())
     }

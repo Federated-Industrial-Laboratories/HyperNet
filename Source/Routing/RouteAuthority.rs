@@ -272,6 +272,28 @@ pub(crate) fn retirement_target(
         && wire::digest(&current.proof.envelope) == proof_digest)
         .then(|| record.reference.clone()))
 }
+// This only identifies the actor's retained cleanup. It grants no permission
+// and neither recovers nor changes the requester's ordinary/fence state.
+pub(crate) fn pending_stream_close(
+    store: &Store,
+    state: &domains::State,
+    original: &VersionRef,
+    proof_digest: Digest,
+) -> Result<Option<Digest>> {
+    if store.resume_fence()?.is_some() {
+        return Ok(None);
+    }
+    let Some(pending) = store.resume_ordinary()? else {
+        return Ok(None);
+    };
+    let operation = Operation::parse(&Intent::from_signed(pending.signed())?)?;
+    let DomainCommand::Stream(streams::Command::Close { session }) = operation.command else {
+        return Ok(None);
+    };
+    Ok((operation.grant.is_none()
+        && retirement_target(state, original, proof_digest)?.as_ref() == Some(&session))
+    .then(|| wire::digest(pending.signed())))
+}
 pub struct Client<'a> {
     config: &'a Config,
     guard: &'a Guard,
@@ -1171,6 +1193,13 @@ impl<'a> Client<'a> {
 
     pub(crate) fn pending_diagnostic(&self) -> PendingState {
         PendingState::inspect(&self.store)
+    }
+    pub(crate) fn pending_stream_close(
+        &self,
+        session: &VersionRef,
+        proof_digest: Digest,
+    ) -> Result<Option<Digest>> {
+        pending_stream_close(&self.store, self.disk.context().0, session, proof_digest)
     }
     pub(crate) fn stream_close(
         &mut self,

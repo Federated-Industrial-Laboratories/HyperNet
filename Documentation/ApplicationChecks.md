@@ -126,6 +126,18 @@ the round. An expired open gate defers at most one queue-head check, retaining
 its original permit and request until the next ordinary round. No later check
 bypasses that held head. Cancellation, changed identity, closed streams and
 expired caller deadlines retain their existing refusal paths.
+Before starting another round, a check may also wait behind the actor's retained
+stream close. This applies only when the exact stored ordinary request is a close
+of that cleanup's current session and proof, with no pending fence. The held FIFO
+head retains its original request, permit and signed-close digest. Later checks
+cannot bypass it. Existing lifecycle recovery and backoff resolve that same
+ordinary operation; waiting neither recovers it nor issues a read challenge.
+Cancellation or control loss releases the head to its normal checks. Waiting ends
+at the original caller or cleanup deadline, whichever comes first, without a new
+window. A different ordinary request, fence, unreadable state or absent cleanup
+does not qualify for deferral. Once recovery clears the original ordinary slot,
+the request still requires current readiness and a fresh action-bound read.
+Both issue and completion retain their ordinary/fence exclusion guards.
 While its workers remain, completion has a separate dispatch class; unrelated
 synchronous admission, renewal and cleanup do not advance the actor's floor or
 consume its permission tail before completion. Clock/currentness checks,

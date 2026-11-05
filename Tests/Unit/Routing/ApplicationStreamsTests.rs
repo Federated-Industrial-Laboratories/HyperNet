@@ -209,6 +209,137 @@ fn retirement_context(
 }
 
 #[test]
+fn pending_cleanup_classification_requires_exact_session_proof_and_unfenced_ordinary() {
+    let (mut f, registration) = setup();
+    let admitted = proof(&f, &registration, 1, 81);
+    let proof_digest = wire::digest(&admitted.envelope);
+    execute(
+        &mut f,
+        StreamCommand::Admit {
+            proof: admitted.clone(),
+        },
+        161,
+        None,
+        5000,
+        true,
+    );
+    let original = f
+        .state
+        .record(173, admitted.id().unwrap())
+        .unwrap()
+        .reference
+        .clone();
+    for mode in 0..6 {
+        let (directory, clock, _, mut store) = crate::authority_floor::tests::setup();
+        assert!(crate::route_authority::pending_stream_close(
+            &store, &f.state, &original, proof_digest,
+        ).unwrap().is_none());
+        let slot = store.ordinary_slot().unwrap();
+        let fixture = crate::authority_proof::tests::Fixture::new(clock.observe().unwrap().wall_ms);
+        let (payload, _) = wire::envelope(&fixture.intent, 1).unwrap();
+        let V::Array(mut fields) = wire::decode(&payload).unwrap() else {
+            unreachable!()
+        };
+        let mut target = original.clone();
+        if mode == 1 {
+            target.digest = [97; 32];
+        }
+        let command = if mode == 2 {
+            StreamCommand::Permit { session: target }
+        } else {
+            StreamCommand::Close { session: target }
+        };
+        let operation = Operation {
+            command: command.into(),
+            grant: (mode == 3).then(|| admitted.grant.clone()),
+            snapshot: snapshot(&a(vec![
+                a(vec![
+                    V::Uint(slot.minimum_policy_epoch()),
+                    V::Uint(slot.minimum_policy_height()),
+                    b(store.prefix().policy_state()),
+                ]),
+                a(vec![]),
+            ]))
+            .unwrap(),
+        };
+        fields[4] = V::Uint(slot.generation());
+        fields[5] = b(&slot.generation_id());
+        fields[6] = V::Uint(slot.sequence());
+        fields[7] = V::Uint(slot.acknowledged_through());
+        fields[9] = V::Text("AuthorityDomain".into());
+        fields[10] = b(&operation.command.resource());
+        fields[11] = V::Uint(u64::from(operation.command.mutation()));
+        fields[12] = V::Uint(0);
+        fields[13] = V::Uint(slot.minimum_policy_epoch());
+        fields[14] = V::Uint(slot.minimum_policy_height());
+        fields[15] = a(vec![]);
+        fields[16] = b(&operation.parameters().unwrap());
+        let key = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
+        let signed = wire::sign_envelope(&wire::encode(&a(fields)).unwrap(), &key).unwrap();
+        store.prepare_ordinary(slot, &signed).unwrap();
+        if mode == 4 {
+            let old = store.stream_metadata().unwrap().unwrap();
+            let prior = old.state().unwrap();
+            let scope = store.descriptor().scope();
+            let fence = wire::sign_envelope(
+                &wire::encode(&a(vec![
+                    V::Uint(57),
+                    V::Uint(1),
+                    b(&scope.network),
+                    b(&scope.incarnation),
+                    b(&store.requester()),
+                    b(&[96; 32]),
+                    V::Uint(scope.epoch),
+                    V::Uint(store.prefix().height()),
+                    V::Uint(prior.generation),
+                    b(&prior.generation_id),
+                    b(&wire::digest(old.canonical())),
+                ]))
+                .unwrap(),
+                &key,
+            )
+            .unwrap();
+            store.prepare_fence(&fence, old.canonical()).unwrap();
+        }
+        let bound = crate::route_authority::pending_stream_close(
+            &store,
+            &f.state,
+            &original,
+            if mode == 5 { [98; 32] } else { proof_digest },
+        )
+        .unwrap();
+        assert_eq!(bound, (mode == 0).then(|| wire::digest(&signed)));
+        assert_eq!(store.resume_ordinary().unwrap().unwrap().signed(), signed);
+        assert_eq!(store.resume_fence().unwrap().is_some(), mode == 4);
+        if mode == 0 {
+            let mut reused = original.clone();
+            reused.generation += 1;
+            assert!(
+                crate::route_authority::pending_stream_close(
+                    &store,
+                    &f.state,
+                    &reused,
+                    proof_digest,
+                )
+                .unwrap()
+                .is_none()
+            );
+            std::fs::remove_file(directory.0.join("AuthorityFloor.json")).unwrap();
+            assert!(
+                crate::route_authority::pending_stream_close(
+                    &store,
+                    &f.state,
+                    &original,
+                    proof_digest,
+                )
+                .is_err(),
+                "unreadable requester state cannot authorize waiting"
+            );
+        }
+    }
+}
+
+#[test]
 fn caller_close_race_refreshes_only_the_same_proof_before_endpoint_retirement() {
     let (mut f, registration) = setup();
     let p = proof(&f, &registration, 1, 30);
