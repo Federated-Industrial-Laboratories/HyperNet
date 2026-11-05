@@ -2,12 +2,13 @@
 
 [Documentation](ReadMe.md) | [Project](../ReadMe.md)
 
-## Linux 0.10.2 release candidate
+## Linux 0.10.2
 
 Version 0.10.2 adds optional acknowledgement of consumed fresh reads and improves
-application-stream cleanup scheduling. This source candidate is not a published
-package. Package signing, installation qualification and native load results must
-identify their exact artifacts separately from earlier release evidence.
+application-stream cleanup scheduling. Download the signed
+[Linux 0.10.2 release](https://github.com/Federated-Industrial-Laboratories/HyperNet/releases/tag/v0.10.2).
+Package signatures, installed checks and native results identify exact artifacts;
+earlier release evidence retains its original scope.
 
 ### Changes and compatibility
 
@@ -23,9 +24,10 @@ identify their exact artifacts separately from earlier release evidence.
   endpoint renewal and authority-changing cleanup retain exclusive turns.
 - A fresh successful stream permit can renew the same still-current stream gate
   from its exact certified result. The action receipt keeps its original deadline
-  and old-gate clipping; endpoint permission and fixed forwarding lifetime do not
-  extend. An expired open cached stream gate may use the existing bounded readiness
-  renewal before a separate fresh check. Closed or ended streams cannot revive.
+  and old-gate clipping. The same certified result may renew the exact registered
+  receiving-endpoint gate atomically with the stream gate; the fixed forwarding
+  lifetime does not extend. An expired open cached stream gate may use bounded
+  readiness renewal before a separate fresh check. Closed or ended streams cannot revive.
   Bounded inactive-stream diagnostics distinguish these lifecycle states.
 
 - Private authority readiness preserves typed peer closure and socket reset.
@@ -76,14 +78,35 @@ component checks cover actual quorum collection removal after Suite consumption
 over admitted TLS, legacy session reuse, original deadlines and renewal/close
 scheduling. They do not establish application throughput, concurrent-user capacity
 or a new platform. Earlier native results retain their original source and binary
-identities; a version change does not relabel them as candidate qualification.
+identities; a version change does not relabel earlier executable evidence.
 
 Follow stopped service replacement and renew local artifact consent before
 activation. Preserve complete authority state, requester journals, identities,
 package trust and retained floors. The package contract remains
 `HyperNet080Authority2`. Use a separately authenticated, signed target for the
-exact candidate package; do not reset existing trust or assume a target sequence
+exact package; do not reset existing trust or assume a target sequence
 from the version number. See [upgrade and recovery](UpgradeRecovery.md).
+
+### Signed package
+
+The release contains `HyperNet-0.10.2-linux-x86_64.tar`, its `.sig`,
+`HyperNet-0.10.2-linux-x86_64.target.json`, its `.sig`, `Publisher.pub`,
+`SHA256SUMS` and `SHA256SUMS.sig`. The signed target uses root generation 1,
+sequence 20 and version floor 0.10.2. Authenticate the publisher independently
+and preserve retained package trust; never lower its sequence or version floor.
+The unchanged corresponding-source archive is `HyperNet-0.10.1-system-sources.tar.xz`;
+its older filename identifies the retained dependency inputs, not the runtime version.
+
+Installed qualification covers the final executable on Ubuntu 24.04 x86_64 with
+GNU libc 2.39. The same runtime bytes also participated in an admitted application
+pilot on Ubuntu 26.04 amd64 with GNU libc 2.43: eight interactive clients and four
+support endpoints used twelve receiving streams and two admitted applications.
+The deployment allowed sixteen relay and application connections, eight authority
+endpoint connections and two native connector sessions. This is a bounded topology,
+not qualification of every configured slot, independent host failure domains or
+arbitrary application load. Application-specific throughput and latency results
+belong to that application's qualification report. Earlier GUI and platform
+results retain their original artifact scope; no independent security audit is claimed.
 
 ## Linux 0.10.1 authority readiness correction
 

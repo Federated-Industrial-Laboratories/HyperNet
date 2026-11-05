@@ -8,16 +8,17 @@ current offline target policy below; it never starts a runtime, reuses obsolete
 consent or changes an authority floor. Preserve existing software and state while
 preparing a new private prefix.
 
-## Consumed-read cleanup candidate 0.10.2
+## Consumed-read cleanup 0.10.2
 
-The current source candidate adds optional cleanup without changing the retained
+Version 0.10.2 adds optional cleanup without changing the retained
 state contract or permission semantics. Preserve exact pending operations and all
 trust floors. Replace stopped software and renew local artifact consent before
 resuming services; restart companions after selecting the new Suite executable.
 Use Core 0.10.2 with Suite 0.10.1 for the complete cleanup path. Legacy peers remain
 compatible and retain unacknowledged reads until their original expiry. Consult
-[the candidate release notes](ReleaseNotes.md) before preparing an exact signed
-target; the version number does not authorise a target sequence or publication.
+[the release notes](ReleaseNotes.md) for the exact signed target. The release
+uses root generation 1 and target sequence 20. Preserve higher retained floors;
+the version number alone never authorises an update.
 
 ## Application context 0.10.0
 
@@ -74,8 +75,7 @@ cannot mark incompatible state as compatible. The current authority contract use
 immutable references for signer-state bodies. Incompatible inline-state packages
 and retained package trust are refused; they cannot activate this layout in place.
 Suite uses a different contract and trust directory. The published Linux release
-is version 0.10.1; the source candidate is 0.10.2. Signed update sequences identify
-exact builds and cannot move backwards. Earlier development packages do not become
+is version 0.10.2. Signed update sequences identify exact builds and cannot move backwards. Earlier development packages do not become
 release packages when a version label changes. Use independently accepted release
 trust and the signed target for the new package; retain existing state and floors.
 
