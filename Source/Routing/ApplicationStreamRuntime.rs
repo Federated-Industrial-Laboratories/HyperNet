@@ -6,15 +6,134 @@ use crate::authority_proof::VersionRef;
 use std::sync::atomic::AtomicBool;
 #[path = "ApplicationStreamChecks.rs"]
 mod checks;
+#[derive(Clone, Copy, Debug)]
+enum Activity {
+    IncomingPermission,
+    HandshakePermission,
+    StreamAdmission,
+    StreamPermit,
+    Cleanup,
+}
+static ACTIVITY_SAMPLES: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+static FAILURE_SAMPLES: AtomicU64 = AtomicU64::new(0);
+fn failure_sample() -> Option<(u64, u64)> {
+    if !DIAGNOSTICS.get().is_some_and(Option::is_some)
+        || FAILURE_SAMPLES.load(Ordering::Relaxed) >= 64
+    {
+        return None;
+    }
+    let now = crate::authority_challenge::boot_time_ms().ok()?;
+    Timing::counted(now, &FAILURE_SAMPLES, 64)
+        .sample
+        .map(|sample| (sample, now))
+}
+struct CleanupFailureRecord {
+    sample: u64,
+    now: u64,
+    deadline: u64,
+    stage: crate::route_authority::CleanupStage,
+    pending: crate::route_authority::PendingState,
+    reason: FailureCode,
+}
+impl CleanupFailureRecord {
+    fn write(&self, output: &mut impl std::fmt::Write) {
+        let _ = writeln!(
+            output,
+            "HyperNet application cleanup failure: sample={} stage={:?} pending={:?} reason={:?} deadlineBootMs={} bootMs={}",
+            self.sample, self.stage, self.pending, self.reason, self.deadline, self.now
+        );
+    }
+}
+fn cleanup_failure(
+    stage: crate::route_authority::CleanupStage,
+    client: &Client<'_>,
+    error: &anyhow::Error,
+    deadline: u64,
+) {
+    if let Some((sample, now)) = failure_sample() {
+        let record = CleanupFailureRecord {
+            sample,
+            now,
+            deadline,
+            stage,
+            pending: client.pending_diagnostic(),
+            reason: failure_code(error),
+        };
+        let mut line = DiagnosticLine::new();
+        record.write(&mut line);
+        diagnostic_line(line);
+    }
+}
+fn observed<T>(
+    activity: Activity,
+    deadline: u64,
+    session: Option<Timing>,
+    action: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let timing = ActivityTiming::start(activity, deadline, session);
+    let result = action();
+    timing.finish(&result);
+    result
+}
+struct ActivityTiming {
+    activity: Activity,
+    deadline: u64,
+    session_sample: Option<u64>,
+    timing: Option<Timing>,
+}
+impl ActivityTiming {
+    fn start(activity: Activity, deadline: u64, session: Option<Timing>) -> Self {
+        let timing = crate::authority_challenge::boot_time_ms()
+            .ok()
+            .map(|now| Timing::counted(now, &ACTIVITY_SAMPLES[activity as usize], 64));
+        let session_sample = session.and_then(|s| s.sample);
+        if let Some(Timing {
+            sample: Some(sample),
+            started,
+        }) = timing
+        {
+            diagnostic(format_args!(
+                "HyperNet application actor: operation={activity:?} sample={sample} sessionSample={session_sample:?} stage=Start deadlineBootMs={deadline} bootMs={started}\n"
+            ));
+        }
+        Self {
+            activity,
+            deadline,
+            session_sample,
+            timing,
+        }
+    }
+    fn finish<T>(self, result: &Result<T>) {
+        let Self {
+            activity,
+            deadline,
+            session_sample,
+            timing,
+        } = self;
+        if let Some(Timing {
+            sample: Some(sample),
+            started,
+        }) = timing
+            && let Ok(now) = crate::authority_challenge::boot_time_ms()
+        {
+            diagnostic(format_args!(
+                "HyperNet application actor: operation={activity:?} sample={sample} sessionSample={session_sample:?} stage=Complete deadlineBootMs={deadline} elapsedMs={} reason={:?} bootMs={now}\n",
+                now.saturating_sub(started),
+                result.as_ref().err().map(failure_code)
+            ));
+        }
+    }
+}
 struct Forwarding {
     deadline: u64,
     established: AtomicBool,
     finished: AtomicBool,
 }
-struct ForwardingCompletion(Arc<Forwarding>);
+struct ForwardingCompletion(Arc<Forwarding>, Timing);
 impl Drop for ForwardingCompletion {
     fn drop(&mut self) {
         self.0.finished.store(true, Ordering::Release);
+        self.1.mark(Phase::ApplicationForwardComplete);
     }
 }
 struct OpenedStream {
@@ -23,18 +142,78 @@ struct OpenedStream {
 }
 struct LiveStream {
     reference: VersionRef,
+    proof_digest: Digest,
     gate: route_io::Gate,
     accepted_at: u64,
     retry_after: u64,
+    renewal_turn: u64,
     forwarding: Arc<Forwarding>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InactiveStream {
+    Missing,
+    ReferenceChanged,
+    NotEstablished,
+    ForwardingFinished,
+    ForwardingExpired,
+    GateClosed,
+    GateExpired,
+}
+impl std::fmt::Display for InactiveStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "application stream is not active: {self:?}")
+    }
+}
+impl std::error::Error for InactiveStream {}
 impl LiveStream {
-    fn check_deadline(&self, now: u64) -> Option<u64> {
-        let deadline = self.forwarding.deadline.min(self.gate.expiry().ok()?);
-        (self.forwarding.established.load(Ordering::Acquire)
-            && !self.forwarding.finished.load(Ordering::Acquire)
-            && deadline > now)
-            .then_some(deadline)
+    // An expired open gate pauses forwarding but can still receive one bounded
+    // readiness renewal. Closed or ended streams never enter that renewal path.
+    fn preparation_deadline(&self, now: u64) -> Result<u64, InactiveStream> {
+        if !self.forwarding.established.load(Ordering::Acquire) {
+            return Err(InactiveStream::NotEstablished);
+        }
+        if self.forwarding.finished.load(Ordering::Acquire) {
+            return Err(InactiveStream::ForwardingFinished);
+        }
+        if self.forwarding.deadline <= now {
+            return Err(InactiveStream::ForwardingExpired);
+        }
+        self.gate.expiry().map_err(|_| InactiveStream::GateClosed)?;
+        Ok(self.forwarding.deadline)
+    }
+    fn current_deadline(&self, now: u64) -> Result<u64, InactiveStream> {
+        let deadline = self
+            .preparation_deadline(now)?
+            .min(self.gate.expiry().map_err(|_| InactiveStream::GateClosed)?);
+        if deadline <= now {
+            return Err(InactiveStream::GateExpired);
+        }
+        Ok(deadline)
+    }
+    fn renew_checked(
+        &mut self,
+        permit: crate::route_authority::CertifiedStreamPermit,
+        endpoint: crate::route_authority::CertifiedEndpointPermit,
+        profile: &[u8],
+        permission: &mut EndpointPermission,
+        receipt_end: u64,
+        cancelled: impl FnOnce() -> bool,
+    ) -> Result<()> {
+        crate::authority_local_transport::remaining(receipt_end)?;
+        let expires = permit
+            .expiry_for(&self.reference)?
+            .min(self.forwarding.deadline);
+        let endpoint_expiry = endpoint.expiry_for(profile)?;
+        ensure!(!cancelled(), "application check cancelled");
+        self.current_deadline(crate::authority_challenge::boot_time_ms()?)?;
+        let installed =
+            self.gate
+                .renew_pair(&permission.gate, expires, endpoint_expiry, receipt_end)?;
+        self.accepted_at = installed;
+        self.retry_after = 0;
+        permission.accepted_at = Some(installed);
+        permission.renewals = permission.renewals.saturating_add(1);
+        Ok(())
     }
     fn prepare_check(
         &mut self,
@@ -47,12 +226,9 @@ impl LiveStream {
         crate::authority_local_transport::remaining(deadline)?;
         let now = crate::authority_challenge::boot_time_ms()?;
         ensure!(!cancelled(), "application check cancelled");
-        self.check_deadline(now)
-            .context("application stream is no longer current")?;
+        self.preparation_deadline(now)?;
         let expiry = self.gate.expiry()?;
-        if expiry < deadline
-            || now >= refresh_at(expiry, budget.saturating_mul(2), Some(self.accepted_at))
-        {
+        if now >= refresh_at(expiry, budget.saturating_mul(2), Some(self.accepted_at)) {
             let expiry = refresh(deadline)?;
             crate::authority_local_transport::remaining(deadline)?;
             ensure!(
@@ -72,6 +248,454 @@ impl Drop for LiveStream {
     fn drop(&mut self) {
         self.gate.close();
     }
+}
+
+// A maintenance renewal owns no application request or receipt. Its original end
+// and exact live stream survive the immutable worker exchange on the actor.
+#[derive(Clone)]
+struct RenewalContext {
+    reference: VersionRef,
+    forwarding: Arc<Forwarding>,
+    cancelled: Arc<AtomicBool>,
+    deadline: u64,
+    started: u64,
+}
+impl RenewalContext {
+    fn capture(stream: &LiveStream, deadline: u64, started: u64) -> Self {
+        Self {
+            reference: stream.reference.clone(),
+            forwarding: stream.forwarding.clone(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            deadline: deadline.min(stream.forwarding.deadline),
+            started,
+        }
+    }
+    fn matches(&self, stream: &LiveStream) -> bool {
+        self.reference == stream.reference && Arc::ptr_eq(&self.forwarding, &stream.forwarding)
+    }
+    fn current(
+        &self,
+        stream: &LiveStream,
+        permission: &EndpointPermission,
+        now: u64,
+    ) -> Result<()> {
+        ensure!(self.matches(stream), "stream renewal identity changed");
+        self.exchange_current(&stream.gate, &permission.gate, now)
+    }
+    fn exchange_current(
+        &self,
+        gate: &route_io::Gate,
+        endpoint: &route_io::Gate,
+        now: u64,
+    ) -> Result<()> {
+        ensure!(
+            !self.cancelled.load(Ordering::Acquire),
+            "stream renewal cancelled"
+        );
+        ensure!(
+            now < self.deadline.min(self.forwarding.deadline),
+            "stream renewal original deadline expired"
+        );
+        ensure!(
+            self.forwarding.established.load(Ordering::Acquire)
+                && !self.forwarding.finished.load(Ordering::Acquire),
+            "stream renewal forwarding ended"
+        );
+        gate.expiry()?;
+        endpoint.expiry()?;
+        Ok(())
+    }
+    fn install(
+        &self,
+        observation: crate::route_authority::StreamCheck,
+        stream: &mut LiveStream,
+        permission: &EndpointPermission,
+        profile: &[u8],
+    ) -> Result<()> {
+        self.current(
+            stream,
+            permission,
+            crate::authority_challenge::boot_time_ms()?,
+        )?;
+        let permit = observation.renewal.with_context(|| {
+            format!(
+                "Route maintenance refused with code {}",
+                observation.authority.code
+            )
+        })?;
+        // Verify the exact endpoint binding, but leave its separately owned gate unchanged.
+        observation
+            .endpoint_renewal
+            .context("stream renewal omitted endpoint binding")?
+            .expiry_for(profile)?;
+        let expires = permit
+            .expiry_for(&self.reference)?
+            .min(self.forwarding.deadline);
+        crate::authority_local_transport::remaining(self.deadline.min(observation.deadline))?;
+        stream.gate.renew(expires)?;
+        stream.accepted_at = crate::authority_challenge::boot_time_ms()?;
+        stream.retry_after = 0;
+        Ok(())
+    }
+    fn failed(&self, stream: &mut LiveStream, error: &anyhow::Error) {
+        if !self.matches(stream) {
+            return;
+        }
+        if error.is::<ReadRetry>() {
+            stream.retry_after = self.started.saturating_add(READ_RETRY_MS);
+        } else {
+            stream.gate.close();
+            stream.retry_after = u64::MAX;
+        }
+    }
+}
+enum ReadOwner {
+    Check(Box<checks::Check>),
+    Renewal {
+        context: RenewalContext,
+        timing: ActivityTiming,
+    },
+}
+struct PendingRead {
+    read: crate::route_authority::PreparedRead,
+    owner: ReadOwner,
+}
+struct PendingClose {
+    reference: VersionRef,
+    proof_digest: Digest,
+    deadline: u64,
+    retry_after: u64,
+    own_renewals: u64,
+    renewal_turn: u64,
+}
+impl PendingClose {
+    fn ordinary(&self, client: &Client<'_>) -> Option<Digest> {
+        // An unreadable or different requester state is not eligible to wait.
+        // Its normal issue/finish guard remains authoritative.
+        client
+            .pending_stream_close(&self.reference, self.proof_digest)
+            .ok()
+            .flatten()
+    }
+    fn completed(
+        stream: LiveStream,
+        now: u64,
+        idle_ms: u64,
+        own_renewals: u64,
+        renewal_turn: u64,
+    ) -> Self {
+        stream.gate.close();
+        Self {
+            reference: stream.reference.clone(),
+            proof_digest: stream.proof_digest,
+            deadline: now.saturating_add(idle_ms),
+            retry_after: now,
+            own_renewals,
+            renewal_turn,
+        }
+    }
+    fn attempt(&mut self, client: &mut Client<'_>, diagnostics: &mut u8) -> bool {
+        self.attempt_with(
+            || crate::authority_challenge::boot_time_ms().unwrap_or(u64::MAX),
+            diagnostics,
+            |reference, proof_digest, deadline| {
+                observed(Activity::Cleanup, deadline, None, || {
+                    client.before(deadline, |client| {
+                        client.stream_close(reference, proof_digest, |stage, client, error| {
+                            cleanup_failure(stage, client, error, deadline);
+                        })
+                    })
+                })
+            },
+        )
+    }
+    fn attempt_with(
+        &mut self,
+        mut clock: impl FnMut() -> u64,
+        diagnostics: &mut u8,
+        close: impl FnOnce(&VersionRef, Digest, u64) -> Result<()>,
+    ) -> bool {
+        let now = clock();
+        if now < self.retry_after {
+            return false;
+        }
+        let expired = now >= self.deadline;
+        if !expired && close(&self.reference, self.proof_digest, self.deadline).is_ok() {
+            return true;
+        }
+        let finished = clock();
+        let expired = expired || finished >= self.deadline;
+        if *diagnostics < 16 {
+            *diagnostics += 1;
+            diagnostic(format_args!(
+                "HyperNet application stream cleanup: sample={} category={}\n",
+                diagnostics,
+                if expired { "Expired" } else { "Failed" }
+            ));
+        }
+        // Unknown effects stay in the requester's exact recovery slot. This one
+        // held retirement retains its target and first deadline between attempts.
+        self.retry_after = finished.saturating_add(READ_RETRY_MS).min(self.deadline);
+        expired
+    }
+}
+struct HeldCheck {
+    check: checks::Check,
+    close: Option<(Digest, u64)>,
+}
+impl HeldCheck {
+    fn ready(check: checks::Check) -> Self {
+        Self { check, close: None }
+    }
+    fn defer_close(&mut self, now: u64, ordinary: Option<Digest>, end: u64) -> bool {
+        let Some(ordinary) = ordinary else {
+            return false;
+        };
+        if !self.check.can_wait(now) || now >= end {
+            return false;
+        }
+        match self.close {
+            Some((original, original_end)) => original == ordinary && now < original_end,
+            None => {
+                self.close = Some((
+                    ordinary,
+                    end.min(self.check.request.caller_deadline_boot_ms),
+                ));
+                true
+            }
+        }
+    }
+    fn waiting(&self, now: u64, ordinary: Option<Digest>) -> bool {
+        self.check.can_wait(now)
+            && self
+                .close
+                .is_some_and(|(original, end)| now < end && ordinary == Some(original))
+    }
+    fn into_check(self, now: u64) -> Option<checks::Check> {
+        if self.close.is_some_and(|(_, end)| now >= end) {
+            let result = if now >= self.check.request.caller_deadline_boot_ms {
+                Ok(checks::unavailable(
+                    self.check.request.clone(),
+                    self.check.ready.privacy.clone(),
+                    streams::control::Disposition::Expired,
+                ))
+            } else {
+                Err(anyhow::anyhow!(
+                    "application check close recovery deadline expired"
+                ))
+            };
+            let receipt = self.check.complete(result);
+            self.check.respond(receipt);
+            None
+        } else {
+            Some(self.check)
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Maintenance {
+    Own,
+    Stream(Digest),
+    Close,
+    Wait,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Dispatch {
+    Own,
+    Stream,
+    Check,
+    Fill,
+    Complete,
+    Handshake,
+    Incoming,
+    Public,
+    Forwarding,
+    Close,
+}
+const DISPATCH: [Dispatch; 7] = [
+    Dispatch::Own,
+    Dispatch::Stream,
+    Dispatch::Handshake,
+    Dispatch::Incoming,
+    Dispatch::Public,
+    Dispatch::Forwarding,
+    Dispatch::Close,
+];
+#[derive(Default)]
+struct Schedule {
+    next: usize,
+    check_turn: bool,
+    renewal_turn: u64,
+    round_admissions: usize,
+    round_end: u64,
+    round_open: bool,
+}
+impl Schedule {
+    async fn next<T>(
+        &mut self,
+        reading: bool,
+        mut ready: impl FnMut(Dispatch, &mut std::task::Context<'_>) -> std::task::Poll<T>,
+    ) -> T {
+        tokio::task::consume_budget().await;
+        // A ready queue must not look empty merely because another class spent
+        // the task's cooperative budget. Only this finite selector is unbudgeted.
+        tokio::task::unconstrained(std::future::poll_fn(|cx| {
+            self.poll(reading, |class| ready(class, cx))
+        }))
+        .await
+    }
+    // A finite read round owns the actor until its workers drain. Before its
+    // first completion, only issue-only work can fill its unused slots.
+    // Completion never starts another round. Between rounds the existing
+    // lifecycle rotation retains its turn, even under continuous check arrival.
+    fn poll<T>(
+        &mut self,
+        reading: bool,
+        mut ready: impl FnMut(Dispatch) -> std::task::Poll<T>,
+    ) -> std::task::Poll<T> {
+        if let std::task::Poll::Ready(completed) = ready(Dispatch::Complete) {
+            self.round_open = false;
+            return std::task::Poll::Ready(completed);
+        }
+        if reading {
+            return if self.round_open && self.round_admissions < streams::control::MAXIMUM_PENDING {
+                ready(Dispatch::Fill)
+            } else {
+                std::task::Poll::Pending
+            };
+        }
+        let checked = self.check_turn;
+        if checked && let std::task::Poll::Ready(event) = ready(Dispatch::Check) {
+            self.check_turn = false;
+            return std::task::Poll::Ready(event);
+        }
+        for offset in 0..DISPATCH.len() {
+            let index = (self.next + offset) % DISPATCH.len();
+            if let std::task::Poll::Ready(event) = ready(DISPATCH[index]) {
+                self.next = (index + 1) % DISPATCH.len();
+                self.check_turn = true;
+                return std::task::Poll::Ready(event);
+            }
+        }
+        if checked {
+            std::task::Poll::Pending
+        } else {
+            ready(Dispatch::Check)
+        }
+    }
+    fn begin_round(&mut self, count: usize) {
+        self.round_admissions = count;
+        self.round_end = 0;
+        self.round_open = true;
+    }
+    fn initial_issue(&mut self, end: u64) {
+        self.round_end = self.round_end.max(end);
+    }
+    fn fill_end(&self, now: u64) -> Option<u64> {
+        (self.round_open
+            && self.round_admissions < streams::control::MAXIMUM_PENDING
+            && now < self.round_end)
+            .then_some(self.round_end)
+    }
+    fn admit_fill(&mut self, now: u64) -> Option<u64> {
+        let end = self.fill_end(now)?;
+        self.round_admissions += 1;
+        Some(end)
+    }
+    fn renewed(&mut self) -> Result<u64> {
+        self.renewal_turn = self
+            .renewal_turn
+            .checked_add(1)
+            .context("application renewal turn exhausted")?;
+        Ok(self.renewal_turn)
+    }
+}
+enum Event {
+    Maintenance(Maintenance),
+    Forwarding(std::result::Result<(Digest, Result<()>), tokio::task::JoinError>),
+    Handshake(std::result::Result<Result<OpenedStream>, tokio::task::JoinError>),
+    Incoming(std::result::Result<Result<Session>, tokio::task::JoinError>),
+    Public(Queued<Session>),
+    Check(HeldCheck),
+    Checked(
+        std::result::Result<(tokio::task::Id, checks::ExchangeCompletion), tokio::task::JoinError>,
+    ),
+}
+fn event<T>(
+    polled: std::task::Poll<Option<T>>,
+    map: impl FnOnce(T) -> Event,
+) -> std::task::Poll<Event> {
+    match polled {
+        std::task::Poll::Ready(Some(value)) => std::task::Poll::Ready(map(value)),
+        _ => std::task::Poll::Pending,
+    }
+}
+fn due_stream(
+    live: &BTreeMap<Digest, LiveStream>,
+    now: u64,
+    budget: u64,
+    through_turn: u64,
+) -> Option<Digest> {
+    live.iter()
+        .filter(|(_, stream)| {
+            !stream.forwarding.finished.load(Ordering::Acquire)
+                && stream.renewal_turn <= through_turn
+                && now >= stream.retry_after
+                && now
+                    >= refresh_at(
+                        stream.gate.expiry().unwrap_or(0),
+                        budget,
+                        Some(stream.accepted_at),
+                    )
+        })
+        // New arrivals and serviced streams join behind every older eligible stream.
+        .min_by_key(|(id, stream)| (stream.renewal_turn, **id))
+        .map(|(id, _)| *id)
+}
+fn occupied(
+    incoming: usize,
+    handshakes: usize,
+    live: &BTreeMap<Digest, LiveStream>,
+    close: Option<&PendingClose>,
+) -> usize {
+    incoming + handshakes + live.len() + usize::from(close.is_some())
+}
+fn maintenance(
+    now: u64,
+    permission: &EndpointPermission,
+    live: &BTreeMap<Digest, LiveStream>,
+    close: Option<&PendingClose>,
+    own_budget: u64,
+    stream_budget: u64,
+    action_budget: u64,
+) -> Result<Maintenance> {
+    // Cleanup prepares each existing gate at most once. The captured turn
+    // excludes new arrivals and already serviced streams without another queue.
+    // Repeatedly waiting for all gates to be fresh can starve cleanup under load.
+    let close_budget = close
+        .filter(|close| now < close.deadline)
+        .map_or(0, |_| action_budget);
+    if close.is_some_and(|close| now >= close.deadline) {
+        return Ok(Maintenance::Close);
+    }
+    if close.is_none_or(|close| close.own_renewals == permission.renewals)
+        && permission.refresh_due(now, own_budget.saturating_add(close_budget))?
+    {
+        return Ok(Maintenance::Own);
+    }
+    if let Some(id) = due_stream(
+        live,
+        now,
+        stream_budget.saturating_add(close_budget),
+        close.map_or(u64::MAX, |close| close.renewal_turn),
+    ) {
+        return Ok(Maintenance::Stream(id));
+    }
+    Ok(if close.is_some() {
+        Maintenance::Close
+    } else {
+        Maintenance::Wait
+    })
 }
 async fn hello(
     mut session: Session,
@@ -128,7 +752,7 @@ async fn serve(
     forwarding: Arc<Forwarding>,
 ) -> Result<()> {
     let deadline = forwarding.deadline;
-    let _completion = ForwardingCompletion(forwarding.clone());
+    let _completion = ForwardingCompletion(forwarding.clone(), opened.session.timing);
     let session = &mut opened.session;
     let binding = &application.binding;
     let local = tokio::select! {
@@ -163,6 +787,7 @@ async fn serve(
     )
     .await?;
     forwarding.established.store(true, Ordering::Release);
+    session.mark(Phase::ApplicationAccepted);
     let limits = Limits {
         bytes: session.bytes.min(opened.proof.limits.bytes),
         duration_ms: crate::authority_local_transport::remaining(deadline)?,
@@ -260,6 +885,12 @@ pub(super) async fn endpoint(
     let mut handshakes: JoinSet<Result<OpenedStream>> = JoinSet::new();
     let mut forwarding: JoinSet<(Digest, Result<()>)> = JoinSet::new();
     let mut live: BTreeMap<Digest, LiveStream> = BTreeMap::new();
+    let mut reads: JoinSet<checks::ExchangeCompletion> = JoinSet::new();
+    let mut pending: BTreeMap<tokio::task::Id, PendingRead> = BTreeMap::new();
+    let mut held_check: Option<HeldCheck> = None;
+    let mut closing: Option<PendingClose> = None;
+    let mut cleanup_diagnostics = 0;
+    let mut schedule = Schedule::default();
     let mut tick = tokio::time::interval(Duration::from_millis(DISPATCH_MS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -267,75 +898,224 @@ pub(super) async fn endpoint(
     let outcome=async {loop {
         active.check(guard)?;
         if let Some((identity,address))=&relay {
-            while incoming.len()+handshakes.len()+live.len()<capacity && tokio::time::Instant::now()>=retry_after {
+            while occupied(incoming.len(),handshakes.len(),&live,closing.as_ref())<capacity && tokio::time::Instant::now()>=retry_after {
                 let open=Open {network:config.manifest.network,incarnation:config.manifest.incarnation,relay:identity.service,service:own.identity.service,voucher:vec![],nonce:protocol::random()?,attachment:true};
                 incoming.spawn(attach(*address,identity.clone(),acceptor.clone(),config.key.clone(),open,own.limits));
             }
         }
         let now=crate::authority_challenge::boot_time_ms()?;
-        let renew=live.iter().find_map(|(id,s)| (now>=s.retry_after && now>=refresh_at(s.gate.expiry().unwrap_or(0),client.operation_budget_ms(),Some(s.accepted_at))).then_some(*id));
-        let own_due=permission.refresh_due(now,client.own_renewal_budget_ms())?;
+        let close_budget=closing.as_ref().filter(|close|now<close.deadline).map_or(0,|_|client.operation_budget_ms());
+        let own_due=permission.refresh_due(now,client.own_renewal_budget_ms().saturating_add(close_budget))?;
+        let stream_due=due_stream(&live,now,client.stream_renewal_budget_ms().saturating_add(close_budget),u64::MAX);
+        let close_work=closing.as_ref().filter(|close|now>=close.retry_after).map(|close|maintenance(now,&permission,&live,Some(close),client.own_renewal_budget_ms(),client.stream_renewal_budget_ms(),client.operation_budget_ms())).transpose()?;
         let public=listener.is_some();
-        let (listener_tasks,listener_requests)=listener.as_mut().map(|l|(&mut l.tasks,&mut l.requests)).unzip();
-        tokio::select! {
+        let can_fill=held_check.is_none() && schedule.fill_end(now).is_some();
+        let holding_close=held_check.as_ref().filter(|held|held.close.is_some() && held.check.can_wait(now)).is_some_and(|held|held.waiting(now,closing.as_ref().and_then(|close|close.ordinary(client))));
+        let (listener_tasks,mut listener_requests)=listener.as_mut().map(|l|(&mut l.tasks,&mut l.requests)).unzip();
+        let next=tokio::select! {
             biased;
             _=tokio::signal::ctrl_c()=>break,
             _=terminate.recv()=>break,
-            result=forwarding.join_next(),if !forwarding.is_empty()=>{
-                if let Some(Ok((id,_result)))=result && let Some(s)=live.remove(&id) {
-                    s.gate.close();let _=client.before(now.saturating_add(own.limits.idle_ms),|client|client.stream_close(&s.reference));
-                }
-            },
-            _=std::future::ready(()),if own_due=>{
+            stopped=async {listener_tasks.expect("enabled listener").join_next().await},if public=>{stopped.context("application listener stopped")???;anyhow::bail!("application listener stopped");},
+            next=schedule.next(!pending.is_empty(),|class,cx|match class {
+                Dispatch::Own if own_due=>std::task::Poll::Ready(Event::Maintenance(Maintenance::Own)),
+                Dispatch::Stream if stream_due.is_some()=>std::task::Poll::Ready(Event::Maintenance(Maintenance::Stream(stream_due.expect("due stream")))),
+                Dispatch::Complete=>event(reads.poll_join_next_with_id(cx),Event::Checked),
+                Dispatch::Check if !holding_close=>match held_check.take() {
+                    Some(check)=>std::task::Poll::Ready(Event::Check(check)),
+                    None=>event(check_requests.poll_recv(cx),|check|Event::Check(HeldCheck::ready(check))),
+                },
+                Dispatch::Fill if can_fill=>event(check_requests.poll_recv(cx),|check|Event::Check(HeldCheck::ready(check))),
+                Dispatch::Handshake if !handshakes.is_empty()=>event(handshakes.poll_join_next(cx),Event::Handshake),
+                Dispatch::Incoming if !incoming.is_empty()=>event(incoming.poll_join_next(cx),Event::Incoming),
+                Dispatch::Public if public=>event(listener_requests.as_mut().expect("enabled listener").poll_recv(cx),Event::Public),
+                Dispatch::Forwarding if !forwarding.is_empty() && closing.is_none()=>event(forwarding.poll_join_next(cx),Event::Forwarding),
+                Dispatch::Close if close_work.is_some()=>std::task::Poll::Ready(Event::Maintenance(close_work.expect("held cleanup"))),
+                _=>std::task::Poll::Pending,
+            })=>next,
+            _=demand.notified()=>continue,
+            _=tick.tick()=>continue,
+        };
+        match next {
+            Event::Maintenance(Maintenance::Own)=>{
                 permission.refresh(client,now.saturating_add(own.limits.idle_ms))?;active.check(guard)?;
             },
-            _=std::future::ready(()),if renew.is_some()=>{
-                let id=renew.expect("selected stream renewal");let s=live.get_mut(&id).expect("selected live stream");
+            Event::Maintenance(Maintenance::Stream(id))=>{
+                let s=live.get_mut(&id).expect("selected live stream");
+                s.renewal_turn=schedule.renewed()?;
                 if now>=s.forwarding.deadline {s.gate.close();s.retry_after=u64::MAX;continue;}
-                match clock_checked(client.before(s.forwarding.deadline.min(now.saturating_add(own.limits.idle_ms)),|client|client.stream_permit(&s.reference)))? {
-                    Ok(expiry)=>{s.gate.renew(expiry)?;s.accepted_at=crate::authority_challenge::boot_time_ms()?;s.retry_after=0;},
-                    Err(error)=>{if error.is::<ReadRetry>() {s.retry_after=now.saturating_add(READ_RETRY_MS);} else {s.gate.close();s.retry_after=u64::MAX;}},
+                let deadline=s.forwarding.deadline.min(now.saturating_add(own.limits.idle_ms));
+                if !s.forwarding.established.load(Ordering::Acquire) {
+                    // Handshake writes may need the original synchronous renewal
+                    // before the established-stream worker contract is available.
+                    match clock_checked(observed(Activity::StreamPermit,deadline,None,||client.before(deadline,|client|client.stream_permit(&s.reference))))? {
+                        Ok(expiry)=>{s.gate.renew(expiry)?;s.accepted_at=crate::authority_challenge::boot_time_ms()?;s.retry_after=0;},
+                        Err(error)=>{if error.is::<ReadRetry>() {s.retry_after=now.saturating_add(READ_RETRY_MS);} else {s.gate.close();s.retry_after=u64::MAX;}},
+                    }
+                    continue;
+                }
+                let mut context=RenewalContext::capture(s,deadline,now);
+                let timing=ActivityTiming::start(Activity::StreamPermit,deadline,None);
+                // Recovery remains exclusive before this round; only the immutable
+                // fresh Permit exchange may overlap action-bound checks.
+                let prepared=context.current(s,&permission,now).and_then(|()|
+                    client.before(deadline,|client|client.prepare_stream_renewal(&context.reference)));
+                let read=match prepared {
+                    Ok(read)=>read,
+                    Err(error)=>{
+                        let result=Err::<(),_>(error);
+                        timing.finish(&result);
+                        if let Err(error)=clock_checked(result)? {context.failed(s,&error);}
+                        continue;
+                    },
+                };
+                context.deadline=context.deadline.min(read.deadline());
+                let exchange=read.exchange();
+                let clock=guard.clock_source();
+                let worker_context=context.clone();
+                let stream_gate=s.gate.clone();
+                let endpoint_gate=permission.gate.clone();
+                schedule.begin_round(1);
+                schedule.initial_issue(context.deadline);
+                let task=reads.spawn_blocking(move || checks::ExchangeCompletion::capture(false,crate::authority_challenge::boot_time_ms,||exchange.run(||{
+                    worker_context.exchange_current(&stream_gate,&endpoint_gate,crate::authority_challenge::boot_time_ms()?)?;
+                    clock.health()
+                })));
+                pending.insert(task.id(),PendingRead {read,owner:ReadOwner::Renewal {context,timing}});
+            },
+            Event::Maintenance(Maintenance::Close)=>{
+                if closing.as_mut().expect("selected stream cleanup").attempt(client,&mut cleanup_diagnostics) {closing=None;}
+            },
+            Event::Maintenance(Maintenance::Wait)=>unreachable!("held cleanup always has work"),
+            Event::Forwarding(result)=>{
+                if let Ok((id,_result))=result && let Some(stream)=live.remove(&id) {
+                    closing=Some(PendingClose::completed(stream,crate::authority_challenge::boot_time_ms()?,own.limits.idle_ms,permission.renewals,schedule.renewal_turn));
                 }
             },
-            result=handshakes.join_next(),if !handshakes.is_empty()=>{
-                if let Some(Ok(Ok(opened)))=result {
+            Event::Handshake(result)=>{
+                if let Ok(Ok(opened))=result {
                     let id=opened.proof.id()?;
                     if live.contains_key(&id) {continue;}
-                    permission.current(client,opened.session.deadline)?;
-                    let admitted=clock_checked(client.before(opened.session.deadline,|client|client.stream_admit(opened.proof.clone())))?;
+                    observed(Activity::HandshakePermission,opened.session.deadline,Some(opened.session.timing),||permission.current(client,opened.session.deadline))?;
+                    let admitted=clock_checked(observed(Activity::StreamAdmission,opened.session.deadline,Some(opened.session.timing),||client.before(opened.session.deadline,|client|client.stream_admit(opened.proof.clone()))))?;
                     if let Ok(reference)=admitted {
                         active.check(guard)?;
                         let now=crate::authority_challenge::boot_time_ms()?;
                         let deadline=opened.session.deadline.min(now.saturating_add(opened.proof.expires.saturating_sub(client.now()?))).min(now.saturating_add(opened.proof.limits.duration_ms));
                         let gate=route_io::Gate::with_signal(client.effect_deadline()?,demand.clone());
                         let status=Arc::new(Forwarding {deadline,established:AtomicBool::new(false),finished:AtomicBool::new(false)});
-                        live.insert(id,LiveStream {reference:reference.clone(),gate:gate.clone(),accepted_at:now,retry_after:0,forwarding:status.clone()});
+                        live.insert(id,LiveStream {reference:reference.clone(),proof_digest:wire::digest(&opened.proof.envelope),gate:gate.clone(),accepted_at:now,retry_after:0,renewal_turn:schedule.renewed()?,forwarding:status.clone()});
                         let application=application.clone();let key=config.key.clone();let endpoint_gate=permission.gate.clone();
                         forwarding.spawn(async move {(id,serve(opened,reference,application,key,gate,endpoint_gate,status).await)});
                     }
                 }
             },
-            stopped=async {listener_tasks.expect("enabled listener").join_next().await},if public=>{stopped.context("application listener stopped")???;anyhow::bail!("application listener stopped");},
-            request=async {listener_requests.expect("enabled listener").recv().await},if public=>{
-                if let Some(Queued {mut request,slot,deadline,started,..})=request {
-                    if crate::authority_local_transport::remaining(deadline).is_err(){continue;}
-                    request.deadline=request.deadline.min(started.saturating_add(own.limits.duration_ms));request.slot=Some(slot);
-                    permission.current(client,deadline)?;active.check(guard)?;
-                    handshakes.spawn(hello(request,application.clone(),ready.clone(),permission.gate.clone()));
-                }
+            Event::Public(Queued {mut request,slot,deadline,started,..})=>{
+                if crate::authority_local_transport::remaining(deadline).is_err(){continue;}
+                request.deadline=request.deadline.min(started.saturating_add(own.limits.duration_ms));request.slot=Some(slot);
+                observed(Activity::IncomingPermission,deadline,Some(request.timing),||permission.current(client,deadline))?;active.check(guard)?;
+                handshakes.spawn(hello(request,application.clone(),ready.clone(),permission.gate.clone()));
             },
-            result=incoming.join_next(),if !incoming.is_empty()=>{
-                if let Some(Ok(Ok(session)))=result {
-                    permission.current(client,session.deadline)?;active.check(guard)?;
+            Event::Incoming(result)=>{
+                if let Ok(Ok(session))=result {
+                    observed(Activity::IncomingPermission,session.deadline,Some(session.timing),||permission.current(client,session.deadline))?;active.check(guard)?;
                     handshakes.spawn(hello(session,application.clone(),ready.clone(),permission.gate.clone()));
                 } else {retry_after=tokio::time::Instant::now()+Duration::from_millis(own.limits.idle_ms.min(1000));}
             },
-            Some(check)=check_requests.recv()=>{
-                let receipt=checks::evaluate(&check,&mut live,&mut permission,client,guard,active);
-                if check.connected.load(Ordering::Acquire) && !check.cancelled.load(Ordering::Acquire) {let _=check.reply.send(receipt);}
+            Event::Check(mut held)=>{
+                let now=crate::authority_challenge::boot_time_ms()?;
+                if pending.is_empty() && let Some(close)=closing.as_ref()
+                    && held.defer_close(now,close.ordinary(client),close.deadline) {
+                    held_check=Some(held);
+                    continue;
+                }
+                let Some(check)=held.into_check(now) else {continue};
+                let mut prepared=Vec::with_capacity(streams::control::MAXIMUM_PENDING);
+                let fill_end=if pending.is_empty() {
+                    let cohort=checks::cohort(check,&mut check_requests);
+                    schedule.begin_round(cohort.len());
+                    for check in cohort {
+                        match checks::prepare(&check,&mut live,&mut permission,client,guard,active) {
+                            Ok(checks::Preparation::Ready)=>prepared.push(check),
+                            Ok(checks::Preparation::Complete(receipt))=>{let receipt=check.complete(Ok(*receipt));check.respond(receipt);},
+                            Err(error)=>{let receipt=check.complete(Err(error));check.respond(receipt);},
+                        }
+                    }
+                    None
+                } else {
+                    let Some(end)=schedule.admit_fill(crate::authority_challenge::boot_time_ms()?) else {
+                        schedule.round_open=false;
+                        held_check=Some(HeldCheck::ready(check));
+                        continue;
+                    };
+                    prepared.push(check);
+                    Some(end)
+                };
+                // Readiness for the initial batch finishes before any challenge.
+                // Filling an unused slot only issues against current gates and
+                // cannot publish a floor or extend this already fixed round end.
+                for check in prepared {
+                    let issued=match fill_end {
+                        Some(end)=>checks::issue_current(&check,end,&live,&permission,client,guard,active),
+                        None=>checks::issue(&check,&live,&permission,client,guard,active),
+                    };
+                    let read=match issued {
+                        Ok(read)=>read,
+                        Err(error) if fill_end.is_some() && checks::needs_preparation(&error)=>{
+                            schedule.round_open=false;
+                            held_check=Some(HeldCheck::ready(check));
+                            continue;
+                        },
+                        Err(error)=>{let receipt=check.complete(Err(error));check.respond(receipt);continue;},
+                    };
+                    if fill_end.is_none() { schedule.initial_issue(read.deadline()); }
+                    let exchange=read.exchange();
+                    let clock=guard.clock_source();
+                    let connected=check.connected.clone();
+                    let cancelled=check.cancelled.clone();
+                    let stream=live.get(&check.request.session.id).expect("issued live stream");
+                    let forwarding=stream.forwarding.clone();
+                    let stream_gate=stream.gate.clone();
+                    let endpoint_gate=permission.gate.clone();
+                    let sampled=check.sampled();
+                    let task=reads.spawn_blocking(move || checks::ExchangeCompletion::capture(sampled,crate::authority_challenge::boot_time_ms,|| exchange.run(|| {
+                        ensure!(connected.load(Ordering::Acquire) && !cancelled.load(Ordering::Acquire), "application check cancelled");
+                        ensure!(forwarding.established.load(Ordering::Acquire) && !forwarding.finished.load(Ordering::Acquire), "application stream is no longer current");
+                        crate::authority_local_transport::remaining(stream_gate.expiry()?.min(endpoint_gate.expiry()?))?;
+                        clock.health()
+                    })));
+                    pending.insert(task.id(),PendingRead {read,owner:ReadOwner::Check(Box::new(check))});
+                }
             },
-            _=demand.notified()=>{},
-            _=tick.tick()=>{},
+            Event::Checked(result)=>{
+                let (id,completion)=match result {Ok(result)=>result,Err(error)=>(error.id(),checks::ExchangeCompletion {result:Err(error.into()),started:None,completed:None})};
+                let PendingRead {read,owner}=pending.remove(&id).context("application read worker has no owner")?;
+                match owner {
+                    ReadOwner::Check(check)=>{
+                        check.record_exchange(&completion);
+                        let receipt=checks::finish(&check,read,completion.result,&mut live,&mut permission,&own.envelope,client,guard,active);
+                        check.respond(receipt);
+                    },
+                    ReadOwner::Renewal {context,timing}=>{
+                        let current=active.check(guard).and_then(|()|{
+                            let stream=live.get(&context.reference.id).context("renewing stream disappeared")?;
+                            context.current(stream,&permission,crate::authority_challenge::boot_time_ms()?)
+                        });
+                        let result=match current {
+                            Err(error)=>client.discard_read(read).and(Err(error)),
+                            Ok(())=>client.finish_check_stream(read,completion.result,&context.reference,|_|{}).and_then(|observation|{
+                                active.check(guard)?;
+                                let stream=live.get_mut(&context.reference.id).context("renewing stream disappeared")?;
+                                context.install(observation,stream,&permission,&own.envelope)
+                            }),
+                        };
+                        timing.finish(&result);
+                        if let Err(error)=clock_checked(result)? && let Some(stream)=live.get_mut(&context.reference.id) {
+                            context.failed(stream,&error);
+                        }
+                    },
+                }
+            },
         }
     }Ok(())}.await;
     permission.gate.close();
@@ -346,6 +1126,17 @@ pub(super) async fn endpoint(
     for stream in live.values() {
         stream.gate.close();
     }
+    check_requests.close();
+    if let Some(check) = held_check.take() {
+        check.check.cancelled.store(true, Ordering::Release);
+    }
+    while check_requests.try_recv().is_ok() {}
+    for read in pending.values() {
+        match &read.owner {
+            ReadOwner::Check(check) => check.cancelled.store(true, Ordering::Release),
+            ReadOwner::Renewal { context, .. } => context.cancelled.store(true, Ordering::Release),
+        }
+    }
     incoming.abort_all();
     handshakes.abort_all();
     forwarding.abort_all();
@@ -355,14 +1146,36 @@ pub(super) async fn endpoint(
     drain(&mut incoming).await;
     drain(&mut handshakes).await;
     drain(&mut forwarding).await;
+    // Blocking exchanges keep their captured absolute end (at most five seconds).
+    // Join them instead of detaching work, then discard each actor-owned challenge.
+    while reads.join_next().await.is_some() {}
+    let mut discard_error = None;
+    for (_, pending) in pending {
+        if let Err(error) = client.discard_read(pending.read) {
+            discard_error.get_or_insert(error);
+        }
+    }
+    if let Some(mut close) = closing {
+        close.attempt(client, &mut cleanup_diagnostics);
+    }
     // Failed closure retains a spent slot until its original wall-clock expiry.
     for stream in live.values() {
-        let _ = client.before(
-            crate::authority_challenge::boot_time_ms()?.saturating_add(1000),
-            |client| client.stream_close(&stream.reference),
-        );
+        let deadline = crate::authority_challenge::boot_time_ms()?.saturating_add(1000);
+        let _ = client.before(deadline, |client| {
+            client.stream_close(
+                &stream.reference,
+                stream.proof_digest,
+                |stage, client, error| {
+                    cleanup_failure(stage, client, error, deadline);
+                },
+            )
+        });
     }
-    outcome
+    outcome?;
+    if let Some(error) = discard_error {
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

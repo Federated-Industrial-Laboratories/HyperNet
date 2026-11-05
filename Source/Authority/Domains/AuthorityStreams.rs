@@ -275,6 +275,7 @@ pub enum Command {
     Admit { proof: Proof },
     Inspect { proof: Proof },
     Permit { session: VersionRef },
+    RetirementContext { session: VersionRef },
     Close { session: VersionRef },
     Withdraw { service: VersionRef },
 }
@@ -318,7 +319,10 @@ impl Command {
                     Self::Inspect { proof }
                 }
             }
-            name @ ("StreamPermit" | "StreamClose" | "StreamWithdraw") => {
+            name @ ("StreamPermit"
+            | "StreamRetirementContext"
+            | "StreamClose"
+            | "StreamWithdraw") => {
                 let f = v.array(2)?;
                 let r = version(&f[1])?;
                 ensure!(
@@ -327,6 +331,7 @@ impl Command {
                 );
                 match name {
                     "StreamPermit" => Self::Permit { session: r },
+                    "StreamRetirementContext" => Self::RetirementContext { session: r },
                     "StreamClose" => Self::Close { session: r },
                     _ => Self::Withdraw { service: r },
                 }
@@ -343,6 +348,7 @@ impl Command {
             Self::Admit { .. } => "StreamAdmit",
             Self::Inspect { .. } => "StreamInspect",
             Self::Permit { .. } => "StreamPermit",
+            Self::RetirementContext { .. } => "StreamRetirementContext",
             Self::Close { .. } => "StreamClose",
             Self::Withdraw { .. } => "StreamWithdraw",
         }
@@ -354,7 +360,9 @@ impl Command {
             Self::Register { registration } => v.push(b(&registration.envelope)),
             Self::Lookup { service, slot } => v.extend([b(service), V::Uint(*slot)]),
             Self::Admit { proof } | Self::Inspect { proof } => v.push(b(&proof.envelope)),
-            Self::Permit { session } | Self::Close { session } => v.push(reference(session)),
+            Self::Permit { session }
+            | Self::RetirementContext { session }
+            | Self::Close { session } => v.push(reference(session)),
             Self::Withdraw { service } => v.push(reference(service)),
         };
         a(v)
@@ -364,7 +372,9 @@ impl Command {
             Self::Context { service, .. } | Self::Lookup { service, .. } => *service,
             Self::Register { registration } => registration.id,
             Self::Admit { proof } | Self::Inspect { proof } => proof.service.id,
-            Self::Permit { session } | Self::Close { session } => session.id,
+            Self::Permit { session }
+            | Self::RetirementContext { session }
+            | Self::Close { session } => session.id,
             Self::Withdraw { service } => service.id,
         }
     }

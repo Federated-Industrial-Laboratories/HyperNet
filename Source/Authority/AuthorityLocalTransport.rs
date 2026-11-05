@@ -47,7 +47,9 @@ pub(crate) fn transport_closed(error: &anyhow::Error) -> bool {
 pub struct LocalControl {
     directory: File,
     name: CString,
+    acknowledgement_of: Option<CString>,
 }
+pub(crate) const READ_ACK_SOCKET: &str = "ReadAcknowledgements.sock";
 impl LocalControl {
     pub fn open(path: &Path) -> Result<Self> {
         let parent = path
@@ -58,17 +60,40 @@ impl LocalControl {
             .context("control socket filename required")?;
         let directory = files::private_directory(parent)?;
         let name = CString::new(name.as_bytes())?;
-        let this = Self { directory, name };
+        let this = Self {
+            directory,
+            name,
+            acknowledgement_of: None,
+        };
         this.socket_stat()?;
         Ok(this)
     }
     fn socket_stat(&self) -> Result<libc::stat> {
+        let stat = self.stat_named(&self.name)?;
+        if let Some(original) = &self.acknowledgement_of {
+            let control = self.stat_named(original)?;
+            ensure!(
+                stat.st_dev == control.st_dev && stat.st_ino == control.st_ino,
+                "private cleanup alias differs from the control socket"
+            );
+        }
+        Ok(stat)
+    }
+    fn acknowledgement_target(mut self) -> Result<Self> {
+        self.acknowledgement_of = Some(std::mem::replace(
+            &mut self.name,
+            CString::new(READ_ACK_SOCKET)?,
+        ));
+        self.socket_stat()?;
+        Ok(self)
+    }
+    fn stat_named(&self, name: &CString) -> Result<libc::stat> {
         let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
         ensure!(
             unsafe {
                 libc::fstatat(
                     self.directory.as_raw_fd(),
-                    self.name.as_ptr(),
+                    name.as_ptr(),
                     stat.as_mut_ptr(),
                     libc::AT_SYMLINK_NOFOLLOW,
                 )
@@ -84,7 +109,7 @@ impl LocalControl {
         );
         Ok(stat)
     }
-    fn connect(&self, deadline: u64) -> Result<UnixStream> {
+    fn connect(&self, deadline: u64, wait: bool) -> Result<UnixStream> {
         remaining(deadline)?;
         let before = self.socket_stat()?;
         let descriptor = unsafe {
@@ -124,6 +149,10 @@ impl LocalControl {
                     Some(libc::EINPROGRESS) | Some(libc::EAGAIN)
                 ),
                 "private control connection failed: {error}"
+            );
+            ensure!(
+                wait,
+                "private cleanup connection is not immediately available"
             );
             ready(&stream, libc::POLLOUT, deadline)?;
             if let Some(error) = stream.take_error()? {
@@ -173,7 +202,7 @@ impl LocalControl {
             !request.is_empty() && request.len() <= wire::MAXIMUM,
             "local control request exceeds bound"
         );
-        let mut stream = self.connect(deadline)?;
+        let mut stream = self.connect(deadline, true)?;
         write_all(&mut stream, &(request.len() as u32).to_be_bytes(), deadline)?;
         write_all(&mut stream, request, deadline)?;
         let mut length = [0; 4];
@@ -187,28 +216,108 @@ impl LocalControl {
         read_all(&mut stream, &mut response, deadline)?;
         Ok(response)
     }
+    fn notify_once(&self, request: &[u8], deadline: u64) -> Result<()> {
+        ensure!(
+            request.len() <= crate::authority_read::Acknowledgement::MAXIMUM,
+            "private cleanup frame exceeds bound"
+        );
+        let mut stream = self.connect(deadline, false)?;
+        let mut frame = Vec::with_capacity(4 + request.len());
+        frame.extend_from_slice(&(request.len() as u32).to_be_bytes());
+        frame.extend_from_slice(request);
+        remaining(deadline)?;
+        ensure!(
+            stream.write(&frame)? == frame.len(),
+            "private cleanup frame incomplete"
+        );
+        Ok(())
+    }
+}
+
+/// Local senders may close after this bounded cleanup frame; a connector drains its remote receipt.
+pub(crate) fn is_read_acknowledgement(bytes: &[u8]) -> bool {
+    let parsed = || -> Result<bool> {
+        let value = wire::decode(bytes)?;
+        let fields = record(&value, 41, 5)?;
+        Ok(fields[3].uint()? == 8)
+    };
+    parsed().unwrap_or(false)
+}
+
+/// Cleanup never waits for a reply, retries, or changes the consumed authority outcome.
+pub(crate) fn acknowledge_read(
+    consumed: &crate::authority_floor::ConsumedRead,
+    key: &ed25519_dalek::SigningKey,
+    deadline: u64,
+    path: &Path,
+) {
+    let send = || -> Result<()> {
+        remaining(deadline)?;
+        // Absence or substitution skips optional cleanup without contacting a legacy listener.
+        let target = LocalControl::open(path)?.acknowledgement_target()?;
+        let signed = consumed.acknowledgement(key, deadline)?;
+        let acknowledgement = crate::authority_read::Acknowledgement::from_signed(&signed)?;
+        let packet = wire::encode(&a(vec![
+            V::Uint(41),
+            V::Uint(1),
+            acknowledgement.scope.value(),
+            V::Uint(8),
+            b(&signed),
+        ]))?;
+        target.notify_once(&packet, deadline)
+    };
+    let _ = send();
 }
 fn ready(stream: &UnixStream, event: libc::c_short, deadline: u64) -> Result<()> {
     loop {
-        let remaining = remaining(deadline)?;
+        let wait_ms = remaining(deadline)?;
         let mut descriptor = libc::pollfd {
             fd: stream.as_raw_fd(),
             events: event,
             revents: 0,
         };
-        let status =
-            unsafe { libc::poll(&mut descriptor, 1, remaining.min(i32::MAX as u64) as i32) };
-        if status < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
-            continue;
+        let status = unsafe { libc::poll(&mut descriptor, 1, wait_ms.min(i32::MAX as u64) as i32) };
+        if status < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error.into());
         }
-        ensure!(
-            status > 0
-                && descriptor.revents & event != 0
-                && descriptor.revents & (libc::POLLERR | libc::POLLNVAL) == 0,
-            "private control readiness failed or timed out"
-        );
+        if status == 0 {
+            return Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into());
+        }
+        remaining(deadline)?;
+        return ready_events(stream, event, descriptor.revents);
+    }
+}
+fn ready_events(stream: &UnixStream, event: libc::c_short, events: libc::c_short) -> Result<()> {
+    if events & libc::POLLNVAL != 0 {
+        return Err(std::io::Error::from_raw_os_error(libc::EBADF).into());
+    }
+    // A closed peer can leave a complete response buffered. Drain it before
+    // observing EOF or a pending socket error; normal reply verification still applies.
+    if event == libc::POLLIN && events & libc::POLLIN != 0 {
         return Ok(());
     }
+    if events & libc::POLLERR != 0
+        && let Some(error) = stream.take_error()?
+    {
+        return Err(error.into());
+    }
+    if events & libc::POLLHUP != 0 {
+        return Err(if event == libc::POLLIN {
+            ControlClosed::Read
+        } else {
+            ControlClosed::Write
+        }
+        .into());
+    }
+    ensure!(
+        events & event != 0 && events & libc::POLLERR == 0,
+        "private control readiness failed or timed out"
+    );
+    Ok(())
 }
 fn write_all(stream: &mut UnixStream, mut bytes: &[u8], deadline: u64) -> Result<()> {
     while !bytes.is_empty() {

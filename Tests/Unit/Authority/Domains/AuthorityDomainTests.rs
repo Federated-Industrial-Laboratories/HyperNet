@@ -9,6 +9,66 @@ use sha2::{Digest as _, Sha512};
 fn public(seed: u8) -> Key {
     deployment::key(seed).verifying_key().to_bytes()
 }
+
+#[test]
+fn governance_replacement_preserves_other_records_and_retained_generation_checks() {
+    let f = Fixture::new();
+    let network = f.state.network;
+    let incarnation = f.state.incarnation;
+    let old_refs = Governance::record_versions(network, incarnation, &f.records).unwrap();
+    let returned = f.records[..2]
+        .iter()
+        .zip(&old_refs)
+        .map(|(bytes, old)| {
+            let V::Array(mut fields) = wire::decode(bytes).unwrap() else {
+                panic!("governance record must be an array")
+            };
+            fields[4] = V::Uint(old.generation + 1);
+            fields[5] = b(&old.digest);
+            *fields.last_mut().unwrap() = deployment::snapshot(&old_refs);
+            wire::encode(&V::Array(fields)).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let refs = Governance::record_versions(network, incarnation, &returned).unwrap();
+    let mut prior = f.records.clone();
+    // Covered prior duplicates are all replaced; unrelated records remain exact.
+    prior.push(f.records[0].clone());
+    let selected =
+        result::replace_governance(network, incarnation, &prior, &returned, &refs).unwrap();
+    assert_eq!(selected.len(), f.records.len());
+    assert_eq!(&selected[..2], &returned);
+    assert_eq!(&selected[2..], &f.records[2..]);
+    let current = Governance::record_versions(network, incarnation, &selected).unwrap();
+    result::minimum(&current, &old_refs).unwrap();
+    assert!(result::minimum(&old_refs, &current).is_err());
+    assert_eq!(
+        result::replace_governance(network, incarnation, &f.records, &[], &[]).unwrap(),
+        f.records
+    );
+}
+
+#[test]
+fn governance_replacement_does_not_hide_malformed_retained_records() {
+    let f = Fixture::new();
+    let network = f.state.network;
+    let incarnation = f.state.incarnation;
+    let returned = &f.records[..1];
+    let refs = Governance::record_versions(network, incarnation, returned).unwrap();
+    let V::Array(mut fields) = wire::decode(&f.records[0]).unwrap() else {
+        panic!("governance record must be an array")
+    };
+    fields[4] = V::Uint(0);
+    let malformed = wire::encode(&V::Array(fields)).unwrap();
+    let mut prior = f.records.clone();
+    prior.push(malformed.clone());
+    let selected =
+        result::replace_governance(network, incarnation, &prior, returned, &refs).unwrap();
+    assert!(selected.contains(&malformed));
+    assert!(Governance::record_versions(network, incarnation, &selected).is_err());
+    prior.push(vec![0xff]);
+    assert!(result::replace_governance(network, incarnation, &prior, returned, &refs).is_err());
+}
+
 fn native_proof(network: Digest, member: Key, signer: &SigningKey) -> String {
     fn field(bytes: &mut Vec<u8>, value: &[u8]) {
         bytes.extend((value.len() as u32).to_be_bytes());

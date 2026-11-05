@@ -106,6 +106,36 @@ fn private_authority_reads_keep_their_own_pending_identity_and_closed_protocol()
     assert!(validate_packet(1, scope.network, scope.incarnation, &submit(invalid)).is_err());
     assert!(validate_packet(1, [9; 32], scope.incarnation, &request).is_err());
     assert!(validate_packet(1, scope.network, scope.incarnation, &frame(5, vec![])).is_err());
+    let statement = crate::authority_read::Statement {
+        scope: scope.clone(),
+        request: crate::authority_read::Request::from_signed(&signed)
+            .unwrap()
+            .digest,
+        challenge: crate::authority_proof::Challenge::from_signed(&challenge)
+            .unwrap()
+            .digest,
+        requester: key.verifying_key().to_bytes(),
+        recipient: key.verifying_key().to_bytes(),
+        height: 0,
+        node: [11; 32],
+        state: [12; 32],
+        evaluated_at_ms: 10_000,
+        expires_at_ms: 14_000,
+        result: [13; 32],
+    };
+    let signed_ack =
+        crate::authority_read::Acknowledgement::sign(&statement, &key, 13_500).unwrap();
+    let acknowledgement = frame(8, signed_ack.clone());
+    assert!(validate_packet(1, scope.network, scope.incarnation, &acknowledgement).is_ok());
+    assert!(!authority_request_pending(&acknowledgement, &reply));
+    assert!(validate_packet(2, scope.network, scope.incarnation, &acknowledgement).is_err());
+    let mut malformed = signed_ack.clone();
+    *malformed.last_mut().unwrap() ^= 1;
+    assert!(validate_packet(1, scope.network, scope.incarnation, &frame(8, malformed)).is_err());
+    let mut other = statement;
+    other.scope.epoch += 1;
+    let other = crate::authority_read::Acknowledgement::sign(&other, &key, 13_500).unwrap();
+    assert!(validate_packet(1, scope.network, scope.incarnation, &frame(8, other)).is_err());
 }
 
 #[test]

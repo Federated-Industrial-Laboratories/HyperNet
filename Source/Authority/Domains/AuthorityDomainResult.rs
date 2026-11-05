@@ -13,6 +13,36 @@ use crate::{
 fn references(records: &[Vec<u8>], n: Digest, i: Digest) -> Result<Vec<VersionRef>> {
     Governance::record_versions(n, i, records)
 }
+// The result decoder supplies the parsed references after checking its exact closure.
+// Parse each retained record once, rather than once for every returned record.
+pub(crate) fn replace_governance(
+    network: Digest,
+    incarnation: Digest,
+    prior: &[Vec<u8>],
+    returned: &[Vec<u8>],
+    returned_refs: &[VersionRef],
+) -> Result<Vec<Vec<u8>>> {
+    ensure!(
+        returned.len() == returned_refs.len(),
+        "governance closure differs"
+    );
+    let replaced = returned_refs
+        .iter()
+        .map(VersionRef::index)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut selected = prior
+        .iter()
+        .filter(|old| {
+            replaced.is_empty()
+                || !references(std::slice::from_ref(old), network, incarnation)
+                    .is_ok_and(|refs| replaced.contains(&refs[0].index()))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    selected.extend_from_slice(returned);
+    membership::sort_records(&mut selected)?;
+    Ok(selected)
+}
 fn record(value: &V, kind: u64, arity: usize) -> Result<&[V]> {
     let f = value.array(arity)?;
     ensure!(
@@ -194,15 +224,13 @@ pub fn verify(
         exact_refs == versions,
         "domain result references differ from its exact records"
     );
-    let mut selected = prior_records.to_vec();
-    for (r, bytes) in gov_refs.iter().zip(&governance) {
-        selected.retain(|old| {
-            !references(std::slice::from_ref(old), scope.network, scope.incarnation)
-                .is_ok_and(|v| v[0].index() == r.index())
-        });
-        selected.push(bytes.clone());
-    }
-    membership::sort_records(&mut selected)?;
+    let selected = replace_governance(
+        scope.network,
+        scope.incarnation,
+        prior_records,
+        &governance,
+        &gov_refs,
+    )?;
     let source = merge(bootstrap, &selected)?;
     let source_context = matches!(
         &operation.command,

@@ -15,7 +15,7 @@ pub fn validate(network: Digest, incarnation: Digest, packet: &[u8]) -> Result<(
             && fields[1].uint()? == 1
             && scope.network == network
             && scope.incarnation == incarnation
-            && matches!(fields[3].uint()?, 0..=4 | 6 | 7),
+            && matches!(fields[3].uint()?, 0..=4 | 6 | 7 | 8),
         "authority endpoint refuses management or foreign control frames"
     );
     let body = if matches!(fields[3].uint()?, 1 | 7) {
@@ -72,6 +72,14 @@ pub fn validate(network: Digest, incarnation: Digest, packet: &[u8]) -> Result<(
                 "fresh read submission context differs"
             );
             crate::authority_read::read_id(body[0].bytes()?, body[1].bytes()?)?;
+        }
+        8 => {
+            let acknowledgement =
+                crate::authority_read::Acknowledgement::from_signed(fields[4].bytes()?)?;
+            ensure!(
+                acknowledgement.scope == scope,
+                "fresh acknowledgement context differs"
+            );
         }
         _ => unreachable!(),
     }

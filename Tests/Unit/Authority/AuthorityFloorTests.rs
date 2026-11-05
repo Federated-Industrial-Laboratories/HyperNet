@@ -12,7 +12,7 @@ use std::{
 };
 
 #[path = "AuthorityReadFloorTests.rs"]
-mod read;
+pub(crate) mod read;
 
 #[path = "AuthorityFloorClockTests.rs"]
 mod clock;

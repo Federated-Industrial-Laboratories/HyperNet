@@ -1011,6 +1011,62 @@ impl AsyncWrite for Backpressure {
     }
 }
 #[tokio::test]
+async fn private_authority_cleanup_alpn_preserves_legacy_clients_and_servers() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (_, certificate) = certificates();
+    for (new_client, new_server) in [(false, false), (false, true), (true, false), (true, true)] {
+        let mut server =
+            route_tls::server(&certificate.identity, &certificate.pem, &certificate.key).unwrap();
+        if new_server {
+            Arc::make_mut(&mut server).alpn_protocols =
+                vec![route_tls::READ_ACK_ALPN.to_vec(), route_tls::ALPN.to_vec()];
+        }
+        let client = if new_client {
+            route_tls::endpoint_client(&certificate.identity, 1).unwrap()
+        } else {
+            route_tls::client(&certificate.identity).unwrap()
+        };
+        let acceptor = TlsAcceptor::from(server);
+        let connector = TlsConnector::from(client);
+        let (client, server) = tokio::io::duplex(65536);
+        let (server, client) = tokio::join!(
+            acceptor.accept(server),
+            connector.connect(
+                rustls::pki_types::ServerName::try_from(certificate.identity.server_name.clone())
+                    .unwrap(),
+                client
+            )
+        );
+        let mut server = server.unwrap();
+        let mut client = client.unwrap();
+        let expected = if new_client && new_server {
+            route_tls::READ_ACK_ALPN
+        } else {
+            route_tls::ALPN
+        };
+        assert_eq!(client.get_ref().1.alpn_protocol(), Some(expected));
+        assert_eq!(server.get_ref().1.alpn_protocol(), Some(expected));
+        assert!(route_tls::endpoint_protocol(Some(expected)));
+        client.write_all(b"ordinary frame").await.unwrap();
+        let mut received = [0; 14];
+        server.read_exact(&mut received).await.unwrap();
+        assert_eq!(&received, b"ordinary frame");
+    }
+    assert_eq!(
+        route_tls::endpoint_client(&certificate.identity, 7)
+            .unwrap()
+            .alpn_protocols,
+        vec![route_tls::ALPN.to_vec()]
+    );
+    assert_eq!(
+        route_tls::client(&certificate.identity)
+            .unwrap()
+            .alpn_protocols,
+        vec![route_tls::ALPN.to_vec()]
+    );
+}
+
+#[tokio::test]
 async fn private_route_tls_read_error_cannot_flush_ciphertext_after_permission_expiry() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let (_, certificate) = certificates();

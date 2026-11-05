@@ -331,6 +331,25 @@ pub fn evaluate(
                     "stream permission belongs to another endpoint"
                 );
             }
+            Command::RetirementContext { session: r } => {
+                ensure!(
+                    op.grant.is_none(),
+                    "retirement context uses intrinsic endpoint ownership"
+                );
+                let current = c.select(173, r.id)?;
+                let s = Session::parse(&current.payload, state.network, state.incarnation)?;
+                let service = c.select(172, s.proof.service.id)?;
+                let service = Service::parse(&service.payload, state.network, state.incarnation)?;
+                let route = c.select(165, service.registration.route.id)?;
+                let route =
+                    routes::Service::parse(&route.payload, state.network, state.incarnation)?;
+                ensure!(
+                    intent.requester == route.profile.service,
+                    "retirement context belongs to another endpoint"
+                );
+                // This three-record disclosure grants no live permission. Cleanup must
+                // remain possible after the connection grant or proof has expired.
+            }
             Command::Close { session: r } => {
                 ensure!(
                     op.grant.is_none(),
@@ -467,7 +486,10 @@ pub(crate) fn evaluate_read(
     ensure!(
         matches!(
             command,
-            Command::Permit { .. } | Command::Lookup { .. } | Command::Inspect { .. }
+            Command::Permit { .. }
+                | Command::RetirementContext { .. }
+                | Command::Lookup { .. }
+                | Command::Inspect { .. }
         ),
         "operation is not a fresh stream read"
     );

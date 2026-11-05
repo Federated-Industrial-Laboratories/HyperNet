@@ -15,7 +15,7 @@ fn later(sample: ClockHealth, elapsed: u64) -> ClockHealth {
     .frozen()
 }
 
-struct Read {
+pub(crate) struct Read {
     request: Vec<u8>,
     challenge: Vec<u8>,
     result: Vec<u8>,
@@ -24,20 +24,28 @@ struct Read {
     versions: Vec<VersionRef>,
 }
 impl Read {
-    fn new(store: &Store, session: &mut Session, sample: ClockHealth) -> Self {
+    pub(crate) fn new(store: &Store, session: &mut Session, sample: ClockHealth) -> Self {
+        Self::with_nonce(store, session, sample, [97; 32])
+    }
+    fn with_nonce(
+        store: &Store,
+        session: &mut Session,
+        sample: ClockHealth,
+        nonce: Digest,
+    ) -> Self {
         let signer = SigningKey::from_bytes(&[1; 32]);
         let scope = store.descriptor().scope();
         let request = Request::sign(
             scope,
             &signer,
             store.requester(),
-            [97; 32],
+            nonce,
             store.prefix().height(),
             Query::PolicyContext,
         )
         .unwrap();
         let challenge = session
-            .issue_read(&request, &signer, [97; 32], 5000, None, sample)
+            .issue_read(&request, &signer, nonce, 5000, None, sample)
             .unwrap();
         let versions = [100, 114]
             .into_iter()
@@ -104,7 +112,7 @@ impl Read {
             versions,
         }
     }
-    fn verify(&self, store: &Store) -> VerifiedRead {
+    pub(crate) fn verify(&self, store: &Store) -> VerifiedRead {
         read::verify_response(
             store.descriptor(),
             &self.request,
@@ -124,6 +132,29 @@ impl Read {
             },
         )
         .unwrap()
+    }
+
+    fn certify_later_prefix(&mut self, height: u64, branch: u8) {
+        let (payload, _) = wire::envelope(&self.certificate, 4).unwrap();
+        let mut statement = Statement::parse(&payload).unwrap();
+        let value = wire::decode(&self.node).unwrap();
+        let mut node = value.array(9).unwrap().to_vec();
+        assert!(height > statement.height);
+        node[3] = V::Uint(height);
+        node[4] = V::Uint(node[4].uint().unwrap() + height - statement.height);
+        node[5] = b(&statement.node);
+        node[6] = b(&[branch; 32]);
+        node[7] = V::Uint(statement.evaluated_at_ms);
+        self.node = encoded(node);
+        statement.height = height;
+        statement.node = wire::digest(&self.node);
+        self.certificate = quorum(
+            wire::decode(&statement.encode().unwrap())
+                .unwrap()
+                .array(13)
+                .unwrap()
+                .to_vec(),
+        );
     }
 }
 
@@ -237,7 +268,7 @@ fn failed_fresh_read_publication_keeps_floors_without_recording_an_ordinary_effe
     let query = Read::new(&store, &mut session, sample);
     assert!(
         store
-            .accept_read(
+            .accept_read_consumed(
                 query.verify(&store),
                 &mut session,
                 sample,
@@ -275,6 +306,187 @@ fn failed_fresh_read_publication_keeps_floors_without_recording_an_ordinary_effe
         .accept_read(query.verify(&store), &mut session, sample, 0, |_, _| Ok(()))
         .unwrap();
     assert_eq!(store.stored.tracker, tracker);
+}
+
+#[test]
+fn consumed_fresh_read_cleanup_never_waits_for_support_or_reuses_authority() {
+    use std::{
+        fs::File,
+        io::{Read as _, Write as _},
+        os::{
+            fd::AsRawFd,
+            unix::{fs::PermissionsExt, net::UnixListener},
+        },
+        time::{Duration, Instant},
+    };
+    for refused in [false, true] {
+        let (directory, sample, mut session, mut store) = setup();
+        let sample = later(sample, 500);
+        let mut query = Read::new(&store, &mut session, sample);
+        if refused {
+            query.result = encoded(vec![
+                V::Uint(24),
+                V::Uint(1),
+                V::Text("AuthorityPolicyContext".into()),
+                V::Uint(1),
+                V::Uint(2),
+                b(&encoded(vec![])),
+            ]);
+            let payload = store.descriptor().quorum(&query.certificate).unwrap();
+            let mut statement = Statement::parse(&payload).unwrap();
+            statement.result = wire::digest(&query.result);
+            query.certificate = quorum(
+                wire::decode(&statement.encode().unwrap())
+                    .unwrap()
+                    .array(13)
+                    .unwrap()
+                    .to_vec(),
+            );
+        }
+        let verified = query.verify(&store);
+        let statement = verified.statement.clone();
+        let consumed = if refused {
+            store
+                .observe_read_consumed(verified, &mut session, sample, 0)
+                .unwrap()
+        } else {
+            let (value, consumed) = store
+                .accept_read_consumed(verified, &mut session, sample, 0, |_, _| Ok(42))
+                .unwrap();
+            assert_eq!(value, 42);
+            consumed
+        };
+        let key = SigningKey::from_bytes(&[1; 32]);
+        let observed = sample.observe().unwrap();
+        let short = consumed
+            .acknowledgement(&key, observed.boot_ms + 10)
+            .unwrap();
+        let short = read::Acknowledgement::from_signed(&short).unwrap();
+        assert_eq!(short.not_after_ms, observed.wall_ms + 10);
+        let path = directory.0.join("Ack.sock");
+        let parent = File::open(&directory.0).unwrap();
+        let listener =
+            UnixListener::bind(format!("/proc/self/fd/{}/Ack.sock", parent.as_raw_fd())).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let deadline = crate::authority_challenge::boot_time_ms().unwrap() + 2000;
+        // A legacy listener receives no cleanup traffic; a different socket is not support.
+        crate::authority_local_transport::acknowledge_read(&consumed, &key, deadline, &path);
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        let alias = directory
+            .0
+            .join(crate::authority_local_transport::READ_ACK_SOCKET);
+        let other = UnixListener::bind(format!(
+            "/proc/self/fd/{}/ReadAcknowledgements.sock",
+            parent.as_raw_fd()
+        ))
+        .unwrap();
+        std::fs::set_permissions(&alias, std::fs::Permissions::from_mode(0o600)).unwrap();
+        other.set_nonblocking(true).unwrap();
+        crate::authority_local_transport::acknowledge_read(&consumed, &key, deadline, &path);
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            other.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        drop(other);
+        std::fs::remove_file(&alias).unwrap();
+        std::fs::hard_link(&path, &alias).unwrap();
+        let started = Instant::now();
+        crate::authority_local_transport::acknowledge_read(&consumed, &key, deadline, &path);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "cleanup waited for a server that has not read or replied"
+        );
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut size = [0; 4];
+        socket.read_exact(&mut size).unwrap();
+        let size = u32::from_be_bytes(size) as usize;
+        assert!(size <= read::Acknowledgement::MAXIMUM);
+        let mut packet = vec![0; size];
+        socket.read_exact(&mut packet).unwrap();
+        assert!(crate::authority_local_transport::is_read_acknowledgement(
+            &packet
+        ));
+        let value = wire::decode(&packet).unwrap();
+        let fields = value.array(5).unwrap();
+        let acknowledgement =
+            read::Acknowledgement::from_signed(fields[4].bytes().unwrap()).unwrap();
+        assert_eq!(
+            acknowledgement.id,
+            read::read_id(&query.request, &query.challenge).unwrap()
+        );
+        assert_eq!(
+            acknowledgement.statement,
+            wire::digest(&statement.encode().unwrap())
+        );
+        assert_eq!(acknowledgement.result, wire::digest(&query.result));
+        assert!(acknowledgement.not_after_ms <= statement.expires_at_ms);
+        assert_eq!(
+            socket.read(&mut [0; 1]).unwrap(),
+            0,
+            "cleanup retained a response waiter"
+        );
+        // An older server's unsupported-operation reply cannot alter a consumed result.
+        let unsupported = encoded(vec![
+            V::Uint(42),
+            V::Uint(1),
+            store.descriptor().scope().value(),
+            V::Uint(2),
+            V::Uint(2),
+            V::Null,
+            V::Null,
+            V::Null,
+            V::Null,
+            V::Array(vec![]),
+        ]);
+        let _ = socket.write_all(&unsupported);
+        crate::authority_local_transport::acknowledge_read(&consumed, &key, 0, &path);
+        crate::authority_local_transport::acknowledge_read(
+            &consumed,
+            &SigningKey::from_bytes(&[2; 32]),
+            deadline,
+            &path,
+        );
+        crate::authority_local_transport::acknowledge_read(
+            &consumed,
+            &key,
+            deadline,
+            &directory.0.join("Absent.sock"),
+        );
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        if refused {
+            assert!(
+                store
+                    .observe_read_consumed(query.verify(&store), &mut session, sample, 0)
+                    .is_err()
+            );
+        } else {
+            assert!(
+                store
+                    .accept_read_consumed(
+                        query.verify(&store),
+                        &mut session,
+                        sample,
+                        0,
+                        |_, _| -> Result<()> { panic!("cleanup replayed consumed authority") }
+                    )
+                    .is_err()
+            );
+        }
+    }
 }
 
 #[test]
@@ -324,4 +536,268 @@ fn fresh_read_cannot_replace_pending_ordinary_or_fence_and_expiry_cannot_advance
         assert_eq!(std::fs::read(directory.0.join(FLOOR)).unwrap(), floor);
         assert_eq!(std::fs::read(directory.0.join(WITNESS)).unwrap(), witness);
     }
+}
+
+#[test]
+fn distinct_fresh_reads_at_one_floor_complete_out_of_order_once_each() {
+    let (_directory, sample, mut session, mut store) = setup();
+    let sample = later(sample, 500);
+    let first = Read::with_nonce(&store, &mut session, sample, [97; 32]);
+    let second = Read::with_nonce(&store, &mut session, sample, [98; 32]);
+    let prefix = store.prefix().clone();
+    let tracker = store.stored.tracker.clone();
+    let mut effects = 0;
+    for query in [&second, &first] {
+        store
+            .accept_read_consumed(query.verify(&store), &mut session, sample, 0, |_, _| {
+                effects += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(store.prefix(), &prefix);
+        assert_eq!(store.stored.tracker, tracker);
+    }
+    assert_eq!(effects, 2);
+    for query in [&first, &second] {
+        assert!(
+            store
+                .accept_read_consumed(
+                    query.verify(&store),
+                    &mut session,
+                    sample,
+                    0,
+                    |_, _| -> Result<()> { panic!("completed concurrent read was consumed twice") }
+                )
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn fresh_completion_cannot_roll_back_a_floor_advanced_after_issue() {
+    let (directory, sample, mut session, mut store) = setup();
+    let sample = later(sample, 500);
+    let query = Read::new(&store, &mut session, sample);
+    let issued_height = store.prefix().height();
+    let (pending, operation) = prepare(&mut store, sample);
+    let verified = certified(
+        &store,
+        &mut session,
+        sample,
+        pending.signed(),
+        &operation,
+        None,
+    );
+    store
+        .accept(verified, &mut session, sample, 0)
+        .unwrap()
+        .perform(
+            &mut store,
+            &mut session,
+            sample,
+            1,
+            |_| Ok(()),
+            |_, _| Ok(()),
+        )
+        .unwrap();
+    assert!(store.prefix().height() > issued_height);
+    let prefix = store.prefix().clone();
+    let floor = std::fs::read(directory.0.join(FLOOR)).unwrap();
+    let witness = std::fs::read(directory.0.join(WITNESS)).unwrap();
+    let error = store
+        .accept_read_consumed(
+            query.verify(&store),
+            &mut session,
+            sample,
+            0,
+            |_, _| -> Result<()> { panic!("overtaken read published its old context") },
+        )
+        .err()
+        .unwrap();
+    assert!(
+        error.to_string().contains("below the accepted"),
+        "{error:#}"
+    );
+    assert_eq!(store.prefix(), &prefix);
+    assert_eq!(std::fs::read(directory.0.join(FLOOR)).unwrap(), floor);
+    assert_eq!(std::fs::read(directory.0.join(WITNESS)).unwrap(), witness);
+    session.discard(&query.challenge).unwrap();
+}
+
+#[test]
+fn concurrent_lower_bound_reads_accept_same_newer_certified_prefix_once_each() {
+    let (directory, sample, mut session, mut store) = setup();
+    let sample = later(sample, 500);
+    let issued_height = store.prefix().height();
+    let tracker = store.stored.tracker.clone();
+    let mut first = Read::with_nonce(&store, &mut session, sample, [97; 32]);
+    let mut second = Read::with_nonce(&store, &mut session, sample, [98; 32]);
+    for query in [&mut first, &mut second] {
+        query.certify_later_prefix(issued_height + 1, 83);
+        assert_eq!(
+            Request::from_signed(&query.request).unwrap().minimum_height,
+            issued_height
+        );
+    }
+    let first_result = first.verify(&store);
+    let second_result = second.verify(&store);
+    let mut effects = 0;
+    for result in [second_result, first_result] {
+        store
+            .accept_read_consumed(result, &mut session, sample, 0, |_, _| {
+                effects += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(store.prefix().height(), issued_height + 1);
+        assert_eq!(store.stored.tracker, tracker);
+    }
+    assert_eq!(effects, 2);
+    for query in [&first, &second] {
+        assert!(
+            store
+                .accept_read_consumed(
+                    query.verify(&store),
+                    &mut session,
+                    sample,
+                    0,
+                    |_, _| -> Result<()> { panic!("completed read was consumed twice") },
+                )
+                .is_err()
+        );
+    }
+    let prefix = store.prefix().clone();
+    let descriptor = store.descriptor().clone();
+    drop(store);
+    assert_eq!(
+        Store::open(&directory.0, descriptor).unwrap().prefix(),
+        &prefix
+    );
+}
+
+#[test]
+fn newer_floor_still_rejects_stale_or_conflicting_read_results() {
+    let (directory, sample, mut session, mut store) = setup();
+    let sample = later(sample, 500);
+    let mut accepted = Read::with_nonce(&store, &mut session, sample, [97; 32]);
+    let stale = Read::with_nonce(&store, &mut session, sample, [98; 32]);
+    let mut conflicting = Read::with_nonce(&store, &mut session, sample, [99; 32]);
+    let height = store.prefix().height() + 1;
+    accepted.certify_later_prefix(height, 83);
+    conflicting.certify_later_prefix(height, 84);
+    store
+        .accept_read_consumed(accepted.verify(&store), &mut session, sample, 0, |_, _| {
+            Ok(())
+        })
+        .unwrap();
+    let prefix = store.prefix().clone();
+    let floor = std::fs::read(directory.0.join(FLOOR)).unwrap();
+    let witness = std::fs::read(directory.0.join(WITNESS)).unwrap();
+    for (query, expected) in [
+        (&stale, "below the accepted"),
+        (&conflicting, "conflicting result"),
+    ] {
+        let error = store
+            .accept_read_consumed(
+                query.verify(&store),
+                &mut session,
+                sample,
+                0,
+                |_, _| -> Result<()> { panic!("stale or conflicting read published") },
+            )
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains(expected), "{error:#}");
+        assert_eq!(store.prefix(), &prefix);
+        assert_eq!(std::fs::read(directory.0.join(FLOOR)).unwrap(), floor);
+        assert_eq!(std::fs::read(directory.0.join(WITNESS)).unwrap(), witness);
+    }
+}
+
+#[test]
+fn history_bound_before_concurrent_publication_is_not_rebased() {
+    use sha2::{Digest as _, Sha256};
+
+    let (directory, sample, mut session, mut store) = setup();
+    let sample = later(sample, 500);
+    assert_eq!(store.prefix().height(), 1);
+    let mut first = Read::with_nonce(&store, &mut session, sample, [97; 32]);
+    let mut second = Read::with_nonce(&store, &mut session, sample, [98; 32]);
+    first.certify_later_prefix(32, 83);
+    second.certify_later_prefix(32, 83);
+    let (payload, _) = wire::envelope(&first.certificate, 4).unwrap();
+    let statement = Statement::parse(&payload).unwrap();
+    let mut nodes = [[85; 32]; 32];
+    nodes[0] = *store.prefix().node();
+    nodes[31] = statement.node;
+    let mut hashes = nodes
+        .iter()
+        .map(|node| Sha256::digest([&[0][..], node].concat()).into())
+        .collect::<Vec<Digest>>();
+    let mut inclusion = Vec::new();
+    while hashes.len() > 1 {
+        inclusion.push(hashes[1]);
+        hashes = hashes
+            .chunks_exact(2)
+            .map(|pair| Sha256::digest([&[1][..], &pair[0], &pair[1]].concat()).into())
+            .collect();
+    }
+    let checkpoint = encoded(vec![
+        V::Uint(46),
+        V::Uint(1),
+        b(&quorum(vec![
+            V::Uint(45),
+            V::Uint(1),
+            statement.scope.value(),
+            V::Uint(32),
+            b(&statement.node),
+            V::Uint(statement.evaluated_at_ms),
+            b(&statement.state),
+            V::Uint(32),
+            b(&hashes[0]),
+            V::Bool(false),
+        ])),
+        b(&first.node),
+    ]);
+    let verified_checkpoint = history::verify_checkpoint(store.descriptor(), &checkpoint).unwrap();
+    let proof = encoded(vec![
+        V::Uint(47),
+        V::Uint(1),
+        statement.scope.value(),
+        V::Uint(store.prefix().height()),
+        b(store.prefix().node()),
+        b(verified_checkpoint.digest()),
+        V::Array(inclusion.iter().map(|hash| b(hash)).collect()),
+        V::Uint(0),
+        V::Null,
+        V::Array(vec![]),
+    ]);
+    let first_result = store
+        .attach_read_history(first.verify(&store), &checkpoint, &proof)
+        .unwrap();
+    let second_result = store
+        .attach_read_history(second.verify(&store), &checkpoint, &proof)
+        .unwrap();
+    store
+        .accept_read_consumed(first_result, &mut session, sample, 0, |_, _| Ok(()))
+        .unwrap();
+    let floor = std::fs::read(directory.0.join(FLOOR)).unwrap();
+    let error = store
+        .accept_read_consumed(
+            second_result,
+            &mut session,
+            sample,
+            0,
+            |_, _| -> Result<()> { panic!("old history was silently rebased") },
+        )
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("history differs"), "{error:#}");
+    assert_eq!(store.prefix().height(), 32);
+    assert_eq!(std::fs::read(directory.0.join(FLOOR)).unwrap(), floor);
+    assert!(
+        store
+            .attach_read_history(second.verify(&store), &checkpoint, &proof)
+            .is_err()
+    );
 }

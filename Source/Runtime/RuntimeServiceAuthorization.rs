@@ -254,6 +254,11 @@ impl Guard {
     pub fn health(&self) -> Result<crate::authority_challenge::ClockHealth> {
         self.clock.health()
     }
+    // Exchange workers read clock evidence without sharing the actor's mutable
+    // monotonic guard. The actor rechecks the complete guard before acceptance.
+    pub(crate) fn clock_source(&self) -> crate::authority_clock_handoff::Source {
+        self.clock.clone()
+    }
     pub fn application_clock(&self) -> Result<ApplicationClock> {
         let boot = self.clock.verified_boot()?;
         self.check()?;

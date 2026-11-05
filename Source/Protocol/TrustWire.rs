@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 
 #[path = "TrustSignatureCache.rs"]
 mod signature_cache;
+pub(crate) use signature_cache::SignatureStatistics;
 #[cfg(test)]
 #[path = "../../Tests/Unit/Protocol/TrustSignatureTests.rs"]
 mod signature_tests;
@@ -258,6 +259,9 @@ pub fn sign_envelope(payload: &[u8], key: &SigningKey) -> Result<Vec<u8>> {
 pub type SignedRecord = (Vec<u8>, Vec<([u8; 32], [u8; 64])>);
 pub(crate) fn take_signature_statistics() -> signature_cache::SignatureStatistics {
     signature_cache::take_signature_statistics()
+}
+pub(crate) fn signature_statistics() -> SignatureStatistics {
+    signature_cache::signature_statistics()
 }
 
 pub fn envelope(bytes: &[u8], maximum: usize) -> Result<SignedRecord> {

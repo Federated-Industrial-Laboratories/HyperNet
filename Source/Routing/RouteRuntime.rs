@@ -107,7 +107,8 @@ pub(crate) enum Phase {
     EndpointRenewalStart,
     EndpointRenewalComplete,
     EndpointRenewalRefused,
-    ApplicationCheckRefused,
+    ApplicationAccepted,
+    ApplicationForwardComplete,
 }
 impl std::fmt::Display for Phase {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -118,6 +119,8 @@ impl std::error::Error for Phase {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FailureCode {
+    PendingOrdinary,
+    PendingFence,
     ObservationExpired,
     ChallengeExpired,
     FreshQuorumUnavailable,
@@ -137,6 +140,12 @@ enum FailureCode {
     Other,
 }
 fn failure_code(error: &anyhow::Error) -> FailureCode {
+    if let Some(pending) = error.downcast_ref::<crate::route_authority::ReadPending>() {
+        return match pending.kind {
+            crate::route_authority::ReadPendingKind::Ordinary => FailureCode::PendingOrdinary,
+            crate::route_authority::ReadPendingKind::Fence => FailureCode::PendingFence,
+        };
+    }
     if error.is::<crate::consensus_clock::ObservationExpired>() {
         return FailureCode::ObservationExpired;
     }
@@ -185,16 +194,22 @@ pub(crate) struct Timing {
 }
 impl Timing {
     fn begin(started: u64, enabled: bool) -> Self {
-        let sample = if enabled {
-            TIMING_SAMPLES
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                    (n < 64).then_some(n + 1)
-                })
-                .ok()
-                .map(|n| n + 1)
+        if enabled {
+            Self::counted(started, &TIMING_SAMPLES, 64)
         } else {
-            None
-        };
+            Self {
+                started,
+                sample: None,
+            }
+        }
+    }
+    fn counted(started: u64, samples: &AtomicU64, maximum: u64) -> Self {
+        let sample = samples
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                (n < maximum).then(|| n + 1)
+            })
+            .ok()
+            .map(|n| n + 1);
         Self { started, sample }
     }
     pub(crate) fn mark(self, stage: Phase) {
@@ -202,25 +217,95 @@ impl Timing {
             && let Ok(now) = crate::authority_challenge::boot_time_ms()
         {
             // Bounded samples cover sequential setup; only fixed stages and elapsed time are logged.
-            eprintln!(
-                "HyperNet private route timing: sample={sample} stage={stage:?} elapsedMs={} bootMs={now}",
+            diagnostic(format_args!(
+                "HyperNet private route timing: sample={sample} stage={stage:?} elapsedMs={} bootMs={now}\n",
                 now.saturating_sub(self.started)
-            );
+            ));
         }
     }
     fn failure(self, stage: Phase, error: &anyhow::Error) {
         if let Some(sample) = self.sample {
-            eprintln!(
-                "HyperNet private route failure: sample={sample} stage={stage:?} cause={:?} reason={:?} freshReadCode={:?} bootMs={:?}",
+            diagnostic(format_args!(
+                "HyperNet private route failure: sample={sample} stage={stage:?} cause={:?} reason={:?} freshReadCode={:?} bootMs={:?}\n",
                 error.downcast_ref::<Phase>(),
                 failure_code(error),
                 error
                     .downcast_ref::<crate::authority_local_transport::FreshReadUnavailable>()
                     .map(|e| e.code),
                 crate::authority_challenge::boot_time_ms().ok(),
-            );
+            ));
         }
     }
+}
+const DIAGNOSTIC_BYTES: usize = 512;
+const DIAGNOSTIC_QUEUE: usize = 32;
+struct DiagnosticLine {
+    bytes: [u8; DIAGNOSTIC_BYTES],
+    length: usize,
+    truncated: bool,
+}
+impl DiagnosticLine {
+    fn new() -> Self {
+        Self {
+            bytes: [0; DIAGNOSTIC_BYTES],
+            length: 0,
+            truncated: false,
+        }
+    }
+}
+impl std::fmt::Write for DiagnosticLine {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        if text.len() > self.bytes.len() - self.length {
+            self.truncated = true;
+            return Err(std::fmt::Error);
+        }
+        self.bytes[self.length..self.length + text.len()].copy_from_slice(text.as_bytes());
+        self.length += text.len();
+        Ok(())
+    }
+}
+static DIAGNOSTICS: std::sync::OnceLock<Option<std::sync::mpsc::SyncSender<DiagnosticLine>>> =
+    std::sync::OnceLock::new();
+fn diagnostic_writer(
+    mut output: impl std::io::Write + Send + 'static,
+) -> std::io::Result<(
+    std::sync::mpsc::SyncSender<DiagnosticLine>,
+    std::thread::JoinHandle<()>,
+)> {
+    let (sender, records) = std::sync::mpsc::sync_channel::<DiagnosticLine>(DIAGNOSTIC_QUEUE);
+    let worker = std::thread::Builder::new()
+        .name("route-diagnostics".into())
+        .spawn(move || {
+            for line in records {
+                if output.write_all(&line.bytes[..line.length]).is_err() {
+                    break;
+                }
+            }
+        })?;
+    Ok((sender, worker))
+}
+fn start_diagnostics() {
+    // Initialisation happens before actor work. Producers never wait for startup or a sink.
+    DIAGNOSTICS.get_or_init(|| {
+        diagnostic_writer(std::io::stderr())
+            .ok()
+            .map(|(sender, _)| sender)
+    });
+}
+fn queue_diagnostic(sender: &std::sync::mpsc::SyncSender<DiagnosticLine>, line: DiagnosticLine) {
+    if !line.truncated {
+        let _ = sender.try_send(line);
+    }
+}
+fn diagnostic_line(line: DiagnosticLine) {
+    if let Some(Some(sender)) = DIAGNOSTICS.get() {
+        queue_diagnostic(sender, line);
+    }
+}
+fn diagnostic(arguments: std::fmt::Arguments<'_>) {
+    let mut line = DiagnosticLine::new();
+    let _ = std::fmt::write(&mut line, arguments);
+    diagnostic_line(line);
 }
 struct Opened {
     stream: Stream,
@@ -1111,7 +1196,7 @@ async fn endpoint_incoming(
         let stream = acceptor.accept(socket).await.context(Refusal::Tls)?;
         timing.mark(Phase::EndpointTlsComplete);
         ensure!(
-            stream.get_ref().1.alpn_protocol() == Some(route_tls::ALPN),
+            route_tls::endpoint_protocol(stream.get_ref().1.alpn_protocol()),
             "private endpoint protocol differs"
         );
         let exporter = stream.get_ref().1.export_keying_material(
@@ -1192,7 +1277,7 @@ async fn attach(
         )
         .await??;
         ensure!(
-            inner.get_ref().1.alpn_protocol() == Some(route_tls::ALPN),
+            route_tls::endpoint_protocol(inner.get_ref().1.alpn_protocol()),
             "attached endpoint protocol differs"
         );
         let exporter = inner.get_ref().1.export_keying_material(
@@ -1403,21 +1488,6 @@ impl EndpointPermission {
         }
         Ok(())
     }
-    fn prepare_check(
-        &mut self,
-        deadline: u64,
-        budget: u64,
-        refresh: impl FnOnce(u64) -> Result<u64>,
-    ) -> Result<()> {
-        crate::authority_local_transport::remaining(deadline)?;
-        if self.gate.expiry()? < deadline {
-            // A queued check can arrive before the normal renewal timer is due.
-            // Renew once before its read; the newly certified expiry still bounds it.
-            self.renew(deadline, refresh)
-        } else {
-            self.prepare(deadline, budget, refresh)
-        }
-    }
     fn before_action(&mut self, client: &mut Client<'_>, deadline: u64) -> Result<()> {
         // A bridge frame uses the same scheduling margin; its own Reader proof remains mandatory.
         self.current(client, deadline)
@@ -1437,11 +1507,11 @@ impl EndpointPermission {
         };
         self.renewals = self.renewals.saturating_add(1);
         if let Some(sample) = sample {
-            eprintln!(
-                "HyperNet private route endpoint renewal: sample={sample} stage={:?} oldExpiryBootMs={old_expiry} bootMs={:?}",
+            diagnostic(format_args!(
+                "HyperNet private route endpoint renewal: sample={sample} stage={:?} oldExpiryBootMs={old_expiry} deadlineBootMs={deadline} bootMs={:?}\n",
                 Phase::EndpointRenewalStart,
                 crate::authority_challenge::boot_time_ms().ok()
-            );
+            ));
         }
         let outcome = (|| {
             let expiry = refresh(deadline)?;
@@ -1451,8 +1521,8 @@ impl EndpointPermission {
             Ok(expiry)
         })();
         if let Some(sample) = sample {
-            eprintln!(
-                "HyperNet private route endpoint renewal: sample={sample} stage={:?} oldExpiryBootMs={old_expiry} newExpiryBootMs={:?} reason={:?} bootMs={:?}",
+            diagnostic(format_args!(
+                "HyperNet private route endpoint renewal: sample={sample} stage={:?} oldExpiryBootMs={old_expiry} newExpiryBootMs={:?} deadlineBootMs={deadline} reason={:?} bootMs={:?}\n",
                 if outcome.is_ok() {
                     Phase::EndpointRenewalComplete
                 } else {
@@ -1461,7 +1531,7 @@ impl EndpointPermission {
                 outcome.as_ref().ok(),
                 outcome.as_ref().err().map(failure_code),
                 crate::authority_challenge::boot_time_ms().ok()
-            );
+            ));
         }
         outcome.map(|_| ())
     }
@@ -1684,11 +1754,12 @@ async fn wait_for_retry(
     }
 }
 pub async fn run(config: Config, guard: &Guard, active: &Active) -> Result<()> {
+    start_diagnostics();
     ensure!(
         guard.role == 5 && guard.manifest == config.manifest,
         "route activation differs from exact local consent"
     );
-    let acceptor = TlsAcceptor::from(route_tls::server(
+    let mut tls = route_tls::server(
         &config.profile.identity,
         &files::read(Path::new("/Config/Certificate.pem"), 65536, true)?,
         &zeroize::Zeroizing::new(files::read(
@@ -1696,7 +1767,12 @@ pub async fn run(config: Config, guard: &Guard, active: &Active) -> Result<()> {
             16384,
             true,
         )?),
-    )?);
+    )?;
+    if config.profile.mode != 1 && config.profile.protocol == 1 {
+        Arc::make_mut(&mut tls).alpn_protocols =
+            vec![route_tls::READ_ACK_ALPN.to_vec(), route_tls::ALPN.to_vec()];
+    }
+    let acceptor = TlsAcceptor::from(tls);
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     loop {
         let outcome = async {

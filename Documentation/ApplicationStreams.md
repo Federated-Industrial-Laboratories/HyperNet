@@ -148,6 +148,82 @@ old session, or after its original absolute expiry. A client close alone cannot
 reopen a slot while old endpoint bytes might remain live. Restart never restores
 spent allowance or revives a closed generation.
 
+The endpoint rotates seven lifecycle work classes: endpoint renewal, session
+renewal, completed handshakes, attached arrivals, public arrivals, completed
+forwarding and cleanup. After each selected lifecycle event, one queued authority
+check can run before another lifecycle event. Checks alone do not wait for an
+idle class. The check queue keeps its original order and capacity. An expired or
+cancelled check retains its original outcome; selection never renews its budget.
+A continuously ready lifecycle class receives a turn within fourteen work
+dispatches, even under continuous checks. Due sessions are ordered by their last
+renewal turn; new arrivals and serviced sessions cannot overtake older due
+sessions. With at most C active sessions, each continuously due session receives
+a renewal turn within 14*C work dispatches. These are dispatch bounds, not latency
+promises: an in-flight authority operation is not preempted, and each operation
+keeps its original deadline and exact recovery contract. An unresolved ordinary
+request or fence still prevents a fresh authority check.
+
+Bounded process-local timing separates authority-check queue delay from work in
+the endpoint actor. The first 256 verified enqueues retain one numeric sample
+through enqueue, dequeue, any endpoint/session preparation, the fresh read and
+the final disposition. Early expired and inactive results also retain their
+outcome. Elapsed time is measured from enqueue; the original caller start and
+deadline are recorded separately. The five actor operation classes (incoming
+permission, handshake permission, stream admission, stream permit and cleanup)
+each record at most 64 start/end pairs with their original deadline. Stream
+admission includes exact recovery, inspection and admission; its elapsed time
+does not identify the cost of an individual authority exchange. Endpoint renewal
+keeps its existing independent samples and records its call deadline.
+
+Admission records can reference the existing local session sample, which also
+marks application acceptance and forwarding completion. These numbers do not
+identify a connection in another process. There are at most 2304 added timing
+records per process, each below 384 bytes; together with deadline fields on the
+existing renewal records, added output stays below 1 MiB. Counters never reset
+on reconnect. No account/session identifiers, payloads or arbitrary error text
+are recorded. Diagnostic clock or output failures do not change authority
+results. One writer thread handles stderr outside the actor. Producers use a
+non-waiting send to a 32-record queue; each record is at most 512 bytes (16 KiB
+of queued record bytes, plus one writer-held record). Oversize records, full or
+closed queues and writer startup failures drop diagnostics. Timestamps are
+captured before enqueueing. A stalled sink can therefore lose samples or leave
+partial timings; diagnostics are not a complete audit trail. Timing does not
+extend deadlines or certify throughput or availability.
+
+One completed stream can wait for measured renewal and action headroom. Its local
+gate closes immediately. The single held cleanup record counts against relay
+attachment replenishment. Public listeners retain their existing queued/admitted
+session limit and separately bounded parser pool, plus at most one closed-session
+cleanup record. Cleanup preparation visits the endpoint gate and each session
+present at completion at most once, then attempts the exact close. Later arrivals
+cannot restart that pass. With C sessions at completion, cleanup receives its
+close attempt within 14*(C+2) work dispatches, or reaches its original deadline
+sooner. Cleanup retains its first deadline; it does not extend a session or
+certified permission. Gates still stop traffic at certified expiry, and expired
+or disconnected checks cannot obtain fresh authority. An expired or failed
+cleanup emits a bounded category diagnostic.
+After a failed attempt, the one held retirement waits one second before another
+turn, measured from attempt completion. It keeps its original deadline and target;
+expiry releases only this local cleanup record. An uncertain signed close remains
+in the durable requester's exact recovery slot. Its original outcome must resolve
+before a new retirement context or close can be prepared. This scheduling order
+cannot guarantee availability while that mutation is unresolved.
+
+The caller can close a stream before the endpoint retires it, advancing its record
+generation. The endpoint obtains `StreamRetirementContext` under its intrinsic
+ownership to learn the current session, service and route records. This disclosure
+does not require a live connection grant and supplies no forwarding permission.
+The endpoint closes only the same original proof generation and signed-proof
+digest; a retired or reused slot is left unchanged. A competing close can refuse
+the exact mutation again, so the original-outcome and bounded-retry rules still
+apply. Existing current-permission and exact-close checks remain mandatory.
+
+This additive read requires an authority committee that supports
+`StreamRetirementContext`. An older committee refuses the unsupported query;
+the endpoint does not substitute an ordinary mutation or another authority path.
+The slot then remains unavailable until its existing retirement or expiry rules
+permit reuse. Upgrade the committee before relying on this retirement recovery.
+
 Current session state is kind 173; service state is kind 172. Closing and
 retirement replace the bounded current slot record. No authority mutation is
 performed per payload frame, token or file chunk. Admission reserves capacity

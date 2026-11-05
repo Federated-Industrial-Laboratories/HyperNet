@@ -13,6 +13,10 @@ use rustls::{
 use std::sync::Arc;
 
 pub const ALPN: &[u8] = b"HyperNetRoute/1";
+pub const READ_ACK_ALPN: &[u8] = b"HyperNetRoute/1+ReadAck1";
+pub fn endpoint_protocol(value: Option<&[u8]>) -> bool {
+    value == Some(ALPN) || value == Some(READ_ACK_ALPN)
+}
 fn provider() -> Arc<rustls::crypto::CryptoProvider> {
     let mut provider = rustls::crypto::ring::default_provider();
     provider
@@ -85,6 +89,17 @@ pub fn client(identity: &Identity) -> Result<Arc<rustls::ClientConfig>> {
     config.resumption = rustls::client::Resumption::disabled();
     config.alpn_protocols = vec![ALPN.to_vec()];
     Ok(Arc::new(config))
+}
+#[cfg(test)]
+pub(crate) fn endpoint_client(
+    identity: &Identity,
+    protocol: u64,
+) -> Result<Arc<rustls::ClientConfig>> {
+    let mut config = client(identity)?;
+    if protocol == 1 {
+        Arc::make_mut(&mut config).alpn_protocols = vec![READ_ACK_ALPN.to_vec(), ALPN.to_vec()];
+    }
+    Ok(config)
 }
 #[allow(dead_code)] // Shared reader builds use only the client half of the same TLS contract.
 pub fn server(

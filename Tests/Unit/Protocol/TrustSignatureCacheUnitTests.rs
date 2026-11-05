@@ -5,6 +5,42 @@ use ed25519_dalek::{Signer, SigningKey};
 use std::{collections::BTreeMap, sync::Arc};
 
 #[test]
+fn signature_statistics_snapshots_preserve_counters_and_measure_only_the_interval() {
+    let cache = Cache::new();
+    let key = SigningKey::from_bytes(&[57; 32]);
+    let public = key.verifying_key();
+    let message = b"Non-destructive signature statistics";
+    let signature = key.sign(message).to_bytes();
+    take_signature_statistics();
+    let before = signature_statistics();
+    cache.verify(&public, message, signature).unwrap();
+    let first = signature_statistics();
+    assert_eq!(signature_statistics(), first);
+    cache.verify(&public, message, signature).unwrap();
+    let after = signature_statistics();
+    let interval = after.since(first);
+    assert_eq!(
+        interval,
+        SignatureStatistics {
+            lookups: 1,
+            hits: 1,
+            ..SignatureStatistics::default()
+        }
+    );
+    let total = after.since(before);
+    assert_eq!(
+        (total.lookups, total.hits, total.strict_verifications),
+        (2, 1, 1)
+    );
+    assert_eq!(total.strict_verification_ns, first.strict_verification_ns);
+    assert_eq!(take_signature_statistics(), after);
+    assert_eq!(
+        signature_statistics().since(after),
+        SignatureStatistics::default()
+    );
+}
+
+#[test]
 fn fixed_signature_cache_evicts_collisions_without_growing_or_reusing_the_wrong_proof() {
     let cache = Cache::new();
     let key = SigningKey::from_bytes(&[54; 32]);

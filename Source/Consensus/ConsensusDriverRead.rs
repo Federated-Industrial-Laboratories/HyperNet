@@ -197,6 +197,14 @@ impl Driver {
         if self.reads.len() >= MAX_PENDING
             || self.read_bytes() + request.len() + challenge.len() > MAX_READ_BYTES
         {
+            self.diagnostics.read_capacity(diagnostics::ReadCapacity {
+                retained_count: self.reads.len(),
+                retained_bytes: self.read_bytes(),
+                incoming_bytes: request.len() + challenge.len(),
+                earliest_expiry: self.reads.values().map(|read| read.expires).min(),
+                count_limit: MAX_PENDING,
+                byte_limit: MAX_READ_BYTES,
+            });
             return self.read_reply(2, 2, id, None);
         }
         self.reads.insert(
@@ -211,6 +219,40 @@ impl Driver {
             },
         );
         self.read_poll(id)
+    }
+    pub(super) fn read_acknowledge(&mut self, payload: &[u8]) -> Result<Vec<u8>> {
+        let acknowledgement = read::Acknowledgement::from_signed(payload)?;
+        ensure!(
+            acknowledgement.scope == *self.config().descriptor().scope(),
+            "fresh acknowledgement scope differs"
+        );
+        let Some(collection) = self.reads.get(&acknowledgement.id) else {
+            return acknowledgement.reply(false);
+        };
+        let request = Request::from_signed(&collection.request)?;
+        ensure!(
+            request.scope == acknowledgement.scope && request.recipient == acknowledgement.signer,
+            "fresh acknowledgement recipient differs"
+        );
+        ensure!(
+            collection.candidates.iter().any(|candidate| {
+                candidate.signatures.len() >= 3
+                    && wire::digest(&candidate.payload) == acknowledgement.statement
+                    && wire::digest(&candidate.result) == acknowledgement.result
+                    && Statement::parse(&candidate.payload).is_ok_and(|statement| {
+                        statement.result == acknowledgement.result
+                            && acknowledgement.not_after_ms <= statement.expires_at_ms
+                    })
+            }),
+            "fresh acknowledgement does not name a complete result"
+        );
+        let now = self.now()?;
+        if now.saturating_add(crate::authority_challenge::DELTA_MS) >= acknowledgement.not_after_ms
+        {
+            return acknowledgement.reply(false);
+        }
+        self.reads.remove(&acknowledgement.id);
+        acknowledgement.reply(true)
     }
     pub(super) fn read_poll(&mut self, id: Digest) -> Result<Vec<u8>> {
         let now = self.now();

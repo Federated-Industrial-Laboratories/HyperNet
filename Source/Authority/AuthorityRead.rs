@@ -62,6 +62,7 @@ impl Query {
                         &op.command,
                         domains::Command::Stream(
                             domains::streams::Command::Permit { .. }
+                                | domains::streams::Command::RetirementContext { .. }
                                 | domains::streams::Command::Lookup { .. }
                                 | domains::streams::Command::Inspect { .. }
                         ) | domains::Command::Page(domains::page::Command::View { .. })
@@ -173,10 +174,92 @@ pub fn read_id(request: &[u8], challenge: &[u8]) -> Result<Digest> {
     let request = Request::from_signed(request)?;
     let challenge = Challenge::from_signed(challenge)?;
     request.validate_challenge(&challenge)?;
+    bound_id(&request.digest, &challenge.digest)
+}
+fn bound_id(request: &Digest, challenge: &Digest) -> Result<Digest> {
     Ok(wire::digest(&wire::encode(&a(vec![
-        b(&request.digest),
-        b(&challenge.digest),
+        b(request),
+        b(challenge),
     ]))?))
+}
+
+/// A signed cleanup request carries no authority and cannot acknowledge an ordinary effect.
+pub(crate) struct Acknowledgement {
+    pub scope: Scope,
+    pub id: Digest,
+    pub statement: Digest,
+    pub result: Digest,
+    pub signer: Key,
+    pub not_after_ms: u64,
+}
+impl Acknowledgement {
+    pub(crate) const MAXIMUM: usize = 1024;
+
+    pub(crate) fn sign(
+        statement: &Statement,
+        key: &SigningKey,
+        not_after_ms: u64,
+    ) -> Result<Vec<u8>> {
+        ensure!(
+            key.verifying_key().to_bytes() == statement.requester
+                && statement.requester == statement.recipient
+                && not_after_ms > 0
+                && not_after_ms <= statement.expires_at_ms,
+            "fresh acknowledgement signer differs from recipient"
+        );
+        wire::sign_envelope(
+            &wire::encode(&a(vec![
+                V::Uint(63),
+                V::Uint(1),
+                statement.scope.value(),
+                b(&bound_id(&statement.request, &statement.challenge)?),
+                b(&wire::digest(&statement.encode()?)),
+                b(&statement.result),
+                V::Uint(not_after_ms),
+            ]))?,
+            key,
+        )
+    }
+    pub(crate) fn from_signed(bytes: &[u8]) -> Result<Self> {
+        ensure!(
+            bytes.len() <= Self::MAXIMUM,
+            "fresh acknowledgement exceeds bound"
+        );
+        let (payload, signatures) = wire::envelope(bytes, 1)?;
+        ensure!(
+            signatures.len() == 1,
+            "fresh acknowledgement requires one signer"
+        );
+        let value = wire::decode(&payload)?;
+        let fields = record(&value, 63, 7)?;
+        let result = Self {
+            scope: Scope::parse(&fields[2])?,
+            id: fields[3].fixed()?,
+            statement: fields[4].fixed()?,
+            result: fields[5].fixed()?,
+            signer: signatures[0].0,
+            not_after_ms: fields[6].uint()?,
+        };
+        ensure!(
+            result.id != [0; 32]
+                && result.statement != [0; 32]
+                && result.result != [0; 32]
+                && result.not_after_ms > 0,
+            "fresh acknowledgement binding is empty"
+        );
+        Ok(result)
+    }
+    pub(crate) fn reply(&self, released: bool) -> Result<Vec<u8>> {
+        wire::encode(&a(vec![
+            V::Uint(64),
+            V::Uint(1),
+            self.scope.value(),
+            b(&self.id),
+            b(&self.statement),
+            b(&self.result),
+            V::Bool(released),
+        ]))
+    }
 }
 #[derive(Clone, Debug)]
 pub struct Statement {

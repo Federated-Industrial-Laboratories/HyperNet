@@ -5,7 +5,7 @@
 <p align="center">Permissioned networks for pages, private communication and shared services.</p>
 
 <p align="center">
-  <a href="https://github.com/Federated-Industrial-Laboratories/HyperNet/releases/tag/v0.10.1">Linux 0.10.1</a> |
+  <a href="https://github.com/Federated-Industrial-Laboratories/HyperNet/releases/tag/v0.10.2">Linux 0.10.2</a> |
   <a href="Documentation/Installation.md">Install</a> |
   <a href="Documentation/Hosting.md">Host</a> |
   <a href="Documentation/ReadMe.md">Documentation</a> |
@@ -28,12 +28,16 @@ provides the separate native graphical browser, terminal viewer and command-line
 clients. Reading a Page does not require running a host or authority replica.
 
 > [!NOTE]
-> **Linux 0.10.1** uses the native Ubuntu x86_64 release profile and its documented limits.
+> **Linux 0.10.2** uses the native Ubuntu x86_64 release profile and its documented limits.
 > Other Linux distributions depend on compatible libraries and the required
 > kernel and runtime capabilities. AArch64, macOS and SELinux-enabled operation
 > remain unqualified. This release has no independent security certification.
 > Read the [release notes](Documentation/ReleaseNotes.md) and
 > [deployment limits](Documentation/Qualification.md) before choosing a deployment.
+
+Version 0.10.2 adds optional consumed-read cleanup and prioritises
+current application permission before completed-stream cleanup. See the
+[release notes](Documentation/ReleaseNotes.md) for compatibility and scope.
 
 Version 0.10.1 corrects permission readiness for short application checks without
 extending their original deadlines or reusing authority evidence. It remains
@@ -87,7 +91,7 @@ identities and restricted grants; they do not receive a user's private keys.
 
 ## Install
 
-Download the [Linux 0.10.1 release](https://github.com/Federated-Industrial-Laboratories/HyperNet/releases/tag/v0.10.1)
+Download the [Linux 0.10.2 release](https://github.com/Federated-Industrial-Laboratories/HyperNet/releases/tag/v0.10.2)
 or build from source. For a signed package, follow the
 [package installation guide](Documentation/Packages.md): verification requires
 independently accepted publisher trust and the current signed update policy.
@@ -147,8 +151,8 @@ for permissions and recovery.
 
 ## Documentation and development
 
-The [release notes](Documentation/ReleaseNotes.md) describe the 0.10.1 scope and
-known limits. The [documentation index](Documentation/ReadMe.md) provides reading routes for
+The [release notes](Documentation/ReleaseNotes.md) describe release 0.10.2,
+earlier release scope and known limits. The [documentation index](Documentation/ReadMe.md) provides reading routes for
 operators, authors and application developers, plus the complete reference library.
 [Source layout](Documentation/SourceLayout.md) maps implementation modules.
 [Qualification](Documentation/Qualification.md) describes focused checks and the

@@ -24,6 +24,195 @@ use anyhow::{Context, Result, ensure};
 use std::path::Path;
 #[path = "RouteAuthorityRead.rs"]
 mod read;
+pub(crate) use read::{PreparedRead, ReadCompletion, ReadStage};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReadPendingStage {
+    Issue,
+    Finish,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReadPendingKind {
+    Ordinary,
+    Fence,
+}
+#[derive(Debug)]
+pub(crate) struct ReadPending {
+    pub stage: ReadPendingStage,
+    pub kind: ReadPendingKind,
+}
+impl std::fmt::Display for ReadPending {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output.write_str(match self.stage {
+            ReadPendingStage::Issue => "fresh application authority requester is busy",
+            ReadPendingStage::Finish => "fresh Route authority requester is busy",
+        })
+    }
+}
+impl std::error::Error for ReadPending {}
+fn require_read_idle(store: &Store, stage: ReadPendingStage) -> Result<()> {
+    if store.resume_ordinary()?.is_some() {
+        return Err(ReadPending {
+            stage,
+            kind: ReadPendingKind::Ordinary,
+        }
+        .into());
+    }
+    if store.resume_fence()?.is_some() {
+        return Err(ReadPending {
+            stage,
+            kind: ReadPendingKind::Fence,
+        }
+        .into());
+    }
+    Ok(())
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CleanupStage {
+    Recover,
+    Context,
+    Parse,
+    OrdinaryClose,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PendingState {
+    None,
+    Ordinary,
+    Fence,
+    Both,
+    Unavailable,
+}
+impl PendingState {
+    fn inspect(store: &Store) -> Self {
+        let state = (|| -> Result<_> {
+            Ok((
+                store.resume_ordinary()?.is_some(),
+                store.resume_fence()?.is_some(),
+            ))
+        })();
+        match state {
+            Ok((false, false)) => Self::None,
+            Ok((true, false)) => Self::Ordinary,
+            Ok((false, true)) => Self::Fence,
+            Ok((true, true)) => Self::Both,
+            Err(_) => Self::Unavailable,
+        }
+    }
+}
+
+// Constructed only from the exact freshly verified and published permit result.
+// This is a stream-gate renewal, never a replacement action receipt or endpoint grant.
+pub(crate) struct CertifiedStreamPermit {
+    session: VersionRef,
+    expires: u64,
+}
+impl CertifiedStreamPermit {
+    pub(crate) fn expiry_for(self, session: &VersionRef) -> Result<u64> {
+        ensure!(
+            self.session == *session,
+            "certified stream permit identity changed"
+        );
+        Ok(self.expires)
+    }
+}
+// This binding is derived only after a fresh stream permit has been published.
+#[derive(Clone, Copy)]
+struct EndpointBinding(Digest);
+impl EndpointBinding {
+    fn checked(
+        route: &VersionRef,
+        expected_service: Digest,
+        registered: &[u8],
+        configured: &[u8],
+    ) -> Result<Self> {
+        ensure!(
+            route.kind == 165 && route.id == expected_service && registered == configured,
+            "certified endpoint differs from exact local route consent"
+        );
+        Ok(Self(wire::digest(configured)))
+    }
+}
+pub(crate) struct CertifiedEndpointPermit {
+    binding: EndpointBinding,
+    expires: u64,
+}
+impl CertifiedEndpointPermit {
+    pub(crate) fn expiry_for(self, configured: &[u8]) -> Result<u64> {
+        ensure!(
+            self.binding.0 == wire::digest(configured),
+            "certified endpoint profile changed"
+        );
+        Ok(self.expires)
+    }
+}
+pub(crate) struct StreamCheck {
+    pub authority: streams::control::Authority,
+    pub deadline: u64,
+    pub renewal: Option<CertifiedStreamPermit>,
+    pub endpoint_renewal: Option<CertifiedEndpointPermit>,
+}
+
+impl StreamCheck {
+    fn certified(
+        session: &VersionRef,
+        endpoint: Option<EndpointBinding>,
+        observation: read::Observation,
+        original_deadline: u64,
+        health: authority_challenge::ClockHealth,
+    ) -> Result<Self> {
+        ensure!(
+            observation.disposition != Disposition::Pending,
+            "fresh application authority is pending"
+        );
+        let statement = observation.statement;
+        let now = health.observe()?;
+        let remaining = statement
+            .expires_at_ms
+            .saturating_sub(authority_challenge::DELTA_MS)
+            .checked_sub(now.wall_ms)
+            .filter(|remaining| *remaining > 0)
+            .context("fresh application authority expired")?;
+        // Gate renewal retains the certified permission lifetime, as ordinary
+        // stream maintenance does. The action assertion also ends with the
+        // current clock observation and its original read deadline.
+        let certified_expiry = now.boot_ms.saturating_add(remaining);
+        let endpoint_renewal = if observation.disposition == Disposition::Permit {
+            Some(CertifiedEndpointPermit {
+                binding: endpoint.context("fresh stream permit omitted exact endpoint binding")?,
+                expires: certified_expiry,
+            })
+        } else {
+            None
+        };
+        let deadline = certified_expiry
+            .min(health.valid_until_boot_ms())
+            .min(original_deadline);
+        let renewal =
+            (observation.disposition == Disposition::Permit).then(|| CertifiedStreamPermit {
+                session: session.clone(),
+                expires: certified_expiry,
+            });
+        let authority = streams::control::Authority {
+            network: statement.scope.network,
+            incarnation: statement.scope.incarnation,
+            configuration: statement.scope.configuration,
+            epoch: statement.scope.epoch,
+            height: statement.height,
+            state: statement.state,
+            statement_digest: wire::digest(&statement.encode()?),
+            evaluated_at_ms: statement.evaluated_at_ms,
+            expires_at_ms: statement.expires_at_ms,
+            code: observation.code,
+        };
+        Ok(Self {
+            authority,
+            deadline,
+            renewal,
+            endpoint_renewal,
+        })
+    }
+}
+
 fn a(v: Vec<V>) -> V {
     V::Array(v)
 }
@@ -71,6 +260,40 @@ pub(crate) fn registered(
     );
     Ok(selected.profile)
 }
+pub(crate) fn retirement_target(
+    state: &domains::State,
+    original: &VersionRef,
+    proof_digest: Digest,
+) -> Result<Option<VersionRef>> {
+    let record = state.record(173, original.id)?;
+    let current = streams::Session::parse(&record.payload, state.network, state.incarnation)?;
+    Ok((!current.retired
+        && current.proof.generation == original.generation
+        && wire::digest(&current.proof.envelope) == proof_digest)
+        .then(|| record.reference.clone()))
+}
+// This only identifies the actor's retained cleanup. It grants no permission
+// and neither recovers nor changes the requester's ordinary/fence state.
+pub(crate) fn pending_stream_close(
+    store: &Store,
+    state: &domains::State,
+    original: &VersionRef,
+    proof_digest: Digest,
+) -> Result<Option<Digest>> {
+    if store.resume_fence()?.is_some() {
+        return Ok(None);
+    }
+    let Some(pending) = store.resume_ordinary()? else {
+        return Ok(None);
+    };
+    let operation = Operation::parse(&Intent::from_signed(pending.signed())?)?;
+    let DomainCommand::Stream(streams::Command::Close { session }) = operation.command else {
+        return Ok(None);
+    };
+    Ok((operation.grant.is_none()
+        && retirement_target(state, original, proof_digest)?.as_ref() == Some(&session))
+    .then(|| wire::digest(pending.signed())))
+}
 pub struct Client<'a> {
     config: &'a Config,
     guard: &'a Guard,
@@ -88,9 +311,10 @@ struct OperationCosts {
     action_ms: u64,
     own_ms: Option<u64>,
     voucher_ms: Option<u64>,
+    stream_ms: Option<u64>,
 }
 impl OperationCosts {
-    fn observe(&mut self, command: &DomainCommand, own: Digest, elapsed: u64) {
+    fn observe(&mut self, command: &DomainCommand, own: Digest, elapsed: u64, permitted: bool) {
         // These predict scheduling only; the certified expiry remains the I/O limit.
         self.action_ms = elapsed;
         match command {
@@ -100,12 +324,18 @@ impl OperationCosts {
             DomainCommand::Route(routes::Command::VoucherContext { .. }) => {
                 self.voucher_ms = Some(elapsed);
             }
+            DomainCommand::Stream(streams::Command::Permit { .. }) if permitted => {
+                self.stream_ms = Some(elapsed);
+            }
             _ => {}
         }
     }
     fn voucher_ms(&self) -> u64 {
         // A retained voucher can admit before its first renewal in this process.
         self.voucher_ms.unwrap_or(self.action_ms)
+    }
+    fn stream_ms(&self) -> u64 {
+        self.stream_ms.unwrap_or(self.action_ms)
     }
 }
 impl<'a> Client<'a> {
@@ -181,6 +411,7 @@ impl<'a> Client<'a> {
                 streams::Command::Inspect { .. }
                     | streams::Command::Admit { .. }
                     | streams::Command::Permit { .. }
+                    | streams::Command::RetirementContext { .. }
                     | streams::Command::Close { .. }
             )
         ) {
@@ -424,7 +655,9 @@ impl<'a> Client<'a> {
                 DomainCommand::Route(
                     routes::Command::Lookup { .. } | routes::Command::VoucherContext { .. }
                 ) | DomainCommand::Stream(
-                    streams::Command::Inspect { .. } | streams::Command::Permit { .. }
+                    streams::Command::Inspect { .. }
+                        | streams::Command::Permit { .. }
+                        | streams::Command::RetirementContext { .. }
                 )
             )
         {
@@ -573,12 +806,16 @@ impl<'a> Client<'a> {
                 &operation.command,
                 self.config.profile.identity.service,
                 authority_challenge::boot_time_ms()?.saturating_sub(started),
+                true,
             );
         }
         outcome
     }
     pub fn operation_budget_ms(&self) -> u64 {
         self.costs.action_ms
+    }
+    pub(crate) fn stream_renewal_budget_ms(&self) -> u64 {
+        self.costs.stream_ms()
     }
     pub fn voucher_renewal_budget_ms(&self) -> u64 {
         self.costs.voucher_ms()
@@ -881,18 +1118,29 @@ impl<'a> Client<'a> {
         }))?;
         self.effect_deadline()
     }
-    /// The fresh read never recovers or falls back to an ordinary request.
-    pub fn check_stream(
+    pub(crate) fn prepare_stream_renewal(&mut self, session: &VersionRef) -> Result<PreparedRead> {
+        // Recovery can mutate requester state, so the actor calls this only before
+        // starting the finite read round. Workers never recover an ordinary effect.
+        self.recover()?;
+        self.active.check(self.guard)?;
+        require_read_idle(&self.store, ReadPendingStage::Issue)?;
+        self.prepare_read(
+            DomainCommand::Stream(streams::Command::Permit {
+                session: session.clone(),
+            }),
+            None,
+        )
+    }
+    /// Preparation and completion stay on the requester actor. Only the exchange
+    /// between them may run concurrently; neither path recovers an ordinary effect.
+    pub(crate) fn prepare_check_stream(
         &mut self,
         session: &VersionRef,
         caller_started_boot_ms: u64,
-    ) -> Result<(streams::control::Authority, bool, u64)> {
+    ) -> Result<PreparedRead> {
         self.active.check(self.guard)?;
-        ensure!(
-            self.store.resume_ordinary()?.is_none() && self.store.resume_fence()?.is_none(),
-            "fresh application authority requester is busy"
-        );
-        let observation = self.read_observation(
+        require_read_idle(&self.store, ReadPendingStage::Issue)?;
+        self.prepare_read(
             DomainCommand::Stream(streams::Command::Permit {
                 session: session.clone(),
             }),
@@ -901,58 +1149,98 @@ impl<'a> Client<'a> {
                     .checked_add(authority_challenge::MAXIMUM_DURATION_MS)
                     .context("application challenge ceiling overflow")?,
             ),
-        )?;
-        ensure!(
-            observation.disposition != Disposition::Pending,
-            "fresh application authority is pending"
-        );
-        let statement = observation.statement;
-        let health = self.guard.health()?;
-        let now = health.observe()?;
-        let remaining = statement
-            .expires_at_ms
-            .saturating_sub(authority_challenge::DELTA_MS)
-            .checked_sub(now.wall_ms)
-            .context("fresh application authority expired")?;
-        let mut deadline = now
-            .boot_ms
-            .saturating_add(remaining)
-            .min(health.valid_until_boot_ms());
-        if let Some(caller) = self.deadline {
-            deadline = deadline.min(caller);
-        }
-        let permitted = observation.disposition == Disposition::Permit;
-        if permitted {
-            deadline = deadline.min(self.effect_deadline()?);
-        }
-        let authority = streams::control::Authority {
-            network: statement.scope.network,
-            incarnation: statement.scope.incarnation,
-            configuration: statement.scope.configuration,
-            epoch: statement.scope.epoch,
-            height: statement.height,
-            state: statement.state,
-            statement_digest: wire::digest(&statement.encode()?),
-            evaluated_at_ms: statement.evaluated_at_ms,
-            expires_at_ms: statement.expires_at_ms,
-            code: observation.code,
-        };
-        Ok((authority, permitted, deadline))
+        )
     }
-    pub fn stream_close(&mut self, session: &VersionRef) -> Result<()> {
-        self.recover()?;
-        let r = self.disk.context().0.record(173, session.id)?.clone();
-        let current = streams::Session::parse(
-            &r.payload,
-            self.guard.manifest.network,
-            self.guard.manifest.incarnation,
-        )?;
-        if !current.retired && current.proof.generation == session.generation {
-            self.domain_action(DomainCommand::Stream(streams::Command::Close {
-                session: r.reference,
-            }))?;
+    pub(crate) fn finish_check_stream(
+        &mut self,
+        prepared: PreparedRead,
+        completion: Result<ReadCompletion>,
+        session: &VersionRef,
+        trace: impl FnMut(ReadStage),
+    ) -> Result<StreamCheck> {
+        if let Err(error) = prepared.permit_session(session) {
+            self.discard_read(prepared)?;
+            return Err(error);
         }
-        Ok(())
+        let original_deadline = prepared.deadline();
+        let observation = self.finish_read(prepared, completion, trace)?;
+        let endpoint = if observation.disposition == Disposition::Permit {
+            let (state, _) = self.disk.context();
+            let current = state.record(173, session.id)?;
+            ensure!(
+                current.reference == *session,
+                "certified stream session changed"
+            );
+            let stream =
+                streams::Session::parse(&current.payload, state.network, state.incarnation)?;
+            let current = state.record(172, stream.proof.service.id)?;
+            ensure!(
+                current.reference == stream.proof.service,
+                "certified application service changed"
+            );
+            let service =
+                streams::Service::parse(&current.payload, state.network, state.incarnation)?;
+            let route = state.record(165, service.registration.route.id)?;
+            ensure!(
+                route.reference == service.registration.route,
+                "certified endpoint route changed"
+            );
+            let registered = self.registered(route.reference.id)?;
+            Some(EndpointBinding::checked(
+                &route.reference,
+                self.config.profile.identity.service,
+                &registered.envelope,
+                &self.config.profile.envelope,
+            )?)
+        } else {
+            None
+        };
+        StreamCheck::certified(
+            session,
+            endpoint,
+            observation,
+            original_deadline,
+            self.guard.health()?,
+        )
+    }
+
+    pub(crate) fn pending_diagnostic(&self) -> PendingState {
+        PendingState::inspect(&self.store)
+    }
+    pub(crate) fn pending_stream_close(
+        &self,
+        session: &VersionRef,
+        proof_digest: Digest,
+    ) -> Result<Option<Digest>> {
+        pending_stream_close(&self.store, self.disk.context().0, session, proof_digest)
+    }
+    pub(crate) fn stream_close(
+        &mut self,
+        session: &VersionRef,
+        proof_digest: Digest,
+        report: impl FnOnce(CleanupStage, &Self, &anyhow::Error),
+    ) -> Result<()> {
+        let mut stage = CleanupStage::Recover;
+        let result = (|| {
+            self.recover()?;
+            // A caller can close this slot first. Resolve an unknown original close
+            // before reading its current generation or preparing another exact close.
+            stage = CleanupStage::Context;
+            self.domain_action(DomainCommand::Stream(streams::Command::RetirementContext {
+                session: session.clone(),
+            }))?;
+            stage = CleanupStage::Parse;
+            if let Some(session) = retirement_target(self.disk.context().0, session, proof_digest)?
+            {
+                stage = CleanupStage::OrdinaryClose;
+                self.domain_action(DomainCommand::Stream(streams::Command::Close { session }))?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = &result {
+            report(stage, self, error);
+        }
+        result
     }
     pub fn reader(&mut self, envelope: &[u8]) -> Result<Vec<u8>> {
         self.recover()?;

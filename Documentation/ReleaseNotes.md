@@ -2,6 +2,112 @@
 
 [Documentation](ReadMe.md) | [Project](../ReadMe.md)
 
+## Linux 0.10.2
+
+Version 0.10.2 adds optional acknowledgement of consumed fresh reads and improves
+application-stream cleanup scheduling. Download the signed
+[Linux 0.10.2 release](https://github.com/Federated-Industrial-Laboratories/HyperNet/releases/tag/v0.10.2).
+Package signatures, installed checks and native results identify exact artifacts;
+earlier release evidence retains its original scope.
+
+### Changes and compatibility
+
+- Application authority checks overlap in finite rounds of at most four queued
+  and active checks in total. Read-only renewal of an established stream can
+  start a round and share its four exchange slots with already-current checks.
+  Completion closes admission; completed slots do not refill and the original
+  round end does not extend. A later check without the existing gate or round
+  headroom waits at the original FIFO head for normal preparation. The actor
+  retains challenge preparation, current
+  authority verification and durable publication. Expiry, cancellation, current
+  floors and original caller deadlines remain enforced. Unestablished streams,
+  endpoint renewal and authority-changing cleanup retain exclusive turns.
+- A fresh successful stream permit can renew the same still-current stream gate
+  from its exact certified result. The action receipt keeps its original deadline
+  and old-gate clipping. The same certified result may renew the exact registered
+  receiving-endpoint gate atomically with the stream gate; the fixed forwarding
+  lifetime does not extend. An expired open cached stream gate may use bounded
+  readiness renewal before a separate fresh check. Closed or ended streams cannot revive.
+  Bounded inactive-stream diagnostics distinguish these lifecycle states.
+
+- Private authority readiness preserves typed peer closure and socket reset.
+  Fresh-authority recovery can suspend and reopen the endpoint after these
+  transport failures. Buffered replies are drained before closure. Timeout,
+  invalid descriptors and invalid signed replies remain distinct failures;
+  recovery does not extend deadlines or preserve old admissions.
+- A signed acknowledgement releases only the exact completed read after its
+  authorised recipient consumes the verified result. It binds the original scope,
+  read, statement, result and deadline. Pending reads and lost responses retain
+  their original expiry and recovery. The 32-read and 768 KiB limits remain.
+- A private same-inode socket alias and optional final-service TLS negotiation
+  identify cleanup support. Legacy peers retain their existing read/poll behavior;
+  missing support skips cleanup without opening a replacement session. Cleanup
+  cannot grant authority, renew a deadline or change a consumed result.
+- Application endpoints renew their own and live-stream permission before closing
+  completed streams when measured headroom is insufficient. Local close still
+  invalidates the stream immediately. One held completion remains within the
+  existing capacity accounting; unknown authoritative Close outcomes retain exact
+  requester recovery.
+- Ready application work classes take finite turns, and due streams renew in
+  service order. Maintenance cannot indefinitely overtake a queued check or
+  completed handshake. These dispatch bounds do not promise a wall-clock latency.
+- Endpoint retirement survives a competing caller Close. An endpoint-only
+  `StreamRetirementContext` read obtains the current session, service and route
+  records without granting forwarding permission. Retirement matches the original
+  proof generation and signed-proof digest; a reused slot is left unchanged.
+  The one held cleanup preserves its original deadline and uses bounded backoff.
+  Any unknown signed Close outcome must resolve before another is prepared.
+  A check blocked by that pending ordinary Close keeps its place at the queue
+  head within its original deadline; later checks cannot overtake it. Recovery
+  retains both ordinary-operation and retirement-fence exclusion.
+- Bounded capacity diagnostics report retained count and bytes, incoming charge,
+  earliest expiry and fixed ceilings without payloads or requester identities.
+
+Use Core 0.10.2 and Suite 0.10.1 for cleanup across Core and native Suite read
+consumers. Earlier payload and authority-check peers remain compatible, with
+completed reads retained until expiry when optional cleanup is unavailable.
+No grant, state-contract or one-use authority migration is introduced.
+The additive retirement-context query requires supporting authority replicas.
+Upgrade the committee before relying on this recovery; an older committee refuses
+the query without an ordered-mutation fallback or an extended cleanup deadline.
+
+### Upgrade and qualification scope
+
+The target remains native Ubuntu 24.04 x86_64 with GNU libc 2.39. Source-bound
+component checks cover actual quorum collection removal after Suite consumption
+over admitted TLS, legacy session reuse, original deadlines and renewal/close
+scheduling. They do not establish application throughput, concurrent-user capacity
+or a new platform. Earlier native results retain their original source and binary
+identities; a version change does not relabel earlier executable evidence.
+
+Follow stopped service replacement and renew local artifact consent before
+activation. Preserve complete authority state, requester journals, identities,
+package trust and retained floors. The package contract remains
+`HyperNet080Authority2`. Use a separately authenticated, signed target for the
+exact package; do not reset existing trust or assume a target sequence
+from the version number. See [upgrade and recovery](UpgradeRecovery.md).
+
+### Signed package
+
+The release contains `HyperNet-0.10.2-linux-x86_64.tar`, its `.sig`,
+`HyperNet-0.10.2-linux-x86_64.target.json`, its `.sig`, `Publisher.pub`,
+`SHA256SUMS` and `SHA256SUMS.sig`. The signed target uses root generation 1,
+sequence 20 and version floor 0.10.2. Authenticate the publisher independently
+and preserve retained package trust; never lower its sequence or version floor.
+The unchanged corresponding-source archive is `HyperNet-0.10.1-system-sources.tar.xz`;
+its older filename identifies the retained dependency inputs, not the runtime version.
+
+Installed qualification covers the final executable on Ubuntu 24.04 x86_64 with
+GNU libc 2.39. The same runtime bytes also participated in an admitted application
+pilot on Ubuntu 26.04 amd64 with GNU libc 2.43: eight interactive clients and four
+support endpoints used twelve receiving streams and two admitted applications.
+The deployment allowed sixteen relay and application connections, eight authority
+endpoint connections and two native connector sessions. This is a bounded topology,
+not qualification of every configured slot, independent host failure domains or
+arbitrary application load. Application-specific throughput and latency results
+belong to that application's qualification report. Earlier GUI and platform
+results retain their original artifact scope; no independent security audit is claimed.
+
 ## Linux 0.10.1 authority readiness correction
 
 Version 0.10.1 prepares endpoint and selected-stream permission before a queued

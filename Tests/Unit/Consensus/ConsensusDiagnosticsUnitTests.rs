@@ -207,6 +207,55 @@ fn categories_limit_rate_independently_and_resume_with_suppressed_count() {
     assert_eq!(budget.admit(Code::LocalTimeout, start + RATE * 2), Some(0));
 }
 #[test]
+fn fresh_read_capacity_remains_visible_after_many_independent_diagnostic_samples() {
+    let mut budget = Budget::default();
+    let start = Instant::now();
+    for sample in 0..80 {
+        let now = start + RATE * sample;
+        assert_eq!(budget.admit(Code::LocalCapacity, now), Some(0));
+        assert_eq!(
+            budget.admit(Code::FreshReadCapacity, now),
+            Some(if sample == 0 { 0 } else { 100 })
+        );
+        for _ in 0..100 {
+            assert_eq!(budget.admit(Code::FreshReadCapacity, now), None);
+        }
+    }
+}
+#[test]
+fn fresh_read_capacity_records_only_numeric_occupancy_and_retention_bounds() {
+    let now = Instant::now();
+    let mut capacity = ReadCapacity {
+        retained_count: 32,
+        retained_bytes: 123_456,
+        incoming_bytes: 1024,
+        earliest_expiry: Some(now + Duration::from_millis(275)),
+        count_limit: 32,
+        byte_limit: 768 * 1024,
+    };
+    let record = capacity.record(now, 6_033_552, 7);
+    assert_eq!(
+        record,
+        serde_json::json!({
+            "status": "ReplicaDiagnostic", "code": "FreshReadCapacity",
+            "bootMs": 6_033_552, "suppressed": 7,
+            "retainedCount": 32, "retainedBytes": 123_456, "incomingBytes": 1024,
+            "earliestExpiryRemainingMs": 275, "countLimit": 32, "byteLimit": 786_432,
+        })
+    );
+    capacity.retained_count = 4;
+    capacity.retained_bytes = capacity.byte_limit - 512;
+    let record = capacity.record(now + Duration::from_millis(300), 6_033_852, 0);
+    assert!(record["retainedCount"].as_u64().unwrap() < record["countLimit"].as_u64().unwrap());
+    assert!(
+        record["retainedBytes"].as_u64().unwrap() + record["incomingBytes"].as_u64().unwrap()
+            > record["byteLimit"].as_u64().unwrap()
+    );
+    assert_eq!(record["earliestExpiryRemainingMs"], 0);
+    capacity.earliest_expiry = None;
+    assert!(capacity.record(now, 6_033_552, 0)["earliestExpiryRemainingMs"].is_null());
+}
+#[test]
 fn work_marker_excludes_idle_wait_and_clears_on_early_exit() {
     let (diagnostics, monitor) = Diagnostics::new();
     assert!(monitor.receiver.borrow().is_none());

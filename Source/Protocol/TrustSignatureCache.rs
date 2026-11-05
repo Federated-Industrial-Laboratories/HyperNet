@@ -78,13 +78,28 @@ pub(super) fn global() -> &'static Cache {
     VERIFIED.get_or_init(Cache::new)
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SignatureStatistics {
     pub lookups: u64,
     pub hits: u64,
     pub strict_verifications: u64,
     pub strict_verification_ns: u64,
     pub evictions: u64,
+}
+impl SignatureStatistics {
+    pub(crate) fn since(self, earlier: Self) -> Self {
+        Self {
+            lookups: self.lookups.saturating_sub(earlier.lookups),
+            hits: self.hits.saturating_sub(earlier.hits),
+            strict_verifications: self
+                .strict_verifications
+                .saturating_sub(earlier.strict_verifications),
+            strict_verification_ns: self
+                .strict_verification_ns
+                .saturating_sub(earlier.strict_verification_ns),
+            evictions: self.evictions.saturating_sub(earlier.evictions),
+        }
+    }
 }
 thread_local! {
     static STATISTICS: Cell<SignatureStatistics> = const { Cell::new(SignatureStatistics {
@@ -100,6 +115,9 @@ fn record(update: impl FnOnce(&mut SignatureStatistics)) {
 }
 pub(super) fn take_signature_statistics() -> SignatureStatistics {
     STATISTICS.with(|cell| cell.replace(SignatureStatistics::default()))
+}
+pub(super) fn signature_statistics() -> SignatureStatistics {
+    STATISTICS.with(Cell::get)
 }
 
 #[cfg(test)]

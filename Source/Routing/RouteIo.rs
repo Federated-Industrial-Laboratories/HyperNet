@@ -40,7 +40,7 @@ struct Permission {
 }
 #[derive(Clone)]
 pub struct Gate(
-    tokio::sync::watch::Sender<Permission>,
+    Arc<tokio::sync::watch::Sender<Permission>>,
     Arc<tokio::sync::Notify>,
 );
 pub(crate) struct Activity {
@@ -58,13 +58,15 @@ impl Gate {
     }
     pub(crate) fn with_signal(expires: u64, signal: Arc<tokio::sync::Notify>) -> Self {
         Self(
-            tokio::sync::watch::channel(Permission {
-                expires,
-                closed: false,
-                active: 0,
-                requested: false,
-            })
-            .0,
+            Arc::new(
+                tokio::sync::watch::channel(Permission {
+                    expires,
+                    closed: false,
+                    active: 0,
+                    requested: false,
+                })
+                .0,
+            ),
             signal,
         )
     }
@@ -127,6 +129,50 @@ impl Gate {
         });
         ensure!(renewed, "route permission is closed");
         Ok(())
+    }
+    pub(crate) fn renew_pair(
+        &self,
+        other: &Self,
+        expires: u64,
+        other_expires: u64,
+        original_end: u64,
+    ) -> Result<u64> {
+        ensure!(!Arc::ptr_eq(&self.0, &other.0), "paired permissions alias");
+        // Clones share the sender allocation. Reversed callers therefore take
+        // these two locks in the same order; no I/O occurs while they are held.
+        let (first, first_expiry, second, second_expiry) =
+            if Arc::as_ptr(&self.0) < Arc::as_ptr(&other.0) {
+                (self, expires, other, other_expires)
+            } else {
+                (other, other_expires, self, expires)
+            };
+        let mut outcome = Err(anyhow::anyhow!("paired permissions unavailable"));
+        first.0.send_if_modified(|a| {
+            second.0.send_if_modified(|b| {
+                let checked = (|| {
+                    let now = crate::authority_challenge::boot_time_ms()?;
+                    ensure!(
+                        !a.closed && !b.closed && a.expires > now && b.expires > now,
+                        "paired current permission expired or closed"
+                    );
+                    ensure!(
+                        original_end > now && first_expiry > now && second_expiry > now,
+                        "paired permission original deadline or certificate expired"
+                    );
+                    Ok(now)
+                })();
+                let changed = checked.is_ok();
+                if changed {
+                    a.expires = first_expiry;
+                    b.expires = second_expiry;
+                    a.requested = false;
+                    b.requested = false;
+                }
+                outcome = checked;
+                changed
+            })
+        });
+        outcome
     }
     pub fn close(&self) {
         self.0.send_modify(|value| value.closed = true);

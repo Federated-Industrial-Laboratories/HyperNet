@@ -388,6 +388,7 @@ common maximum. Requests are `[41,1,Scope,operation,payloadBytes]`:
 | 5 | Empty array; local signer status only |
 | 6 | `[signedReadRequest,signedChallenge]` |
 | 7 | Exact 32-byte read ID |
+| 8 | Signed kind63 consumed-read acknowledgement; no authority or ordinary effect |
 
 Ordinary replies are
 `[42,1,Scope,status,code,orderedRequestOrNull,nodeOrNull,executedCertificateOrNull,operationResultOrNull,outputSidecar]`.
@@ -405,14 +406,66 @@ requires three matching kind61 signatures over the supplied result. A local
 Unavailable or Invalid reply is not authenticated permission or a quorum refusal.
 Unavailable code1 means the original collection or healthy challenge is unavailable.
 Code2 means the bounded collection count or retained-byte allocation is full.
-Completed certificates retain their collection until its original expiry so a
-lost response remains recoverable. A client may resubmit only the identical
-signed read and challenge after code2, within the same monotonic deadline and
+Completed certificates retain their collection until its original expiry or a
+valid consumed-read acknowledgement, so an unacknowledged lost response remains
+recoverable. A client may resubmit only the identical signed read and challenge
+after code2, within the same monotonic deadline and
 healthy-clock checks. It must not extend a permission, mint another challenge,
 replay a mutation or treat capacity as approval. Code1 terminates that exchange.
-Protocol1 reader endpoints admit operations0-4and6-7, with exact scope and request
+Protocol1 reader endpoints admit operations0-4and6-8, with exact scope and request
 validation; operation5 remains a local diagnostic. Pending replies keep demand
 only when reply family, scope and exact submitted or polled ID all match.
+
+Operation8 carries the signed record
+`[63,1,Scope,readId,readStatementDigest,resultDigest,notAfterMs]`. The envelope has
+exactly one signature from the original read's requester/recipient key; fresh reads
+already require those roles to use the same key. The read ID binds the original
+signed request and challenge. The statement digest binds the exact canonical
+kind61 payload, independently of which three matching voter signatures arrived.
+The replica releases only that matching complete collection. A wrong signer,
+scope, statement or result cannot remove an entry, and a pending collection
+cannot be acknowledged. An absent or duplicate acknowledgement is a no-op.
+The signed delivery ceiling cannot exceed the completed statement's original
+expiry. The consumer also clips it to its original call deadline, translated
+from the successful consumption's wall/boot observation. A late acknowledgement
+does not release an entry before its normal expiry processing.
+No replacement challenge, authority, ordinary effect or persistent receipt is
+created by cleanup. The32-entry and786432-byte aggregate bounds are unchanged.
+
+The local consumer emits an acknowledgement only after successful floor
+publication, result use and one-use challenge consumption. Both verified permits
+and verified refusals can be acknowledged. Cleanup uses one nonblocking local
+connection/write attempt within the original deadline, without a reply wait,
+retry or additional queue. Updated collectors and native authority connectors
+publish `ReadAcknowledgements.sock` as a private hard-link alias of `Control.sock`.
+The consumer checks ownership, mode and the identical socket device/inode before
+and after connection. An absent or substituted alias skips cleanup without
+contacting a legacy listener. The alias uses the same listener, bounded ingress
+queue and cleanup lifetime; it is a capability signal, never authority.
+The replica returns `[64,1,Scope,readId,readStatementDigest,resultDigest,released]`,
+where `released` is a boolean. This unsigned cleanup receipt is not authority.
+An authority connector must drain and correlate that receipt without waiting
+for the closed local notification sender. A still-connected forwarding caller
+receives that same framed receipt. Its cleanup work must retain the
+signed delivery ceiling and existing actor, route and queue bounds. Failed,
+lost or unsupported cleanup does not change the consumed result, initiate
+another read or extend permission.
+The replica retains an unacknowledged entry under its original expiry.
+
+Protocol1 final-service TLS optionally negotiates `HyperNetRoute/1+ReadAck1`, with
+`HyperNetRoute/1` retained as the fallback. Only the former permits a connector
+to forward cleanup on its existing admitted session. A legacy selection skips
+cleanup and returns a bound false receipt locally, without a probe, reconnect
+or fresh allowance. Relay TLS remains `HyperNetRoute/1`; old clients and servers
+retain that selection. The authenticated final endpoint's feature selection
+does not grant permission or extend its original transport limits.
+
+Operation8 and kind63/64version1 are additive protocol extensions. Older local
+connectors have no alias, and older remote endpoints negotiate only legacy TLS.
+Normal cleanup therefore sends no unsupported operation to either. Lost or
+failed cleanup continues with the already consumed result. Legacy start/poll operations6/7 keep
+their original retention and response semantics. No acknowledgement or receipt
+can stand in for a fresh authority proof.
 
 The mandatory output sidecar retains its exact reference/body framing. Native
 and federated Page authority results carry metadata and an empty object sidecar.
@@ -439,9 +492,10 @@ deadline. It does not acquire the active signer's exclusive journal lock.
 
 ## Fresh quorum reads
 
-Four observational queries use a separate protocol: `AuthorityPolicyContext`,
-`PageView`, `RouteLookup` and `RouteVoucherContext`. Admission, host content effects,
-stream controls and all mutations still require their ordered request and result.
+Observational queries use a separate protocol: `AuthorityPolicyContext`,
+`PageView`, `RouteLookup`, `RouteVoucherContext`, `StreamLookup`, `StreamInspect`,
+`StreamPermit` and `StreamRetirementContext`. Admission, host content effects,
+stream mutations and all other mutations still require their ordered request and result.
 The whitelist matches complete parsed variants. A non-mutating flag does not
 admit another operation to this protocol.
 
@@ -483,6 +537,16 @@ transaction leaves ordinary and fence trackers unchanged. Restart can retain the
 certified floor and historical provenance, but cannot revive a live challenge.
 A Page view does not replace the host's ordered authorization or exact receipt.
 A route context does not consume a Permit or extend an admitted channel's limits.
+
+`StreamRetirementContext` carries `["StreamRetirementContext",SessionVersionRef]`
+as its domain command, with no grant. Only the endpoint key from the current
+session's service-route binding may read it. Its bounded closure contains exactly
+the current kind173 session, kind172 service and kind165 route. It remains a
+metadata disclosure after grant revocation or proof expiry and grants no current
+forwarding permission. The consumer must preserve the original proof generation
+and signed-proof digest before preparing an exact current-reference `StreamClose`.
+It cannot replace an unknown ordinary outcome. This additive command requires
+supporting authority replicas; older replicas refuse it without a mutation fallback.
 
 Fresh query output sidecars are empty; page bodies remain on their separate host
 exchange. Collection retains at most32active reads and786432aggregate bytes.

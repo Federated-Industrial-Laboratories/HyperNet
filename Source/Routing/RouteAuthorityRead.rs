@@ -10,6 +10,81 @@ pub(super) struct Observation {
     pub code: u64,
 }
 
+// The actor retains the challenge and all mutable authority state. A worker receives
+// only this immutable, bounded exchange snapshot; it cannot accept an observation.
+#[derive(Clone)]
+pub(crate) struct ReadExchange {
+    descriptor: proof::TrustDescriptor,
+    signed: Vec<u8>,
+    challenge: Vec<u8>,
+    deadline: u64,
+    prefix: proof::Prefix,
+    head: Option<crate::authority_history::TreeHead>,
+}
+pub(crate) type ReadCompletion = (transport::CertifiedReply, transport::HistoryEvidence);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReadStage {
+    DomainStart,
+    DomainComplete,
+    PublishStart,
+    PublishComplete,
+    Signatures(wire::SignatureStatistics),
+}
+
+// This span includes durable floor acceptance, domain publication and final checks.
+// Its observer cannot replace an outcome or turn a failed publication into success.
+pub(super) fn observe_acceptance<T>(
+    mut trace: impl FnMut(ReadStage),
+    accept: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    trace(ReadStage::PublishStart);
+    let result = accept();
+    trace(ReadStage::PublishComplete);
+    result
+}
+pub(crate) struct PreparedRead {
+    exchange: ReadExchange,
+    command: DomainCommand,
+    started: u64,
+}
+impl PreparedRead {
+    pub(super) fn permit_session(&self, expected: &VersionRef) -> Result<()> {
+        ensure!(
+            matches!(&self.command, DomainCommand::Stream(streams::Command::Permit { session }) if session == expected),
+            "application check does not bind the exact stream permit"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn exchange(&self) -> ReadExchange {
+        self.exchange.clone()
+    }
+    pub(crate) fn deadline(&self) -> u64 {
+        self.exchange.deadline
+    }
+}
+impl ReadExchange {
+    pub(crate) fn run(
+        self,
+        mut current: impl FnMut() -> Result<authority_challenge::ClockHealth>,
+    ) -> Result<ReadCompletion> {
+        transport::remaining(self.deadline)?;
+        current()?.observe()?;
+        transport::exchange_read(
+            &self.descriptor,
+            &self.signed,
+            &self.challenge,
+            self.deadline,
+            Path::new("/Authority/Control.sock"),
+            &self.prefix,
+            self.head.as_ref(),
+            &mut current,
+        )
+        .map_err(Client::retry_read)
+        .context("obtain fresh Route context and history")
+    }
+}
+
 pub(super) fn issue_challenge(
     session: &mut Session,
     request: &[u8],
@@ -66,13 +141,25 @@ impl Client<'_> {
         command: DomainCommand,
         challenge_ceiling: Option<u64>,
     ) -> Result<Observation> {
+        let prepared = self.prepare_read(command, challenge_ceiling)?;
+        let completion = prepared.exchange().run(|| self.guard.health());
+        self.finish_read(prepared, completion, |_| {})
+    }
+
+    pub(super) fn prepare_read(
+        &mut self,
+        command: DomainCommand,
+        challenge_ceiling: Option<u64>,
+    ) -> Result<PreparedRead> {
         ensure!(
             matches!(
                 command,
                 DomainCommand::Route(
                     routes::Command::Lookup { .. } | routes::Command::VoucherContext { .. }
                 ) | DomainCommand::Stream(
-                    streams::Command::Inspect { .. } | streams::Command::Permit { .. }
+                    streams::Command::Inspect { .. }
+                        | streams::Command::Permit { .. }
+                        | streams::Command::RetirementContext { .. }
                 )
             ),
             "fresh Route retry requires a read-only context operation"
@@ -124,19 +211,48 @@ impl Client<'_> {
             challenge_ceiling,
             health,
         )?;
-        let outcome = (|| {
-            let (reply, history) = transport::exchange_read(
-                &descriptor,
-                &signed,
-                &challenge,
+        Ok(PreparedRead {
+            exchange: ReadExchange {
+                descriptor,
+                signed,
+                challenge,
                 deadline,
-                Path::new("/Authority/Control.sock"),
-                self.store.prefix(),
-                self.store.tree_head(),
-                &mut || self.guard.health(),
-            )
-            .map_err(Self::retry_read)
-            .context("obtain fresh Route context and history")?;
+                prefix: self.store.prefix().clone(),
+                head: self.store.tree_head().cloned(),
+            },
+            command,
+            started,
+        })
+    }
+
+    pub(crate) fn discard_read(&mut self, prepared: PreparedRead) -> Result<()> {
+        self.session.discard(&prepared.exchange.challenge)
+    }
+
+    pub(super) fn finish_read(
+        &mut self,
+        prepared: PreparedRead,
+        completion: Result<ReadCompletion>,
+        mut trace: impl FnMut(ReadStage),
+    ) -> Result<Observation> {
+        let signatures = wire::signature_statistics();
+        let PreparedRead {
+            exchange,
+            command,
+            started,
+        } = prepared;
+        let ReadExchange {
+            descriptor,
+            signed,
+            challenge,
+            deadline,
+            ..
+        } = exchange;
+        let outcome = (|| {
+            self.active.check(self.guard)?;
+            transport::remaining(deadline)?;
+            require_read_idle(&self.store, ReadPendingStage::Finish)?;
+            let (reply, history) = completion?;
             let mut candidate = None;
             let verified = fresh::verify_response(
                 &descriptor,
@@ -149,24 +265,29 @@ impl Client<'_> {
                     ancestry: &history.nodes,
                 },
                 |request, result, statement| {
-                    let (state, records) = self.disk.context();
-                    let selected = fresh::verify_domain(
-                        &self.guard.bootstrap,
-                        state,
-                        records,
-                        request,
-                        result,
-                        statement,
-                        &[],
-                    )?;
-                    ensure!(
-                        selected.updates.is_empty(),
-                        "fresh Route context changes domain state"
-                    );
-                    result::minimum(&selected.versions, self.store.generations())?;
-                    let versions = selected.versions.clone();
-                    candidate = Some(selected);
-                    Ok(versions)
+                    trace(ReadStage::DomainStart);
+                    let result = (|| {
+                        let (state, records) = self.disk.context();
+                        let selected = fresh::verify_domain(
+                            &self.guard.bootstrap,
+                            state,
+                            records,
+                            request,
+                            result,
+                            statement,
+                            &[],
+                        )?;
+                        ensure!(
+                            selected.updates.is_empty(),
+                            "fresh Route context changes domain state"
+                        );
+                        result::minimum(&selected.versions, self.store.generations())?;
+                        let versions = selected.versions.clone();
+                        candidate = Some(selected);
+                        Ok(versions)
+                    })();
+                    trace(ReadStage::DomainComplete);
+                    result
                 },
             )
             .context("verify fresh Route authority context")?;
@@ -178,8 +299,20 @@ impl Client<'_> {
                 code: verified.result.code,
             };
             if verified.result.disposition != Disposition::Permit {
-                self.store
-                    .observe_read(verified, &mut self.session, self.guard.health()?, 0)?;
+                let consumed = observe_acceptance(&mut trace, || {
+                    self.store.observe_read_consumed(
+                        verified,
+                        &mut self.session,
+                        self.guard.health()?,
+                        0,
+                    )
+                })?;
+                transport::acknowledge_read(
+                    &consumed,
+                    &self.config.key,
+                    deadline,
+                    Path::new("/Authority/Control.sock"),
+                );
                 return Ok(observation);
             }
             let expiry = verified
@@ -188,32 +321,55 @@ impl Client<'_> {
                 .saturating_sub(authority_challenge::DELTA_MS);
             let candidate = candidate.context("fresh Route permit omitted verified context")?;
             transport::remaining(deadline)?;
-            let value = self.store.accept_read(
-                verified,
-                &mut self.session,
-                self.guard.health()?,
-                0,
-                |_, _| {
-                    self.active.check(self.guard)?;
-                    self.disk.publish(candidate.state, candidate.records)?;
-                    self.active.check(self.guard)?;
-                    transport::remaining(deadline)?;
-                    Ok(candidate.value)
-                },
-            )?;
-            self.last_expiry = expiry;
+            let (value, consumed) = observe_acceptance(&mut trace, || {
+                self.store.accept_read_consumed(
+                    verified,
+                    &mut self.session,
+                    self.guard.health()?,
+                    0,
+                    |_, _| {
+                        self.active.check(self.guard)?;
+                        self.disk.publish(candidate.state, candidate.records)?;
+                        self.active.check(self.guard)?;
+                        transport::remaining(deadline)?;
+                        Ok(candidate.value)
+                    },
+                )
+            })?;
+            transport::acknowledge_read(
+                &consumed,
+                &self.config.key,
+                deadline,
+                Path::new("/Authority/Control.sock"),
+            );
+            // Retirement metadata does not certify permission to forward bytes.
+            if !matches!(
+                command,
+                DomainCommand::Stream(streams::Command::RetirementContext { .. })
+            ) {
+                self.last_expiry = expiry;
+            }
             observation.value = Some(value);
             Ok(observation)
         })();
-        if outcome.is_err() {
-            self.session.discard(&challenge)?;
-        } else {
-            self.costs.observe(
-                &command,
-                self.config.profile.identity.service,
-                authority_challenge::boot_time_ms()?.saturating_sub(started),
-            );
-        }
-        outcome.map_err(Self::retry_read)
+        let result = (|| {
+            if outcome.is_err() {
+                self.session.discard(&challenge)?;
+            } else {
+                self.costs.observe(
+                    &command,
+                    self.config.profile.identity.service,
+                    authority_challenge::boot_time_ms()?.saturating_sub(started),
+                    outcome
+                        .as_ref()
+                        .is_ok_and(|observation| observation.disposition == Disposition::Permit),
+                );
+            }
+            outcome.map_err(Self::retry_read)
+        })();
+        trace(ReadStage::Signatures(
+            wire::signature_statistics().since(signatures),
+        ));
+        result
     }
 }
