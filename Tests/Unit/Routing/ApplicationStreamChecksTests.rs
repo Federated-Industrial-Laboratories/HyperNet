@@ -25,6 +25,139 @@ fn prepared_stream(expiry: u64, deadline: u64) -> LiveStream {
 }
 
 #[test]
+fn maintenance_renewal_revives_only_the_exact_open_stream_without_an_action_receipt() {
+    let now = crate::authority_challenge::boot_time_ms().unwrap();
+    let mut stream = prepared_stream(now.saturating_sub(1), now + 5000);
+    stream.retry_after = now + 1000;
+    let permission = EndpointPermission {
+        gate: route_io::Gate::new(now + 2000),
+        accepted_at: Some(now),
+        renewals: 7,
+    };
+    let context = RenewalContext::capture(&stream, now + 4000, now);
+    assert!(stream.current_deadline(now).is_err());
+    assert!(context.current(&stream, &permission, now).is_ok());
+    let observation = crate::route_authority::StreamCheck::fixture(
+        stream.reference.clone(),
+        now + 3500,
+        Some(now + 8000),
+    );
+    context
+        .install(
+            observation,
+            &mut stream,
+            &permission,
+            b"Exact endpoint profile",
+        )
+        .unwrap();
+    assert_eq!(stream.gate.expiry().unwrap(), now + 5000);
+    assert_eq!(stream.retry_after, 0);
+    assert_eq!(context.deadline, now + 4000);
+    assert_eq!(permission.gate.expiry().unwrap(), now + 2000);
+    assert_eq!(permission.accepted_at, Some(now));
+    assert_eq!(permission.renewals, 7);
+}
+
+#[test]
+fn maintenance_renewal_rejects_changed_context_denial_expiry_and_cancellation() {
+    for fault in 0..14 {
+        let now = crate::authority_challenge::boot_time_ms().unwrap();
+        let original_expiry = now.saturating_sub(1);
+        let mut stream =
+            prepared_stream(original_expiry, if fault == 13 { now } else { now + 5000 });
+        let permission = EndpointPermission {
+            gate: route_io::Gate::new(now + 3000),
+            accepted_at: Some(now),
+            renewals: 0,
+        };
+        let mut context = RenewalContext::capture(&stream, now + 4000, now);
+        let mut session = stream.reference.clone();
+        let mut read_end = now + 4000;
+        let mut certified = Some(now + 6000);
+        match fault {
+            0 => stream.reference.generation += 1,
+            1 => {
+                stream.forwarding = Arc::new(Forwarding {
+                    deadline: now + 5000,
+                    established: AtomicBool::new(true),
+                    finished: AtomicBool::new(false),
+                })
+            }
+            2 => context.cancelled.store(true, Ordering::Release),
+            3 => stream.forwarding.finished.store(true, Ordering::Release),
+            4 => stream
+                .forwarding
+                .established
+                .store(false, Ordering::Release),
+            5 => stream.gate.close(),
+            6 => permission.gate.close(),
+            7 => context.deadline = now,
+            8 => read_end = now,
+            9 => certified = None,
+            10 => {}
+            11 => session.digest[0] ^= 1,
+            12 => certified = Some(now),
+            13 => {}
+            _ => unreachable!(),
+        }
+        let observation =
+            crate::route_authority::StreamCheck::fixture(session, read_end, certified);
+        assert!(
+            context
+                .install(
+                    observation,
+                    &mut stream,
+                    &permission,
+                    if fault == 10 {
+                        b"Other endpoint profile"
+                    } else {
+                        b"Exact endpoint profile"
+                    },
+                )
+                .is_err(),
+            "fault {fault}"
+        );
+        if fault != 5 {
+            assert_eq!(stream.gate.expiry().unwrap(), original_expiry);
+        }
+        if fault != 6 {
+            assert_eq!(permission.gate.expiry().unwrap(), now + 3000);
+        }
+        assert_eq!(permission.renewals, 0);
+    }
+}
+
+#[test]
+fn an_unestablished_stream_retains_its_synchronous_maintenance_turn() {
+    let now = crate::authority_challenge::boot_time_ms().unwrap();
+    let stream = prepared_stream(now.saturating_sub(1), now + 5000);
+    stream
+        .forwarding
+        .established
+        .store(false, Ordering::Release);
+    let id = stream.reference.id;
+    let live = BTreeMap::from([(id, stream)]);
+    assert_eq!(due_stream(&live, now, 100, u64::MAX), Some(id));
+}
+
+#[test]
+fn maintenance_renewal_failure_keeps_backoff_and_cannot_close_a_replacement() {
+    let now = crate::authority_challenge::boot_time_ms().unwrap();
+    let mut stream = prepared_stream(now + 2000, now + 5000);
+    let context = RenewalContext::capture(&stream, now + 4000, now);
+    context.failed(&mut stream, &anyhow::Error::new(ReadRetry::TransportClosed));
+    assert_eq!(stream.retry_after, now + READ_RETRY_MS);
+    assert_eq!(stream.gate.expiry().unwrap(), now + 2000);
+    let mut replacement = prepared_stream(now + 3000, now + 5000);
+    context.failed(&mut replacement, &anyhow::anyhow!("refused"));
+    assert_eq!(replacement.gate.expiry().unwrap(), now + 3000);
+    assert_eq!(replacement.retry_after, 0);
+    context.failed(&mut stream, &anyhow::anyhow!("refused"));
+    assert!(stream.gate.expiry().is_err());
+    assert_eq!(stream.retry_after, u64::MAX);
+}
+
+#[test]
 fn stalled_diagnostic_sink_does_not_hold_producers_or_retime_records() {
     use std::{
         io,

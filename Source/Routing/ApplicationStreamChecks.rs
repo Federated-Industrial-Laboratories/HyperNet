@@ -81,10 +81,6 @@ pub(super) enum Preparation {
     Ready,
     Complete(Box<Receipt>),
 }
-pub(super) struct Pending {
-    pub check: Check,
-    pub read: PreparedRead,
-}
 struct Connection(Arc<AtomicBool>);
 impl Drop for Connection {
     fn drop(&mut self) {

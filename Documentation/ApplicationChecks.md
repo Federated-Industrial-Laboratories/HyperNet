@@ -105,8 +105,10 @@ The existing one-pending-check-per-stream rule remains. Fresh certification
 exchanges can overlap on separate bounded workers; they receive only immutable
 signed requests, history anchors, clock sources and captured absolute deadlines.
 The endpoint actor alone issues and consumes challenges, owns requester state,
-and publishes durable authority and domain state. Maintenance keeps the same
-synchronous prepare/exchange/finish composition.
+and publishes durable authority and domain state. Readiness preparation, endpoint
+renewal, admission and cleanup keep their synchronous composition. Background
+stream-permission renewal uses the same bounded immutable exchange workers as
+action checks, with verification and publication still on the actor.
 
 Fresh and ordered domain-result validation share the same governance replacement
 step. It indexes the exact returned record identities and parses each retained
@@ -146,6 +148,29 @@ A round does not extend any caller, challenge or forwarding deadline. After it d
 retains its fair turn before another round; sustained arrivals cannot refill a
 round indefinitely. Independent authority progress can still overtake a read,
 and an expired gate still refuses it.
+
+A selected background `Stream::Permit` renewal for an established stream can
+start a finite read round. Unestablished streams retain synchronous renewal so
+their guarded handshake can finish even when an open gate needs renewal.
+Existing exact-operation recovery finishes on the actor before its challenge is
+issued. The renewal occupies one of at most four total exchanges; up to three
+action checks can join through the same issue-only admission rules before the
+first completion. Their original caller and current-gate bounds remain binding,
+and they cannot extend the renewal round. A completed action check need not wait
+for the renewal exchange to finish. Ordinary effects, endpoint renewal and
+cleanup cannot run until all workers in that round drain.
+
+Maintenance retains its exact session, forwarding instance, cancellation flag
+and original selected end, further clipped by the fresh read and fixed forwarding
+ends. The actor verifies the fresh result against current authority state and the
+exact configured endpoint profile, then uses only its certified stream-renewal
+token. An expired but open stream gate can renew; a closed, replaced, unestablished
+or finished stream cannot. The separately owned endpoint gate is checked for
+closure and is not renewed by this maintenance path. Forwarding continues to obey
+both gates. Cancellation or shutdown drains the worker and discards its unconsumed
+challenge. No application receipt is produced, and every later action still
+requires its own fresh check. The existing transient retry and terminal-close
+rules remain; a stale renewal cannot close a replacement stream.
 
 Stream-renewal scheduling uses the observed cost of successful stream-permission
 checks. Before the first such observation it retains the ordinary action-cost
@@ -198,6 +223,9 @@ They report actual strict verification time and cache activity, excluding worker
 replica and subsequent endpoint-proof extraction work. Errors
 can leave later stages absent. Missing diagnostic timestamps do not alter an
 operation's result, permission or deadline.
+Background `StreamPermit` start/completion records now include its worker exchange
+and any finalization wait. Their elapsed duration is not exclusive actor occupancy:
+action checks can proceed in the same finite round.
 
 A separate shared ceiling of 64 failure records covers unsuccessful check
 outcomes and stream cleanup, including after timing samples stop. Check records

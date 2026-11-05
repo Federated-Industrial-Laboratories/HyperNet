@@ -70,33 +70,59 @@ fn observed<T>(
     session: Option<Timing>,
     action: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    let timing = crate::authority_challenge::boot_time_ms()
-        .ok()
-        .map(|now| Timing::counted(now, &ACTIVITY_SAMPLES[activity as usize], 64));
-    let session_sample = session.and_then(|s| s.sample);
-    if let Some(Timing {
-        sample: Some(sample),
-        started,
-    }) = timing
-    {
-        diagnostic(format_args!(
-            "HyperNet application actor: operation={activity:?} sample={sample} sessionSample={session_sample:?} stage=Start deadlineBootMs={deadline} bootMs={started}\n"
-        ));
-    }
+    let timing = ActivityTiming::start(activity, deadline, session);
     let result = action();
-    if let Some(Timing {
-        sample: Some(sample),
-        started,
-    }) = timing
-        && let Ok(now) = crate::authority_challenge::boot_time_ms()
-    {
-        diagnostic(format_args!(
-            "HyperNet application actor: operation={activity:?} sample={sample} sessionSample={session_sample:?} stage=Complete deadlineBootMs={deadline} elapsedMs={} reason={:?} bootMs={now}\n",
-            now.saturating_sub(started),
-            result.as_ref().err().map(failure_code)
-        ));
-    }
+    timing.finish(&result);
     result
+}
+struct ActivityTiming {
+    activity: Activity,
+    deadline: u64,
+    session_sample: Option<u64>,
+    timing: Option<Timing>,
+}
+impl ActivityTiming {
+    fn start(activity: Activity, deadline: u64, session: Option<Timing>) -> Self {
+        let timing = crate::authority_challenge::boot_time_ms()
+            .ok()
+            .map(|now| Timing::counted(now, &ACTIVITY_SAMPLES[activity as usize], 64));
+        let session_sample = session.and_then(|s| s.sample);
+        if let Some(Timing {
+            sample: Some(sample),
+            started,
+        }) = timing
+        {
+            diagnostic(format_args!(
+                "HyperNet application actor: operation={activity:?} sample={sample} sessionSample={session_sample:?} stage=Start deadlineBootMs={deadline} bootMs={started}\n"
+            ));
+        }
+        Self {
+            activity,
+            deadline,
+            session_sample,
+            timing,
+        }
+    }
+    fn finish<T>(self, result: &Result<T>) {
+        let Self {
+            activity,
+            deadline,
+            session_sample,
+            timing,
+        } = self;
+        if let Some(Timing {
+            sample: Some(sample),
+            started,
+        }) = timing
+            && let Ok(now) = crate::authority_challenge::boot_time_ms()
+        {
+            diagnostic(format_args!(
+                "HyperNet application actor: operation={activity:?} sample={sample} sessionSample={session_sample:?} stage=Complete deadlineBootMs={deadline} elapsedMs={} reason={:?} bootMs={now}\n",
+                now.saturating_sub(started),
+                result.as_ref().err().map(failure_code)
+            ));
+        }
+    }
 }
 struct Forwarding {
     deadline: u64,
@@ -222,6 +248,117 @@ impl Drop for LiveStream {
     fn drop(&mut self) {
         self.gate.close();
     }
+}
+
+// A maintenance renewal owns no application request or receipt. Its original end
+// and exact live stream survive the immutable worker exchange on the actor.
+#[derive(Clone)]
+struct RenewalContext {
+    reference: VersionRef,
+    forwarding: Arc<Forwarding>,
+    cancelled: Arc<AtomicBool>,
+    deadline: u64,
+    started: u64,
+}
+impl RenewalContext {
+    fn capture(stream: &LiveStream, deadline: u64, started: u64) -> Self {
+        Self {
+            reference: stream.reference.clone(),
+            forwarding: stream.forwarding.clone(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            deadline: deadline.min(stream.forwarding.deadline),
+            started,
+        }
+    }
+    fn matches(&self, stream: &LiveStream) -> bool {
+        self.reference == stream.reference && Arc::ptr_eq(&self.forwarding, &stream.forwarding)
+    }
+    fn current(
+        &self,
+        stream: &LiveStream,
+        permission: &EndpointPermission,
+        now: u64,
+    ) -> Result<()> {
+        ensure!(self.matches(stream), "stream renewal identity changed");
+        self.exchange_current(&stream.gate, &permission.gate, now)
+    }
+    fn exchange_current(
+        &self,
+        gate: &route_io::Gate,
+        endpoint: &route_io::Gate,
+        now: u64,
+    ) -> Result<()> {
+        ensure!(
+            !self.cancelled.load(Ordering::Acquire),
+            "stream renewal cancelled"
+        );
+        ensure!(
+            now < self.deadline.min(self.forwarding.deadline),
+            "stream renewal original deadline expired"
+        );
+        ensure!(
+            self.forwarding.established.load(Ordering::Acquire)
+                && !self.forwarding.finished.load(Ordering::Acquire),
+            "stream renewal forwarding ended"
+        );
+        gate.expiry()?;
+        endpoint.expiry()?;
+        Ok(())
+    }
+    fn install(
+        &self,
+        observation: crate::route_authority::StreamCheck,
+        stream: &mut LiveStream,
+        permission: &EndpointPermission,
+        profile: &[u8],
+    ) -> Result<()> {
+        self.current(
+            stream,
+            permission,
+            crate::authority_challenge::boot_time_ms()?,
+        )?;
+        let permit = observation.renewal.with_context(|| {
+            format!(
+                "Route maintenance refused with code {}",
+                observation.authority.code
+            )
+        })?;
+        // Verify the exact endpoint binding, but leave its separately owned gate unchanged.
+        observation
+            .endpoint_renewal
+            .context("stream renewal omitted endpoint binding")?
+            .expiry_for(profile)?;
+        let expires = permit
+            .expiry_for(&self.reference)?
+            .min(self.forwarding.deadline);
+        crate::authority_local_transport::remaining(self.deadline.min(observation.deadline))?;
+        stream.gate.renew(expires)?;
+        stream.accepted_at = crate::authority_challenge::boot_time_ms()?;
+        stream.retry_after = 0;
+        Ok(())
+    }
+    fn failed(&self, stream: &mut LiveStream, error: &anyhow::Error) {
+        if !self.matches(stream) {
+            return;
+        }
+        if error.is::<ReadRetry>() {
+            stream.retry_after = self.started.saturating_add(READ_RETRY_MS);
+        } else {
+            stream.gate.close();
+            stream.retry_after = u64::MAX;
+        }
+    }
+}
+enum ReadOwner {
+    Check(Box<checks::Check>),
+    Renewal {
+        context: RenewalContext,
+        timing: ActivityTiming,
+    },
+}
+struct PendingRead {
+    read: crate::route_authority::PreparedRead,
+    owner: ReadOwner,
 }
 struct PendingClose {
     reference: VersionRef,
@@ -749,7 +886,7 @@ pub(super) async fn endpoint(
     let mut forwarding: JoinSet<(Digest, Result<()>)> = JoinSet::new();
     let mut live: BTreeMap<Digest, LiveStream> = BTreeMap::new();
     let mut reads: JoinSet<checks::ExchangeCompletion> = JoinSet::new();
-    let mut pending: BTreeMap<tokio::task::Id, checks::Pending> = BTreeMap::new();
+    let mut pending: BTreeMap<tokio::task::Id, PendingRead> = BTreeMap::new();
     let mut held_check: Option<HeldCheck> = None;
     let mut closing: Option<PendingClose> = None;
     let mut cleanup_diagnostics = 0;
@@ -808,10 +945,43 @@ pub(super) async fn endpoint(
                 s.renewal_turn=schedule.renewed()?;
                 if now>=s.forwarding.deadline {s.gate.close();s.retry_after=u64::MAX;continue;}
                 let deadline=s.forwarding.deadline.min(now.saturating_add(own.limits.idle_ms));
-                match clock_checked(observed(Activity::StreamPermit,deadline,None,||client.before(deadline,|client|client.stream_permit(&s.reference))))? {
-                    Ok(expiry)=>{s.gate.renew(expiry)?;s.accepted_at=crate::authority_challenge::boot_time_ms()?;s.retry_after=0;},
-                    Err(error)=>{if error.is::<ReadRetry>() {s.retry_after=now.saturating_add(READ_RETRY_MS);} else {s.gate.close();s.retry_after=u64::MAX;}},
+                if !s.forwarding.established.load(Ordering::Acquire) {
+                    // Handshake writes may need the original synchronous renewal
+                    // before the established-stream worker contract is available.
+                    match clock_checked(observed(Activity::StreamPermit,deadline,None,||client.before(deadline,|client|client.stream_permit(&s.reference))))? {
+                        Ok(expiry)=>{s.gate.renew(expiry)?;s.accepted_at=crate::authority_challenge::boot_time_ms()?;s.retry_after=0;},
+                        Err(error)=>{if error.is::<ReadRetry>() {s.retry_after=now.saturating_add(READ_RETRY_MS);} else {s.gate.close();s.retry_after=u64::MAX;}},
+                    }
+                    continue;
                 }
+                let mut context=RenewalContext::capture(s,deadline,now);
+                let timing=ActivityTiming::start(Activity::StreamPermit,deadline,None);
+                // Recovery remains exclusive before this round; only the immutable
+                // fresh Permit exchange may overlap action-bound checks.
+                let prepared=context.current(s,&permission,now).and_then(|()|
+                    client.before(deadline,|client|client.prepare_stream_renewal(&context.reference)));
+                let read=match prepared {
+                    Ok(read)=>read,
+                    Err(error)=>{
+                        let result=Err::<(),_>(error);
+                        timing.finish(&result);
+                        if let Err(error)=clock_checked(result)? {context.failed(s,&error);}
+                        continue;
+                    },
+                };
+                context.deadline=context.deadline.min(read.deadline());
+                let exchange=read.exchange();
+                let clock=guard.clock_source();
+                let worker_context=context.clone();
+                let stream_gate=s.gate.clone();
+                let endpoint_gate=permission.gate.clone();
+                schedule.begin_round(1);
+                schedule.initial_issue(context.deadline);
+                let task=reads.spawn_blocking(move || checks::ExchangeCompletion::capture(false,crate::authority_challenge::boot_time_ms,||exchange.run(||{
+                    worker_context.exchange_current(&stream_gate,&endpoint_gate,crate::authority_challenge::boot_time_ms()?)?;
+                    clock.health()
+                })));
+                pending.insert(task.id(),PendingRead {read,owner:ReadOwner::Renewal {context,timing}});
             },
             Event::Maintenance(Maintenance::Close)=>{
                 if closing.as_mut().expect("selected stream cleanup").attempt(client,&mut cleanup_diagnostics) {closing=None;}
@@ -914,15 +1084,37 @@ pub(super) async fn endpoint(
                         crate::authority_local_transport::remaining(stream_gate.expiry()?.min(endpoint_gate.expiry()?))?;
                         clock.health()
                     })));
-                    pending.insert(task.id(),checks::Pending {check,read});
+                    pending.insert(task.id(),PendingRead {read,owner:ReadOwner::Check(Box::new(check))});
                 }
             },
             Event::Checked(result)=>{
                 let (id,completion)=match result {Ok(result)=>result,Err(error)=>(error.id(),checks::ExchangeCompletion {result:Err(error.into()),started:None,completed:None})};
-                let checks::Pending {check,read}=pending.remove(&id).context("application check worker has no owner")?;
-                check.record_exchange(&completion);
-                let receipt=checks::finish(&check,read,completion.result,&mut live,&mut permission,&own.envelope,client,guard,active);
-                check.respond(receipt);
+                let PendingRead {read,owner}=pending.remove(&id).context("application read worker has no owner")?;
+                match owner {
+                    ReadOwner::Check(check)=>{
+                        check.record_exchange(&completion);
+                        let receipt=checks::finish(&check,read,completion.result,&mut live,&mut permission,&own.envelope,client,guard,active);
+                        check.respond(receipt);
+                    },
+                    ReadOwner::Renewal {context,timing}=>{
+                        let current=active.check(guard).and_then(|()|{
+                            let stream=live.get(&context.reference.id).context("renewing stream disappeared")?;
+                            context.current(stream,&permission,crate::authority_challenge::boot_time_ms()?)
+                        });
+                        let result=match current {
+                            Err(error)=>client.discard_read(read).and(Err(error)),
+                            Ok(())=>client.finish_check_stream(read,completion.result,&context.reference,|_|{}).and_then(|observation|{
+                                active.check(guard)?;
+                                let stream=live.get_mut(&context.reference.id).context("renewing stream disappeared")?;
+                                context.install(observation,stream,&permission,&own.envelope)
+                            }),
+                        };
+                        timing.finish(&result);
+                        if let Err(error)=clock_checked(result)? && let Some(stream)=live.get_mut(&context.reference.id) {
+                            context.failed(stream,&error);
+                        }
+                    },
+                }
             },
         }
     }Ok(())}.await;
@@ -939,8 +1131,11 @@ pub(super) async fn endpoint(
         check.check.cancelled.store(true, Ordering::Release);
     }
     while check_requests.try_recv().is_ok() {}
-    for check in pending.values() {
-        check.check.cancelled.store(true, Ordering::Release);
+    for read in pending.values() {
+        match &read.owner {
+            ReadOwner::Check(check) => check.cancelled.store(true, Ordering::Release),
+            ReadOwner::Renewal { context, .. } => context.cancelled.store(true, Ordering::Release),
+        }
     }
     incoming.abort_all();
     handshakes.abort_all();
@@ -955,8 +1150,8 @@ pub(super) async fn endpoint(
     // Join them instead of detaching work, then discard each actor-owned challenge.
     while reads.join_next().await.is_some() {}
     let mut discard_error = None;
-    for (_, check) in pending {
-        if let Err(error) = client.discard_read(check.read) {
+    for (_, pending) in pending {
+        if let Err(error) = client.discard_read(pending.read) {
             discard_error.get_or_insert(error);
         }
     }

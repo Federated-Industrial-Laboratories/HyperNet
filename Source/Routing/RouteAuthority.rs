@@ -1118,6 +1118,19 @@ impl<'a> Client<'a> {
         }))?;
         self.effect_deadline()
     }
+    pub(crate) fn prepare_stream_renewal(&mut self, session: &VersionRef) -> Result<PreparedRead> {
+        // Recovery can mutate requester state, so the actor calls this only before
+        // starting the finite read round. Workers never recover an ordinary effect.
+        self.recover()?;
+        self.active.check(self.guard)?;
+        require_read_idle(&self.store, ReadPendingStage::Issue)?;
+        self.prepare_read(
+            DomainCommand::Stream(streams::Command::Permit {
+                session: session.clone(),
+            }),
+            None,
+        )
+    }
     /// Preparation and completion stay on the requester actor. Only the exchange
     /// between them may run concurrently; neither path recovers an ordinary effect.
     pub(crate) fn prepare_check_stream(

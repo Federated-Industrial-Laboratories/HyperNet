@@ -19,6 +19,103 @@ fn check(ready: &Ready, request: &Request) -> checks::Check {
 }
 
 #[tokio::test]
+async fn pending_stream_renewal_allows_a_fresh_check_then_yields_after_finite_drain() {
+    use crate::authority_floor::tests::{read::Read, setup};
+    let (_directory, sample, mut session, mut store) = setup();
+    let observed = sample.observe().unwrap();
+    let renewal_read = Read::new(&store, &mut session, sample);
+    let initial_floor = store.prefix().clone();
+    let mut schedule = Schedule::default();
+    assert_eq!(
+        schedule.poll(false, |class| match class {
+            Dispatch::Stream => Poll::Ready(class),
+            _ => Poll::Pending,
+        }),
+        Poll::Ready(Dispatch::Stream)
+    );
+    schedule.begin_round(1);
+    let end = observed.boot_ms + 1000;
+    schedule.initial_issue(end);
+    let (release, blocked) = tokio::sync::oneshot::channel();
+    let mut workers = JoinSet::new();
+    workers.spawn(async move {
+        let _ = blocked.await;
+        Dispatch::Stream
+    });
+    assert_eq!(
+        schedule.poll(true, |class| match class {
+            Dispatch::Fill | Dispatch::Close => Poll::Ready(class),
+            _ => Poll::Pending,
+        }),
+        Poll::Ready(Dispatch::Fill)
+    );
+    assert_eq!(schedule.admit_fill(observed.boot_ms), Some(end));
+    let action_read = Read::new(&store, &mut session, sample);
+    assert_eq!(store.prefix(), &initial_floor);
+    let (finished, completion) = tokio::sync::oneshot::channel();
+    workers.spawn(async move {
+        let _ = finished.send(());
+        Dispatch::Check
+    });
+    completion.await.unwrap();
+    // A completed action read is accepted while the renewal exchange still waits.
+    let completed = schedule
+        .next(true, |class, cx| match class {
+            Dispatch::Complete => workers.poll_join_next(cx).map(|r| r.unwrap().unwrap()),
+            Dispatch::Fill | Dispatch::Close => Poll::Ready(class),
+            _ => Poll::Pending,
+        })
+        .await;
+    assert_eq!(completed, Dispatch::Check);
+    store
+        .accept_read(
+            action_read.verify(&store),
+            &mut session,
+            sample,
+            0,
+            |_, _| Ok(()),
+        )
+        .unwrap();
+    assert!(!workers.is_empty());
+    assert!(schedule.admit_fill(observed.boot_ms).is_none());
+    assert!(
+        schedule
+            .poll(true, |class| match class {
+                Dispatch::Fill | Dispatch::Close => Poll::Ready(class),
+                _ => Poll::Pending,
+            })
+            .is_pending()
+    );
+    release.send(()).unwrap();
+    assert_eq!(
+        workers.join_next().await.unwrap().unwrap(),
+        Dispatch::Stream
+    );
+    store
+        .accept_read(
+            renewal_read.verify(&store),
+            &mut session,
+            sample,
+            0,
+            |_, _| Ok(()),
+        )
+        .unwrap();
+    assert!(store.resume_ordinary().unwrap().is_none());
+    assert!(store.resume_fence().unwrap().is_none());
+    // The selected renewal already took one lifecycle turn. At most one check
+    // round precedes the next lifecycle turn, even with continuous arrivals.
+    for expected in [Dispatch::Check, Dispatch::Close] {
+        assert_eq!(
+            schedule.poll(false, |class| match class {
+                Dispatch::Check | Dispatch::Close => Poll::Ready(class),
+                _ => Poll::Pending,
+            }),
+            Poll::Ready(expected)
+        );
+    }
+}
+
+#[tokio::test]
 async fn check_arriving_during_admission_runs_before_ready_cleanup() {
     let (_, _, ready, request) = fixture();
     let (sender, mut checks) = mpsc::channel(control::MAXIMUM_PENDING);
