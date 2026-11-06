@@ -209,6 +209,54 @@ that generation before restarting. Changing finite host consent does not extend 
 independently shorter domain validity interval or a previously issued effect lease.
 Stop and permanent withdrawal remain available during an interrupted transition.
 
+### Renew an existing route and application binding
+
+A stopped role5 service can explicitly replace its signed route approval with a
+new approval for the same permanent identities and limits. Application endpoints
+also require the renewed owner's and endpoint operator's accepted registration.
+This does not change the network, incarnation, deployment, service, TLS endpoint,
+relay, operator, privacy mode, protocol, resource budget or application binding.
+It does not grant current network permission or extend an existing effect lease.
+
+First apply and register the normal stopped hosting successor. Export its current
+`Authorization/Manifest.cbor`. Use Suite's `routes profile` and `routes register`
+to author and register a fresh same-ID route for that manifest. For an application
+endpoint, use the exact new certified route reference with `streams offer`,
+`streams accept`, `streams register` and `streams endpoint-config`. Retain the
+same owner, operator, service ID, protocol and immutable local binding. Keep each
+signer's existing requester floor and resolve any pending operation before the
+next operation. Old client vouchers and application admission remain separate
+permissions; neither is renewed by this process.
+
+Prepare a second stopped successor that includes the exact signed artifacts:
+
+```sh
+HyperNet runtime services transition prepare --directory /Private/Service \
+  --route-profile /Private/RenewedRoute.cbor \
+  --application-config /Private/RenewedServiceConfig.json \
+  --output /Private/BindingSuccessor.json
+HyperNet runtime services transition preview --directory /Private/Service \
+  --proposal /Private/BindingSuccessor.json
+HyperNet runtime services transition apply --directory /Private/Service \
+  --proposal /Private/BindingSuccessor.json --preview-digest REVIEWED_SHA256 \
+  --operation-id NEW_32_HEX_DIGITS
+```
+
+Omit `--application-config` for a relay or an authority/content route. Application
+routes require both artifacts together. Their exact bytes and digest are retained
+in the proposal and covered by the inspected preview digest. The current local
+ingress must still have the same binding; no different socket or application can
+be substituted. The native transaction updates configuration, artifact digests
+and signed local consent together, and preserves recipient state. An interrupted
+apply uses the ordinary exact `transition recover` command.
+
+Register the second hosting successor, export a fresh activation request for its
+generation and restart using the renewed companion acceptance. Request new
+candidate-bound vouchers and explicitly retain them in stopped companions where
+the old route permissions have expired. Service startup still verifies the
+current network admission and registered route/application approvals. A successful
+offline preparation does not establish current permission or readiness.
+
 Historical recovery can repair an interrupted service artifact binding from its
 exact retained staged bytes and signed local consent. Unexpected digests, changed
 staged files or a different operator are refused. The proposal, operation identity

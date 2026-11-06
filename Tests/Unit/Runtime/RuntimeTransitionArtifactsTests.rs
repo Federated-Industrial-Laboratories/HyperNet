@@ -74,6 +74,7 @@ fn fixture() -> (Directory, Transaction) {
         successor,
         executable: root.join("Bin/HyperNet"),
         package: None,
+        bindings: None,
     };
     let transaction = Transaction {
         operation: hex::encode([11; 16]),

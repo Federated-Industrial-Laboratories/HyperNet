@@ -16,6 +16,133 @@ const RELAY: Digest = [171; 32];
 const DESTINATION: Digest = [172; 32];
 const CHARGE: u64 = 65536;
 
+#[test]
+fn route_successor_preserves_identity_and_consumes_one_certified_generation() {
+    let mut f = Fixture::new();
+    f.register();
+    let previous = f.state.record(165, RELAY).unwrap().reference.clone();
+    let profile = f.consent_successor(0);
+    f.apply(
+        Command::Register {
+            profile: Box::new(profile.clone()),
+        },
+        5,
+        Some(f.root.clone()),
+    );
+    let current = f.state.record(165, RELAY).unwrap();
+    assert_eq!(current.reference.generation, previous.generation + 1);
+    assert_eq!(
+        Service::parse(&current.payload, N, I)
+            .unwrap()
+            .profile
+            .envelope,
+        profile.envelope
+    );
+    assert_ne!(
+        f.request(
+            Command::Register {
+                profile: Box::new(f.profiles[0].clone())
+            },
+            5,
+            Some(f.root.clone())
+        )
+        .2
+        .code,
+        0
+    );
+    assert_ne!(
+        f.request(
+            Command::Register {
+                profile: Box::new(profile.clone())
+            },
+            5,
+            Some(f.root.clone())
+        )
+        .2
+        .code,
+        0
+    );
+    let (intent, operation, _) = f.apply(
+        Command::Withdraw {
+            service: RELAY,
+            generation: 2,
+        },
+        90,
+        None,
+    );
+    let replay = operation
+        .prepare(&f.state, &f.records, &f.reserved, &intent, 5000, true, true)
+        .unwrap();
+    assert_eq!(replay.code, 0);
+    assert_ne!(
+        f.request(
+            Command::Register {
+                profile: Box::new(profile)
+            },
+            5,
+            Some(f.root.clone())
+        )
+        .2
+        .code,
+        0
+    );
+}
+
+#[test]
+fn route_successor_cannot_widen_substitute_manager_or_revive_withdrawal() {
+    let mut f = Fixture::new();
+    f.register();
+    let profile = f.consent_successor(0);
+    let mut wider = profile.clone();
+    wider.limits.bytes += 1;
+    seal(&mut wider, 90);
+    assert_ne!(
+        f.request(
+            Command::Register {
+                profile: Box::new(wider)
+            },
+            5,
+            Some(f.root.clone())
+        )
+        .2
+        .code,
+        0
+    );
+    assert_ne!(
+        f.request(
+            Command::Register {
+                profile: Box::new(profile.clone())
+            },
+            90,
+            Some(f.root.clone())
+        )
+        .2
+        .code,
+        0
+    );
+    let generation = f.state.record(165, RELAY).unwrap().reference.generation;
+    f.apply(
+        Command::Withdraw {
+            service: RELAY,
+            generation,
+        },
+        90,
+        None,
+    );
+    assert_ne!(
+        f.request(
+            Command::Register {
+                profile: Box::new(profile)
+            },
+            5,
+            Some(f.root.clone())
+        )
+        .2
+        .code,
+        0
+    );
+}
+
 fn public(seed: u8) -> Key {
     deployment::key(seed).verifying_key().to_bytes()
 }
@@ -301,6 +428,95 @@ impl Fixture {
                 Some(self.root.clone()),
             );
         }
+    }
+    fn consent_successor(&mut self, index: usize) -> RegisteredProfile {
+        let old = &self.profiles[index];
+        let operator = 90 + index as u8 * 2;
+        let mut manifest = old.manifest.clone();
+        manifest.generation += 1;
+        manifest.previous_profile = Some(wire::digest(&old.manifest.desired().unwrap()));
+        manifest.previous_consent = Some(wire::digest(&old.manifest.unsigned_consent(0).unwrap()));
+        manifest.validity.1 += 10000;
+        let consent = wire::sign_envelope(
+            &manifest.unsigned_consent(0).unwrap(),
+            &deployment::key(operator),
+        )
+        .unwrap();
+        let offer = Offer::parse(&manifest.encode().unwrap(), &consent, &a(vec![])).unwrap();
+        let previous_bytes = old.manifest.encode().unwrap();
+        let previous_consent = wire::sign_envelope(
+            &old.manifest.unsigned_consent(0).unwrap(),
+            &deployment::key(operator),
+        )
+        .unwrap();
+        let request = |refs: &[VersionRef]| {
+            Intent::from_signed(&deployment::signed(
+                &deployment::key(5),
+                "AuthorityDeploymentRegister",
+                manifest.deployment,
+                1,
+                a(vec![
+                    V::Uint(200),
+                    V::Uint(1),
+                    V::Text("AuthorityDeploymentRegister".into()),
+                    reference(&self.root),
+                    b(&offer.manifest_bytes),
+                    b(&offer.consent),
+                    offer.possessions_value(),
+                    deployment::snapshot(refs),
+                    V::Bool(false),
+                ]),
+                refs.to_vec(),
+            ))
+            .unwrap()
+        };
+        let index = Index::parse(&self.records, &self.reserved, N, I).unwrap();
+        let prior = &index.deployments[&manifest.deployment];
+        let mut preceding = vec![
+            prior.reference.clone(),
+            prior.profile.clone(),
+            prior.consent.clone(),
+        ];
+        preceding.sort_by_key(VersionRef::index);
+        let initial = request(&preceding);
+        let before = Some((previous_bytes.as_slice(), previous_consent.as_slice()));
+        let preflight = DeploymentOperation::parse(&initial)
+            .unwrap()
+            .prepare(&self.records, &self.reserved, &initial, 5000, false, before)
+            .unwrap();
+        assert_eq!(preflight.code, 0);
+        let mut dependencies = preflight
+            .dependencies
+            .into_iter()
+            .filter(|r| r.id != manifest.deployment || !matches!(r.kind, 105 | 117 | 129))
+            .collect::<Vec<_>>();
+        dependencies.extend(preceding);
+        dependencies.sort_by_key(VersionRef::index);
+        let intent = request(&dependencies);
+        let admitted = DeploymentOperation::parse(&intent)
+            .unwrap()
+            .authorise(&self.records, &self.reserved, &intent, 5000, false, before)
+            .unwrap();
+        assert_eq!(admitted.code, 0);
+        self.records.retain(|bytes| {
+            crate::authority_deployment_records::reference(bytes).map_or(true, |r| {
+                r.id != manifest.deployment || !matches!(r.kind, 105 | 117 | 129)
+            })
+        });
+        self.records.extend(admitted.records);
+        members::sort_records(&mut self.records).unwrap();
+        let mut profile = old.clone();
+        profile.manifest = manifest;
+        profile.validity = profile.manifest.validity;
+        profile.deployment_profile =
+            crate::authority_deployment_records::reference(&profile.manifest.desired().unwrap())
+                .unwrap();
+        profile.consent = crate::authority_deployment_records::reference(
+            &profile.manifest.unsigned_consent(0).unwrap(),
+        )
+        .unwrap();
+        seal(&mut profile, operator);
+        profile
     }
     fn issue_command(&self, connections: u64, bytes: u64) -> Command {
         Command::Issue {

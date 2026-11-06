@@ -128,6 +128,37 @@ pub(super) struct Profile {
     application_target: Option<MediaMount>,
 }
 impl Profile {
+    pub(super) fn validate_route_successor(
+        &self,
+        successor: &Manifest,
+        route: &[u8],
+        configuration: &[u8],
+    ) -> Result<()> {
+        ensure!(
+            self.role()?.role == 5,
+            "Binding renewal requires a role5 service"
+        );
+        let data = [
+            (
+                "RouteProfile.cbor".into(),
+                zeroize::Zeroizing::new(route.to_vec()),
+            ),
+            (
+                "ServiceConfig.json".into(),
+                zeroize::Zeroizing::new(configuration.to_vec()),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        crate::route_config::validate_import(
+            successor,
+            &data,
+            self.route_target.as_ref().map(|v| v.directory.as_path()),
+            self.application_target
+                .as_ref()
+                .map(|v| v.directory.as_path()),
+        )
+    }
     pub(super) fn role(&self) -> Result<&Role> {
         ensure!(
             self.manifest.roles.len() == 1 && matches!(self.manifest.roles[0].role, 1..=5 | 7 | 8),
