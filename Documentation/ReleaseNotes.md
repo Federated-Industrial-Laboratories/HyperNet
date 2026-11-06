@@ -21,6 +21,9 @@ to author and verify the corresponding renewal artifacts.
 - New application consent must retain the same owner and exact local binding.
   Suite verifies both prior signatures before renewing the owner's offer, then
   requires fresh operator acceptance and normal authority registration.
+- Binding renewal loads and verifies the retained TLS certificate, transport key
+  and trust roots before validating the successor. Missing or changed inputs
+  return an explicit error without bypassing TLS checks.
 - Runtime commands explicitly select the required `slirp4netns` through a private
   Podman module, including when Podman defaults to `pasta`, without changing
   global or user container configuration.

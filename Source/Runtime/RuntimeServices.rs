@@ -138,7 +138,7 @@ impl Profile {
             self.role()?.role == 5,
             "Binding renewal requires a role5 service"
         );
-        let data = [
+        let mut data: BTreeMap<String, zeroize::Zeroizing<Vec<u8>>> = [
             (
                 "RouteProfile.cbor".into(),
                 zeroize::Zeroizing::new(route.to_vec()),
@@ -150,6 +150,25 @@ impl Profile {
         ]
         .into_iter()
         .collect();
+        for name in [
+            "Certificate.pem",
+            "Transport.key",
+            "CertificateAuthority.pem",
+        ] {
+            let expected = self
+                .artifacts
+                .get(name)
+                .with_context(|| format!("Retained route TLS artifact is absent: {name}"))?;
+            let bytes = zeroize::Zeroizing::new(files::read(
+                &self.root.join("Config").join(name),
+                wire::MAXIMUM,
+            )?);
+            ensure!(
+                wire::digest(&bytes) == *expected,
+                "Retained route TLS artifact differs from consent: {name}"
+            );
+            data.insert(name.into(), bytes);
+        }
         crate::route_config::validate_import(
             successor,
             &data,

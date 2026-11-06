@@ -134,11 +134,16 @@ pub fn validate_import(
     target_directory: Option<&Path>,
     application_directory: Option<&Path>,
 ) -> Result<()> {
-    let (profile, configuration) = parse(
-        manifest,
-        &data["RouteProfile.cbor"],
-        &data["ServiceConfig.json"],
-    )?;
+    let artifact = |name: &str| {
+        data.get(name)
+            .with_context(|| format!("route import artifact is absent: {name}"))
+    };
+    let route = artifact("RouteProfile.cbor")?;
+    let configuration = artifact("ServiceConfig.json")?;
+    let certificate = artifact("Certificate.pem")?;
+    let transport_key = artifact("Transport.key")?;
+    let authorities = artifact("CertificateAuthority.pem")?;
+    let (profile, configuration) = parse(manifest, route, configuration)?;
     ensure!(
         (profile.mode != 1 && profile.protocol != 1 && profile.protocol != streams::PROTOCOL)
             == target_directory.is_some(),
@@ -179,14 +184,9 @@ pub fn validate_import(
             "route protocol differs from the exact installed application role"
         );
     }
-    let _ = crate::route_tls::server(
-        &profile.identity,
-        &data["Certificate.pem"],
-        &data["Transport.key"],
-    )?;
+    let _ = crate::route_tls::server(&profile.identity, certificate, transport_key)?;
     ensure!(
-        data["CertificateAuthority.pem"].as_slice()
-            == profile.identity.certificate_authority_pem.as_bytes(),
+        authorities.as_slice() == profile.identity.certificate_authority_pem.as_bytes(),
         "route trust roots differ from signed profile"
     );
     Ok(())
