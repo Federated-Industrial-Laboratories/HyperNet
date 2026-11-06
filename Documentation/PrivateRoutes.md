@@ -50,6 +50,16 @@ registered endpoints and remaining admission. Traffic permission does not grant
 Page, mail, transfer or federation access. The final service still checks the
 application's signed request and current authority.
 
+An explicit `RouteRegister` successor can renew an existing route's signed
+consent after a newer hosting manifest has been admitted. The original manager,
+operator, service and transport identities, endpoint, addresses, privacy mode and
+resource ceilings must remain unchanged. The signed interval must advance; the
+certified route record advances by exactly one generation. Existing grants and
+current deployment authority are checked again. An expired route does not renew
+itself, and a withdrawn route cannot be revived. Stale references and earlier
+profile envelopes cannot replace the successor. New client vouchers and renewed
+application consent bind the new exact route reference before serving resumes.
+
 Buffers remain transient. Both directions share one reserved ciphertext byte
 allowance. Original monotonic duration, idle and consent limits bound the whole
 connection. Directional EOF closes that write half and lets the opposite half

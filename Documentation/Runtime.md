@@ -10,12 +10,25 @@ results. Setup does not create membership or appoint voters. The separate
 identities, certificates, clock inputs and strict peer configurations. An
 authority deployment exposes no reader endpoint.
 
+`HyperNet runtime network-preview` reports the current occupied IPv4 subnet
+CIDRs through the same bounded Podman interface used by the runtime. Its JSON
+contains `version: 1`, `complete: true` and sorted, unique `ipv4Subnets`; names
+and labels are omitted. Failed, malformed or over-limit inventory is an error,
+not an empty result. At most 1024 networks and 1024 subnet entries are accepted.
+This read-only check creates no network reservation and does not prevent a later
+allocation race. Native activation still checks actual resource ownership.
+
 The supported installed profile is Linux, rootless Podman, `slirp4netns`, delegated cgroup v2,
 Landlock ABI6 or later and seccomp. It uses explicit IPv4 addresses and one owned
 NAT bridge per deployment. IPv6 installation and SELinux-enabled operation require
 platform qualification. Mandatory confinement failures stop activation.
 Outbound service helpers require `slirp4netns` in `/usr/bin` or `/bin` on the host.
 The OCI image does not supply this host networking dependency.
+Core selects `slirp4netns` for its Podman commands through a private, sealed
+configuration module. This also applies when Podman defaults to `pasta`.
+It does not edit the host's container configuration or install either helper.
+The installed runtime requires Podman's `--module` interface. This selection
+is verified with Podman 4.9.3 and 5.7.0; older versions are not qualified.
 
 ## Inputs and setup
 
@@ -206,6 +219,14 @@ The private record contains running, exit, OOM and PID observations plus up to
 32 KiB each of standard output and standard error from the last 64 log lines.
 Diagnostic capture failure does not prevent stopping the owned workload. These
 private logs are excluded from the redacted diagnostic preview and export.
+
+If network creation fails before an immutable network ID is retained, Stop,
+Withdraw and a later Start can clear that incomplete intent only after a bounded
+successful Podman inventory proves its exact generated name is absent. An
+existing name, altered intent or incomplete inspection remains unresolved; the
+runtime never adopts or removes an existing network by its name alone. Stop
+preserves successfully created networks for restart. Withdraw releases them
+after their exact IDs and configuration have been verified.
 
 Replica diagnostics include an `ActivitySummary` at most once every five
 seconds of completed work. It reports the view range, elapsed interval, elapsed

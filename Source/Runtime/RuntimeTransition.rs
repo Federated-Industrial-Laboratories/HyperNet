@@ -13,6 +13,8 @@ use std::{
 };
 #[path = "RuntimeTransitionArtifacts.rs"]
 mod artifacts;
+#[path = "RuntimeTransitionBindings.rs"]
+mod bindings;
 
 #[derive(Clone, ValueEnum)]
 pub enum SessionPolicy {
@@ -38,6 +40,12 @@ pub struct Prepare {
     image: Option<String>,
     #[command(flatten)]
     package: super::package::Inputs,
+    /// Exact newly signed same-identity route profile, for a stopped role5 service only.
+    #[arg(long)]
+    route_profile: Option<PathBuf>,
+    /// Exact renewed owner/operator application consent; requires its same-identity route profile.
+    #[arg(long, requires = "route_profile")]
+    application_config: Option<PathBuf>,
     #[arg(long)]
     output: PathBuf,
 }
@@ -81,6 +89,8 @@ struct Proposal {
     successor: Manifest,
     executable: PathBuf,
     package: Option<super::package::Selection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bindings: Option<bindings::Selection>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -186,6 +196,13 @@ fn proposal(path: &Path, root: &Path, service: bool) -> Result<Proposal> {
         files::executable(&p.executable)? == hex::encode(p.successor.software_digest),
         "Proposed executable changed"
     );
+    if let Some(selection) = &p.bindings {
+        ensure!(
+            p.service,
+            "Authority successors cannot change route bindings"
+        );
+        selection.bytes()?;
+    }
     Ok(p)
 }
 fn prepare(args: Prepare, service: bool) -> Result<Value> {
@@ -259,6 +276,13 @@ fn prepare(args: Prepare, service: bool) -> Result<Value> {
         std::env::current_exe()?.canonicalize()?
     };
     successor.successor_of(&old)?;
+    let bindings = bindings::prepare(
+        &root,
+        service,
+        &successor,
+        args.route_profile.as_deref(),
+        args.application_config.as_deref(),
+    )?;
     let p = Proposal {
         root,
         service,
@@ -267,6 +291,7 @@ fn prepare(args: Prepare, service: bool) -> Result<Value> {
         successor,
         executable,
         package,
+        bindings,
     };
     files::private_dir(args.output.parent().context("Proposal parent required")?)?;
     files::create(&args.output, &serde_json::to_vec(&p)?)?;
@@ -280,6 +305,9 @@ fn inspect(p: &Proposal) -> Result<Value> {
         old == p.previous && digest == p.predecessor,
         "Inspected preceding profile changed"
     );
+    if let Some(selection) = &p.bindings {
+        bindings::validate(&p.root, &p.successor, selection)?;
+    }
     ensure!(
         files::public_read(&p.root.join("Authorization/Withdrawal.json"), 64)? == b"0",
         "Withdrawal is terminal"
@@ -288,7 +316,7 @@ fn inspect(p: &Proposal) -> Result<Value> {
     Ok(
         json!({"status":"StoppedSuccessorPreview","previewDigest":digest,"predecessor":p.predecessor,
         "generation":p.successor.generation,"previous":p.previous,"successor":p.successor,
-        "executable":p.executable,"state":"All signer, requester, recipient, content, tombstone and generation state is retained",
+        "executable":p.executable,"routeBindings":p.bindings.as_ref().map(|selection|bindings::summary(selection,&p.successor)).transpose()?,"state":"All signer, requester, recipient, content, tombstone and generation state is retained",
         "activation":"Stop the manager and workloads before apply. The successor remains stopped and needs current network admission and a fresh service activation."}),
     )
 }
@@ -375,8 +403,33 @@ fn begin(p: Proposal, operation: String, digest: String) -> Result<Transaction> 
             Some("Config/Manifest.cbor"),
         )?;
         if profile.role()?.role == 5 {
+            let route_bytes = if let Some(selection) = &p.bindings {
+                bindings::validate(root, &p.successor, selection)?;
+                let (route, configuration) = selection.bytes()?;
+                stage(
+                    root,
+                    &mut replacements,
+                    "Config/RouteProfile.cbor",
+                    &route,
+                    false,
+                    Some("Config/RouteProfile.cbor"),
+                )?;
+                if let Some(configuration) = configuration {
+                    stage(
+                        root,
+                        &mut replacements,
+                        "Config/ServiceConfig.json",
+                        &configuration,
+                        false,
+                        Some("Config/ServiceConfig.json"),
+                    )?;
+                }
+                route
+            } else {
+                files::read(&root.join("Config/RouteProfile.cbor"), files::MAXIMUM)?
+            };
             let route = crate::authority_domains::routes::RegisteredProfile::parse(
-                &files::read(&root.join("Config/RouteProfile.cbor"), files::MAXIMUM)?,
+                &route_bytes,
                 p.successor.network,
                 p.successor.incarnation,
             )?;

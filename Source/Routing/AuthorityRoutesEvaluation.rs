@@ -405,20 +405,25 @@ pub fn evaluate(
                         "route registration has another creation"
                     );
                 } else {
-                    ensure!(
-                        !state.records.contains_key(&(165, profile.identity.service)),
-                        "route identifier already exists"
-                    );
+                    if state.records.contains_key(&(165, profile.identity.service)) {
+                        let record = c.select(165, profile.identity.service)?;
+                        let old =
+                            Service::parse(&record.payload, state.network, state.incarnation)?;
+                        ensure!(
+                            !old.withdrawn && old.manager == intent.requester,
+                            "Route renewal requires the original manager and cannot revive withdrawal"
+                        );
+                        profile.successor_of(&old.profile)?;
+                    }
                     // A service key identifies one independently certified route endpoint.
                     ensure!(
                         !state
                             .records
                             .values()
                             .filter(|r| r.reference.kind == 165)
-                            .any(
-                                |r| Service::parse(&r.payload, state.network, state.incarnation)
-                                    .is_ok_and(|s| s.profile.service == profile.service)
-                            ),
+                            .any(|r| r.reference.id != profile.identity.service
+                                && Service::parse(&r.payload, state.network, state.incarnation)
+                                    .is_ok_and(|s| s.profile.service == profile.service)),
                         "route service key already has an endpoint"
                     );
                     changed = Some(Record::next(
@@ -451,7 +456,7 @@ pub fn evaluate(
                 );
                 if replay {
                     ensure!(
-                        s.withdrawn && *generation == 1 && r.reference.generation == 2,
+                        s.withdrawn && generation.checked_add(1) == Some(r.reference.generation),
                         "withdrawal differs from retained state"
                     );
                 } else {

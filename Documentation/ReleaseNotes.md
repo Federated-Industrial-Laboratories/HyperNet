@@ -2,6 +2,57 @@
 
 [Documentation](ReadMe.md) | [Project](../ReadMe.md)
 
+## Linux 0.10.3
+
+Version 0.10.3 supports explicit renewal of an existing relay and application
+endpoint without replacing its network, service, transport or local application
+identity. Use [Suite 0.10.2](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/releases/tag/v0.10.2)
+to author and verify the corresponding renewal artifacts.
+
+- `runtime services transition prepare` accepts an exact signed `--route-profile`
+  and, for an application endpoint, `--application-config`. The reviewed proposal
+  embeds and hashes those bounded artifacts. Apply requires stopped owned
+  resources, preserves local socket ownership and bindings, and uses the existing
+  durable successor transaction. It does not edit configuration outside consent.
+- A same-ID route registration can advance by one certified generation after
+  renewed hosting admission. The original manager, operator, endpoint, transport,
+  privacy and resource limits remain fixed. Current grant checks still apply;
+  old profiles cannot replace the successor and withdrawal remains terminal.
+- New application consent must retain the same owner and exact local binding.
+  Suite verifies both prior signatures before renewing the owner's offer, then
+  requires fresh operator acceptance and normal authority registration.
+- Binding renewal loads and verifies the retained TLS certificate, transport key
+  and trust roots before validating the successor. Missing or changed inputs
+  return an explicit error without bypassing TLS checks.
+- Runtime commands explicitly select the required `slirp4netns` through a private
+  Podman module, including when Podman defaults to `pasta`, without changing
+  global or user container configuration.
+- Failed network creation can recover an incomplete intent only when a successful
+  bounded inspection proves its exact generated network name is absent. Existing
+  or ambiguous resources remain protected.
+- `runtime network-preview` provides bounded occupied IPv4 subnet CIDRs for
+  setup preflight through the same Podman interface, without exposing host names
+  or treating a failed inventory as free space.
+
+Upgrade authority replicas and independent Suite verifiers before relying on
+renewed route generations. Older verifiers retain their earlier record contract;
+there is no compatibility fallback that bypasses verification. Ordinary routes
+that have not renewed keep their existing representation. Permission renewal is
+explicit and does not retract previously received content or restore a withdrawn
+grant or service.
+
+Focused checks cover route renewal, stale replacement, manager and resource
+substitution, terminal withdrawal and replay, plus stopped artifact recovery and
+unchanged application bindings. These checks do not establish a new platform,
+throughput target or failure-domain guarantee. The native Ubuntu x86_64 profile,
+existing package trust contract and recorded release limits continue to apply.
+The signed package target identifies the exact release artifacts; preserve its
+retained trust sequence and version floor.
+
+See [service runtime](ServiceRuntime.md#renew-an-existing-route-and-application-binding)
+and [private routes](PrivateRoutes.md) for the consent sequence. Preserve all
+authority, requester and recipient state through stopped upgrades and renewal.
+
 ## Linux 0.10.2
 
 Version 0.10.2 adds optional acknowledgement of consumed fresh reads and improves

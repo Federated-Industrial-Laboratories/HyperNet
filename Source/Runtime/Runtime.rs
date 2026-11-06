@@ -15,6 +15,8 @@ pub(crate) mod files;
 mod managed;
 #[path = "RuntimeModel.rs"]
 mod model;
+#[path = "RuntimeNetworkPreview.rs"]
+mod network_preview;
 #[path = "RuntimePackage.rs"]
 mod package;
 #[path = "RuntimeServices.rs"]
@@ -87,6 +89,8 @@ pub enum Command {
         command: epoch::Command,
     },
     Setup(setup::Setup),
+    /// Read bounded occupied IPv4 subnets using the runtime's Podman configuration.
+    NetworkPreview,
     Preview(Location),
     Status(Location),
     Diagnose(diagnostics::Options),
@@ -296,6 +300,7 @@ pub fn run(command: Command) -> Result<()> {
         Command::Services { command } => services::run(command)?,
         Command::Epoch { command } => epoch::run(command)?,
         Command::Setup(args) => setup::setup(args)?,
+        Command::NetworkPreview => network_preview::run()?,
         Command::Serve(args) => return serve(&args.directory),
         Command::Preview(args) => operate(args.directory, Operation::Preview, None)?,
         Command::Status(args) => operate(args.directory, Operation::Status, None)?,
