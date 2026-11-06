@@ -231,6 +231,7 @@ fn labels(p: &Profile) -> Result<Vec<String>> {
     ]))
 }
 pub fn network(root: &Path, p: &Profile, s: &mut State) -> Result<()> {
+    recover_absent_networks(root, p, s)?;
     let name = p.network_name();
     if let Some(r) = s
         .resources
@@ -278,6 +279,59 @@ pub fn network(root: &Path, p: &Profile, s: &mut State) -> Result<()> {
     r.fingerprint = Some(fingerprint("network", &value)?);
     save(root, s)?;
     Ok(())
+}
+fn absent_network_intents(
+    resources: &[Resource],
+    expected_name: &str,
+    inventory: &[Value],
+) -> Result<Vec<usize>> {
+    let mut names = Vec::new();
+    for network in inventory {
+        let name = network["name"]
+            .as_str()
+            .context("Network listing omitted its name")?;
+        ensure!(!name.is_empty(), "Network listing contains an empty name");
+        let id = network["id"]
+            .as_str()
+            .context("Network listing omitted its full identity")?;
+        crate::protocol::fixed_hex::<32>(id).map_err(anyhow::Error::msg)?;
+        names.push(name);
+    }
+    let mut absent = Vec::new();
+    for (index, resource) in resources.iter().enumerate() {
+        if resource.kind != "network" || resource.id.is_some() {
+            continue;
+        }
+        ensure!(
+            resource.name == expected_name
+                && resource.fingerprint.is_none()
+                && resource.network_ids.is_empty(),
+            "Unresolved network intent differs from its generated deployment name"
+        );
+        ensure!(
+            !names.contains(&expected_name),
+            "Unresolved network name exists; no resource was adopted or removed"
+        );
+        absent.push(index);
+    }
+    Ok(absent)
+}
+fn recover_absent_networks(root: &Path, p: &Profile, s: &mut State) -> Result<()> {
+    if !s
+        .resources
+        .iter()
+        .any(|r| r.kind == "network" && r.id.is_none())
+    {
+        return Ok(());
+    }
+    // Only a successful bounded inventory proves absence. Existing objects are never adopted by name.
+    let inventory: Vec<Value> =
+        serde_json::from_slice(&podman(&strings(&["network", "ls", "--format", "json"]))?)?;
+    let absent = absent_network_intents(&s.resources, &p.network_name(), &inventory)?;
+    for index in absent.into_iter().rev() {
+        s.resources.remove(index);
+    }
+    save(root, s)
 }
 fn common(p: &Profile, role: &str, memory: u64, pids: u64, quota: u64) -> Result<Vec<String>> {
     let lifetime = if role == "Inspect" {
@@ -751,13 +805,14 @@ pub fn stop(root: &Path, p: &Profile, s: &mut State) -> Result<()> {
         !failed,
         "Exact resource recovery required; unrelated resources were preserved"
     );
-    Ok(())
+    recover_absent_networks(root, p, s)
 }
 pub fn withdraw_networks(root: &Path, p: &Profile, s: &mut State) -> Result<()> {
     ensure!(
         !s.resources.iter().any(|r| r.kind == "container"),
         "Stop owned containers before releasing networking"
     );
+    recover_absent_networks(root, p, s)?;
     for index in (0..s.resources.len()).rev() {
         let resource = &s.resources[index];
         ensure!(resource.kind == "network", "Unexpected recorded resource");

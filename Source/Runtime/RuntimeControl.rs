@@ -237,7 +237,9 @@ pub fn dispatch(root: &Path, request: Request) -> Result<Value> {
         ensure!(
             !matches!(request.operation, Operation::Stop)
                 || s.status != "Stopped"
-                || s.resources.iter().any(|r| r.kind == "container"),
+                || s.resources
+                    .iter()
+                    .any(|r| { r.kind == "container" || (r.kind == "network" && r.id.is_none()) }),
             "Already stopped"
         );
         ensure!(

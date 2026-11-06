@@ -24,6 +24,12 @@ to author and verify the corresponding renewal artifacts.
 - Runtime commands explicitly select the required `slirp4netns` through a private
   Podman module, including when Podman defaults to `pasta`, without changing
   global or user container configuration.
+- Failed network creation can recover an incomplete intent only when a successful
+  bounded inspection proves its exact generated network name is absent. Existing
+  or ambiguous resources remain protected.
+- `runtime network-preview` provides bounded occupied IPv4 subnet CIDRs for
+  setup preflight through the same Podman interface, without exposing host names
+  or treating a failed inventory as free space.
 
 Upgrade authority replicas and independent Suite verifiers before relying on
 renewed route generations. Older verifiers retain their earlier record contract;

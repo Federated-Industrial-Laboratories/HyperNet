@@ -2,6 +2,55 @@
 // Unit tests for RuntimeContainers.
 use super::*;
 #[test]
+fn failed_network_creation_recovers_only_proven_absence_of_its_exact_name() {
+    let name = "HyperNetRuntime0123456789abcdefAuthority";
+    let intent = Resource {
+        kind: "network".into(),
+        name: name.into(),
+        id: None,
+        fingerprint: None,
+        network_ids: BTreeMap::new(),
+    };
+    let other = json!({"id":hex::encode([1u8;32]),"name":"UnrelatedNetwork"});
+    assert_eq!(
+        absent_network_intents(std::slice::from_ref(&intent), name, &[]).unwrap(),
+        vec![0]
+    );
+    assert_eq!(
+        absent_network_intents(
+            std::slice::from_ref(&intent),
+            name,
+            std::slice::from_ref(&other)
+        )
+        .unwrap(),
+        vec![0]
+    );
+    let present = json!({"id":hex::encode([2u8;32]),"name":name});
+    assert!(
+        absent_network_intents(std::slice::from_ref(&intent), name, &[other, present]).is_err()
+    );
+    for unknown in [
+        json!({}),
+        json!({"id":"short","name":"Other"}),
+        json!({"id":hex::encode([3u8;32]),"name":""}),
+    ] {
+        assert!(absent_network_intents(std::slice::from_ref(&intent), name, &[unknown]).is_err());
+    }
+    let mut altered = intent.clone();
+    altered.name.push_str("Other");
+    assert!(absent_network_intents(&[altered], name, &[]).is_err());
+    let mut altered = intent.clone();
+    altered.fingerprint = Some(hex::encode([4u8; 32]));
+    assert!(absent_network_intents(&[altered], name, &[]).is_err());
+    let mut identified = intent;
+    identified.id = Some(hex::encode([5u8; 32]));
+    assert!(
+        absent_network_intents(&[identified], name, &[])
+            .unwrap()
+            .is_empty()
+    );
+}
+#[test]
 fn unnetworked_requires_none_mode_and_no_effective_attachment() {
     let empty = json!({"HostConfig":{"NetworkMode":"none"},"NetworkSettings":{"Networks":{}}});
     assert!(check_unnetworked(&empty).is_ok());
