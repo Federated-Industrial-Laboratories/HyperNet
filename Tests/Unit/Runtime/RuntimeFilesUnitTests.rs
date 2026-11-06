@@ -2,6 +2,37 @@
 // Unit tests for RuntimeFiles.
 use super::*;
 #[test]
+fn podman_backend_module_is_private_sealed_and_inherited_by_the_selected_child() {
+    let root = std::env::temp_dir().join(format!("HyperNetPodmanModule{}", random_id()));
+    directory(&root).unwrap();
+    let helper = root.join("ReadModule");
+    create(
+        &helper,
+        b"#!/bin/sh\n[ \"$1\" = --module ] || exit 1\nexec /usr/bin/cat \"$2\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+    // Read the module through the real exec handoff and argument contract used by Podman.
+    let mut child = Command::new(&helper);
+    let module = podman_network(&mut child).unwrap();
+    let result = child.output().unwrap();
+    assert!(result.status.success());
+    assert_eq!(
+        result.stdout,
+        b"[network]\ndefault_rootless_network_cmd=\"slirp4netns\"\n"
+    );
+    assert_eq!(
+        unsafe { libc::fcntl(module.as_raw_fd(), libc::F_GETFD) },
+        libc::FD_CLOEXEC
+    );
+    assert_eq!(unsafe { libc::ftruncate(module.as_raw_fd(), 0) }, -1);
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::EPERM)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+#[test]
 fn failed_child_reports_bounded_escaped_stderr_without_stdout() {
     let error = capture(
         Path::new("/usr/bin/sh"),

@@ -16,6 +16,11 @@ NAT bridge per deployment. IPv6 installation and SELinux-enabled operation requi
 platform qualification. Mandatory confinement failures stop activation.
 Outbound service helpers require `slirp4netns` in `/usr/bin` or `/bin` on the host.
 The OCI image does not supply this host networking dependency.
+Core selects `slirp4netns` for its Podman commands through a private, sealed
+configuration module. This also applies when Podman defaults to `pasta`.
+It does not edit the host's container configuration or install either helper.
+The installed runtime requires Podman's `--module` interface. This selection
+is verified with Podman 4.9.3 and 5.7.0; older versions are not qualified.
 
 ## Inputs and setup
 

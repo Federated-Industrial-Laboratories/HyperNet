@@ -21,6 +21,9 @@ to author and verify the corresponding renewal artifacts.
 - New application consent must retain the same owner and exact local binding.
   Suite verifies both prior signatures before renewing the owner's offer, then
   requires fresh operator acceptance and normal authority registration.
+- Runtime commands explicitly select the required `slirp4netns` through a private
+  Podman module, including when Podman defaults to `pasta`, without changing
+  global or user container configuration.
 
 Upgrade authority replicas and independent Suite verifiers before relying on
 renewed route generations. Older verifiers retain their earlier record contract;

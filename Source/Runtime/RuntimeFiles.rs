@@ -6,7 +6,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     os::{
-        fd::AsRawFd,
+        fd::{AsRawFd, FromRawFd},
         unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     },
     path::{Path, PathBuf},
@@ -362,6 +362,39 @@ pub fn capture(
         None,
     )
 }
+fn podman_network(command: &mut Command) -> Result<File> {
+    use std::os::unix::process::CommandExt;
+    let fd = unsafe {
+        libc::memfd_create(
+            c"HyperNetPodmanNetwork".as_ptr(),
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        )
+    };
+    ensure!(fd >= 0, "Cannot prepare private Podman network module");
+    let mut module = unsafe { File::from_raw_fd(fd) };
+    module.write_all(b"[network]\ndefault_rootless_network_cmd=\"slirp4netns\"\n")?;
+    ensure!(
+        unsafe {
+            libc::fcntl(
+                fd,
+                libc::F_ADD_SEALS,
+                libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE,
+            )
+        } == 0,
+        "Cannot seal Podman network module"
+    );
+    command.args(["--module", &format!("/proc/self/fd/{fd}")]);
+    // Only this child inherits the sealed descriptor. No host configuration or ambient override is used.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(module)
+}
 /// Pass bounded opaque request bytes without a shell, environment secret or temporary mount.
 pub fn capture_input(
     program: &Path,
@@ -377,6 +410,11 @@ pub fn capture_input(
         "Runtime dependency input exceeded its bound"
     );
     let mut command = Command::new(program);
+    let _network_module = if program == Path::new("/usr/bin/podman") {
+        Some(podman_network(&mut command)?)
+    } else {
+        None
+    };
     command
         .args(arguments)
         .env_clear()
