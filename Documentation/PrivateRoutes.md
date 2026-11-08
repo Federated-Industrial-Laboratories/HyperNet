@@ -16,6 +16,9 @@ a direct route, another trust root or weaker privacy policy.
 The saved profile contains the complete kind166 voucher record. `RouteOpen`
 carries only its canonical `VersionRef`. The relay retrieves and rechecks that
 exact current record before reserving a stream.
+A reference newer than the relay's retained voucher triggers fresh certified
+context. It grants no forwarding permission until that exact current voucher and
+the separate Permit succeed. Lower or conflicting references remain refused.
 
 ## Privacy profiles
 

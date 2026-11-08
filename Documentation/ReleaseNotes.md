@@ -2,6 +2,32 @@
 
 [Documentation](ReadMe.md) | [Project](../ReadMe.md)
 
+## Linux 0.10.4
+
+Version 0.10.4 corrects renewed relay admission and ordinary Page replacement.
+Use Suite 0.10.3 for authoring consecutive Page revisions and verifying their
+certified results.
+
+- A relay with an older retained voucher fetches fresh certified context when a
+  connection presents a higher generation. The new reference grants no admission
+  by itself. Exact authority verification, possession and destination checks,
+  current Permit, usage accounting and durable connection consumption still apply.
+  Older references, conflicting records and unissued generations remain refused.
+- A Page submission advances the ledger's last content revision by one. Review
+  and withdrawal can advance the ledger record generation without consuming a
+  content revision. Revision 2 can therefore replace approved revision 1 after
+  fresh submission and review; stale or skipped revisions remain refused.
+
+Upgrade authority replicas, relays and Suite verifiers through their normal
+stopped upgrade paths before relying on these corrections. Preserve authority,
+requester, recipient, voucher and Page history state. No key, cache or identity
+reset is required. Existing object encodings and permission boundaries remain.
+
+Focused regressions cover certified voucher refresh, forged and stale references,
+possession and route substitution, usage/replay accounting, approved Page
+replacement and stale/skipped revision refusal. Existing platform and deployment
+qualification limits continue to apply.
+
 ## Linux 0.10.3
 
 Version 0.10.3 supports explicit renewal of an existing relay and application

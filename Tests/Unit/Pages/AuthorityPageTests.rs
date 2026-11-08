@@ -777,7 +777,7 @@ fn page_replacement_review_and_withdrawal_preserve_exact_object_history() {
         "completed approval does not expire with its decision deadline"
     );
     let second = b"HyperNetPage/2\n# Books\n: Replacement awaiting review.\n";
-    let author2 = f.author(second, 3);
+    let author2 = f.author(second, 2);
     f.apply(
         Command::Submit {
             author: author2.clone(),
@@ -836,6 +836,91 @@ fn page_replacement_review_and_withdrawal_preserve_exact_object_history() {
         retained_inputs(&f.state).unwrap().is_empty(),
         "native publication history retains metadata without Page bytes"
     );
+}
+
+#[test]
+fn approved_page_replacement_uses_content_revision_after_ledger_review() {
+    let mut f = Fixture::new();
+    let first = b"HyperNetPage/2\n# Books\n: First approved edition.\n";
+    let second = b"HyperNetPage/2\n# Books\n: Second approved edition.\n";
+    let mut published = None;
+    for (number, body) in [(1, first.as_slice()), (2, second.as_slice())] {
+        let author = f.author(body, number);
+        if number == 2 {
+            let ledger_record = f.state.record(140, author.intent.resource).unwrap();
+            assert_eq!(ledger_record.reference.generation, 2);
+            assert_eq!(
+                Ledger::parse(&ledger_record.payload).unwrap().last_revision,
+                1
+            );
+            let before = f.state.value();
+            for stale_or_skipped in [1, 3] {
+                let denied = f
+                    .evaluate(
+                        Command::Submit {
+                            author: f.author(body, stale_or_skipped),
+                        },
+                        vec![input(Class::PageSource, body)],
+                        5000,
+                    )
+                    .2;
+                assert_eq!(denied.code, 3);
+                assert!(denied.state.is_none());
+                assert_eq!(f.state.value(), before);
+            }
+        }
+        f.apply(
+            Command::Submit {
+                author: author.clone(),
+            },
+            vec![input(Class::PageSource, body)],
+            5000,
+        );
+        let pending =
+            Ledger::parse(&f.state.record(140, author.intent.resource).unwrap().payload).unwrap();
+        assert_eq!(pending.last_revision, number);
+        assert_eq!(pending.published, published);
+        assert!(pending.pending.is_some());
+        let review = f.reviewer(&author, true, 10000);
+        let bundle = objects::Bundle::encode(body, &author.bytes, &review.bytes).unwrap();
+        f.apply(
+            Command::Review {
+                review,
+                bundle: Some(Reference::for_bytes(Class::PageBundle, &bundle).unwrap()),
+            },
+            vec![
+                input(Class::PageSource, body),
+                input(Class::PageBundle, &bundle),
+            ],
+            5000,
+        );
+        let ledger_record = f.state.record(140, author.intent.resource).unwrap();
+        let ledger = Ledger::parse(&ledger_record.payload).unwrap();
+        assert_eq!(ledger_record.reference.generation, number * 2);
+        assert_eq!(ledger.last_revision, number);
+        assert!(ledger.pending.is_none());
+        assert_ne!(ledger.published, published);
+        published = ledger.published;
+        let (_, read) = f.apply(
+            Command::Read {
+                page: author.raw_page,
+            },
+            vec![input(Class::PageBundle, &bundle)],
+            5000,
+        );
+        assert!(read.versions.contains(published.as_ref().unwrap()));
+        let revision = f
+            .state
+            .record(141, revision_id(author.intent.resource, number).unwrap())
+            .unwrap();
+        assert_eq!(
+            Revision::parse(&revision.payload, f.state.network, f.state.incarnation)
+                .unwrap()
+                .author
+                .source,
+            Reference::for_bytes(Class::PageSource, body).unwrap()
+        );
+    }
 }
 
 #[test]

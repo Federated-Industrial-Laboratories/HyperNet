@@ -2,7 +2,7 @@
 
 [Project](../ReadMe.md) | [Installation](Installation.md) | [Security](Security.md) | [HyperNetSuite](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite)
 
-[Linux 0.10.2 release and earlier downloads](ReleaseNotes.md)
+[Linux 0.10.4 release and earlier downloads](ReleaseNotes.md)
 
 [0.9.1 permission scopes and migration](PermissionScopes.md)
 

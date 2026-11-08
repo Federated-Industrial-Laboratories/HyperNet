@@ -8,6 +8,24 @@ current offline target policy below; it never starts a runtime, reuses obsolete
 consent or changes an authority floor. Preserve existing software and state while
 preparing a new private prefix.
 
+## Relay and Page corrections 0.10.4
+
+Use Core 0.10.4 with Suite 0.10.3 for consecutive Page revisions and their
+verification. Before replacing authority replicas, stop new ordered mutations,
+resolve pending work and let every voter fully apply the old-version committed
+history. Confirm matching applied and committed heights before stopping the
+committee. Do not mix old and corrected Page evaluation rules or re-execute a
+lagging old-version suffix under the corrected rules.
+
+Replace stopped authority and relay software through the normal signed package
+and local artifact-consent workflow. Restart clients with the selected Suite.
+Preserve all authority, requester, recipient, connection-consumption and Page
+history state. Renewed vouchers retain their identity and usage baseline; a
+newer reference still needs fresh certified context and a separate Permit.
+Existing Page revision numbers remain valid, including earlier gaps. New
+submissions use the retained last content revision plus one. No key, cache or
+ledger reset is required. See [release notes](ReleaseNotes.md) for the scope.
+
 ## Consumed-read cleanup 0.10.2
 
 Version 0.10.2 adds optional cleanup without changing the retained
@@ -75,7 +93,7 @@ cannot mark incompatible state as compatible. The current authority contract use
 immutable references for signer-state bodies. Incompatible inline-state packages
 and retained package trust are refused; they cannot activate this layout in place.
 Suite uses a different contract and trust directory. The published Linux release
-is version 0.10.2. Signed update sequences identify exact builds and cannot move backwards. Earlier development packages do not become
+is version 0.10.4. Signed update sequences identify exact builds and cannot move backwards. Earlier development packages do not become
 release packages when a version label changes. Use independently accepted release
 trust and the signed target for the new package; retain existing state and floors.
 

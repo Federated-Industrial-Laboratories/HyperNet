@@ -658,7 +658,7 @@ pub fn evaluate(
                     );
                 } else {
                     ensure!(
-                        old.map_or(Some(1), |r| r.reference.generation.checked_add(1))
+                        old.map_or(Some(1), |_| ledger.last_revision.checked_add(1))
                             == Some(author.intent.revision),
                         "Page expected version differs"
                     );
