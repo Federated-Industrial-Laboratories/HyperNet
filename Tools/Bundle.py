@@ -21,7 +21,7 @@ sys.dont_write_bytecode = True
 import PackageTrust
 
 PRODUCT = 'HyperNet'
-VERSION = '0.10.3'
+VERSION = '0.10.4'
 NAMESPACE = 'HyperNetBundle1'
 PRINCIPAL = 'HyperNetPublisher'
 MAX_ARCHIVE = 512 * 1024 * 1024

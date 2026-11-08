@@ -31,6 +31,9 @@ portable provenance, not a command that can independently publish content.
 Submitting it creates an immutable revision and advances the Page ledger's
 pending head. An existing approved revision remains published while its
 replacement is pending or rejected.
+The next submission uses the ledger's last content revision plus one. Review and
+withdrawal also advance the ledger record generation, but do not consume content
+revision numbers. An approved revision 1 is followed by submission revision 2.
 
 Submission uses a signed causal floor and exact relevant record versions. Another
 requester's read or maintenance receipt may commit between authoring and

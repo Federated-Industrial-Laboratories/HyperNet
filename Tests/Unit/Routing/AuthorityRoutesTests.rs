@@ -358,6 +358,15 @@ impl Fixture {
         signer: u8,
         grant: Option<VersionRef>,
     ) -> (Intent, Operation, Decision) {
+        self.request_at(command, signer, grant, 5000)
+    }
+    fn request_at(
+        &self,
+        command: Command,
+        signer: u8,
+        grant: Option<VersionRef>,
+        at: u64,
+    ) -> (Intent, Operation, Decision) {
         let mut operation = Operation {
             grant,
             command: super::super::Command::Route(command),
@@ -381,7 +390,7 @@ impl Fixture {
                 &self.records,
                 &self.reserved,
                 &intent,
-                5000,
+                at,
                 false,
                 false,
             )
@@ -396,7 +405,7 @@ impl Fixture {
                     &self.records,
                     &self.reserved,
                     &intent,
-                    5000,
+                    at,
                     false,
                     true,
                 )
@@ -798,9 +807,10 @@ fn verified_context(
     f: &Fixture,
     intent: &Intent,
     decision: &Decision,
+    at: u64,
 ) -> super::super::result::Candidate {
     use crate::authority_proof::{Disposition, ExecutedResult, OperationResult, Restrictions};
-    let bootstrap = crate::trust_bootstrap::check(&f.bootstrap, true, 5000).unwrap();
+    let bootstrap = crate::trust_bootstrap::check(&f.bootstrap, true, at).unwrap();
     let result = OperationResult {
         action: intent.action.clone(),
         disposition: Disposition::Permit,
@@ -824,8 +834,8 @@ fn verified_context(
         result: wire::digest(&result.value),
         policy_state: [205; 32],
         minimum_policy_height: 0,
-        evaluated_at_ms: 5000,
-        expires_at_ms: 14000,
+        evaluated_at_ms: at,
+        expires_at_ms: decision.expires_ms.min(at + 5000),
         restrictions: Restrictions::default(),
     };
     super::super::result::verify(
@@ -847,7 +857,7 @@ fn certified_route_context_is_independently_verified_from_an_empty_cache() {
     let voucher = f.issue(2, 2 * CHARGE);
     let (intent, _, decision) = f.request(Command::VoucherContext { voucher }, 160, None);
     assert_eq!(decision.code, 0);
-    let candidate = verified_context(&f, &intent, &decision);
+    let candidate = verified_context(&f, &intent, &decision, 5000);
     assert_eq!(
         candidate.state.record(165, RELAY).unwrap().reference,
         f.state.record(165, RELAY).unwrap().reference
@@ -855,6 +865,149 @@ fn certified_route_context_is_independently_verified_from_an_empty_cache() {
     assert_eq!(
         candidate.state.record(166, [201; 32]).unwrap().reference,
         f.state.record(166, [201; 32]).unwrap().reference
+    );
+}
+
+#[test]
+fn renewed_voucher_refreshes_retained_context_without_bypassing_admission() {
+    use crate::{route_authority::retained_voucher, route_protocol::Open};
+    let mut f = Fixture::new();
+    f.register();
+    let old = f.issue(2, 2 * CHARGE);
+    f.apply(Fixture::permit(&old, 210), 160, None);
+    let retained = f.state.clone();
+    let charged = retained.record(167, old.id).unwrap().clone();
+    let mut renewal = f.issue_command(2, 2 * CHARGE);
+    if let Command::Issue { expires, .. } = &mut renewal {
+        *expires = 19000;
+    }
+    let renewed = f.request_at(renewal, 5, Some(f.reader.clone()), 15000).2;
+    assert_eq!(renewed.code, 0);
+    f.state = renewed.state.unwrap();
+    State::parse(&f.state.value(), N, I).unwrap();
+    let current = f.state.record(166, old.id).unwrap().reference.clone();
+    assert_eq!(current.generation, old.generation + 1);
+    let open = Open {
+        network: N,
+        incarnation: I,
+        relay: RELAY,
+        service: DESTINATION,
+        voucher: wire::encode(&reference(&current)).unwrap(),
+        nonce: [215; 32],
+        attachment: false,
+    };
+    assert!(
+        retained_voucher(&retained, &current, &open, public(200))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        retained.record(167, old.id).unwrap().reference,
+        charged.reference
+    );
+
+    // A claimed newer generation requests context; the authority still refuses unissued bytes.
+    let mut forged = current.clone();
+    forged.generation += 1;
+    for reference in [
+        forged,
+        VersionRef {
+            digest: [216; 32],
+            ..current.clone()
+        },
+    ] {
+        assert!(
+            retained_voucher(&retained, &reference, &open, public(200))
+                .unwrap()
+                .is_none()
+        );
+        let denied = f
+            .request_at(
+                Command::VoucherContext {
+                    voucher: reference.clone(),
+                },
+                160,
+                None,
+                15000,
+            )
+            .2;
+        assert_eq!(denied.code, 3);
+        assert!(denied.state.is_none());
+        assert_eq!(
+            f.request_at(Fixture::permit(&reference, 220), 160, None, 15000)
+                .2
+                .code,
+            3
+        );
+    }
+    assert_eq!(
+        f.state.record(167, old.id).unwrap().reference,
+        charged.reference
+    );
+    let (intent, _, context) = f.request_at(
+        Command::VoucherContext {
+            voucher: current.clone(),
+        },
+        160,
+        None,
+        15000,
+    );
+    assert_eq!(context.code, 0);
+    assert!(context.state.is_none());
+    let refreshed = verified_context(&f, &intent, &context, 15000).state;
+    assert_eq!(
+        refreshed.record(167, old.id).unwrap().reference,
+        charged.reference
+    );
+    assert!(
+        retained_voucher(&refreshed, &current, &open, public(200))
+            .unwrap()
+            .is_some()
+    );
+    assert!(retained_voucher(&refreshed, &old, &open, public(200)).is_err());
+    let mut conflict = current.clone();
+    conflict.digest = [217; 32];
+    assert!(retained_voucher(&refreshed, &conflict, &open, public(200)).is_err());
+    assert!(retained_voucher(&refreshed, &current, &open, public(199)).is_err());
+    for field in [false, true] {
+        let mut changed = open.clone();
+        if field {
+            changed.relay = [218; 32];
+        } else {
+            changed.service = [218; 32];
+        }
+        assert!(retained_voucher(&refreshed, &current, &changed, public(200)).is_err());
+    }
+    assert_eq!(
+        f.request_at(Fixture::permit(&old, 220), 160, None, 15000)
+            .2
+            .code,
+        3
+    );
+    let (intent, operation, permit) =
+        f.request_at(Fixture::permit(&current, 220), 160, None, 15000);
+    assert_eq!(permit.code, 0);
+    f.state = permit.state.unwrap();
+    let usage = Usage::parse(&f.state.record(167, current.id).unwrap().payload).unwrap();
+    assert_eq!((usage.connections, usage.bytes), (2, 2 * CHARGE));
+    let replay = operation
+        .prepare(
+            &f.state,
+            &f.records,
+            &f.reserved,
+            &intent,
+            15000,
+            true,
+            true,
+        )
+        .unwrap();
+    assert_eq!(replay.code, 0);
+    assert!(replay.state.is_none());
+    assert_eq!(
+        f.request_at(Fixture::permit(&current, 220), 160, None, 15000)
+            .2
+            .code,
+        3
     );
 }
 
@@ -871,7 +1024,7 @@ fn certified_attachment_lookup_covers_current_relay_and_endpoint() {
     };
     let (intent, _, decision) = f.request(command.clone(), 160, None);
     assert_eq!(decision.code, 0);
-    let candidate = verified_context(&f, &intent, &decision);
+    let candidate = verified_context(&f, &intent, &decision, 5000);
     for profile in &f.profiles {
         let record = candidate
             .state

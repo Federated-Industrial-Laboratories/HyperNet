@@ -1305,6 +1305,10 @@ pub(crate) fn retained_voucher(
     let Some(selected) = state.records.get(&(166, voucher.id)) else {
         return Ok(None);
     };
+    // A newer reference needs fresh certified context; it does not admit a stream.
+    if voucher.kind == 166 && voucher.generation > selected.reference.generation {
+        return Ok(None);
+    }
     ensure!(
         selected.reference == *voucher,
         "route voucher reference differs from certified admission"
