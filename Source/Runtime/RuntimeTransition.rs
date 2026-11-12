@@ -15,6 +15,8 @@ use std::{
 mod artifacts;
 #[path = "RuntimeTransitionBindings.rs"]
 mod bindings;
+#[path = "RuntimeTransitionCertificates.rs"]
+mod certificates;
 
 #[derive(Clone, ValueEnum)]
 pub enum SessionPolicy {
@@ -43,12 +45,18 @@ pub struct Prepare {
     image: Option<String>,
     #[command(flatten)]
     package: super::package::Inputs,
+    /// Public same-key certificate bundle for the exact current endpoints and issuer.
+    #[arg(long)]
+    transport_bundle: Option<PathBuf>,
     /// Exact newly signed same-identity route profile, for a stopped role5 service only.
     #[arg(long)]
     route_profile: Option<PathBuf>,
     /// Exact renewed owner/operator application consent; requires its same-identity route profile.
     #[arg(long, requires = "route_profile")]
     application_config: Option<PathBuf>,
+    /// Exact non-application route configuration for certificate-only relay refresh.
+    #[arg(long, requires_all = ["route_profile", "transport_bundle"], conflicts_with = "application_config")]
+    route_config: Option<PathBuf>,
     #[arg(long)]
     output: PathBuf,
 }
@@ -61,7 +69,24 @@ pub struct Selection {
 }
 #[derive(Subcommand)]
 pub enum Command {
-    Prepare(Prepare),
+    /// Export the exact public endpoint and issuer template without changing installed state.
+    TransportTemplate {
+        #[arg(long)]
+        directory: PathBuf,
+    },
+    /// Inspect finite certificate dates without requiring the previous certificates to be live.
+    TransportStatus {
+        #[arg(long)]
+        directory: PathBuf,
+    },
+    Prepare(Box<Prepare>),
+    /// Export the exact proposed public manifest for independently signed route authoring.
+    Manifest {
+        #[command(flatten)]
+        selection: Selection,
+        #[arg(long)]
+        output: PathBuf,
+    },
     Preview(Selection),
     Apply {
         #[command(flatten)]
@@ -94,6 +119,8 @@ struct Proposal {
     package: Option<super::package::Selection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bindings: Option<bindings::Selection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transport: Option<certificates::Selection>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -184,6 +211,9 @@ fn proposal(path: &Path, root: &Path, service: bool) -> Result<Proposal> {
         "Proposal belongs to another installed deployment"
     );
     p.successor.successor_of(&p.previous)?;
+    if let Some(selection) = &p.transport {
+        certificates::validate(&p.previous, &p.successor, selection, false)?;
+    }
     let software_changed = p.successor.software_digest != p.previous.software_digest
         || p.successor
             .roles
@@ -285,13 +315,22 @@ fn prepare(args: Prepare, service: bool) -> Result<Value> {
     } else {
         std::env::current_exe()?.canonicalize()?
     };
+    let transport = certificates::prepare(
+        &root,
+        service,
+        &old,
+        &mut successor,
+        args.transport_bundle.as_deref(),
+    )?;
     successor.successor_of(&old)?;
     let bindings = bindings::prepare(
         &root,
         service,
         &successor,
         args.route_profile.as_deref(),
-        args.application_config.as_deref(),
+        args.application_config
+            .as_deref()
+            .or(args.route_config.as_deref()),
     )?;
     let p = Proposal {
         root,
@@ -302,6 +341,7 @@ fn prepare(args: Prepare, service: bool) -> Result<Value> {
         executable,
         package,
         bindings,
+        transport,
     };
     files::private_dir(args.output.parent().context("Proposal parent required")?)?;
     files::create(&args.output, &serde_json::to_vec(&p)?)?;
@@ -310,6 +350,9 @@ fn prepare(args: Prepare, service: bool) -> Result<Value> {
     )
 }
 fn inspect(p: &Proposal) -> Result<Value> {
+    if let Some(selection) = &p.transport {
+        certificates::validate(&p.previous, &p.successor, selection, true)?;
+    }
     let (old, digest) = current(&p.root, p.service)?;
     ensure!(
         old == p.previous && digest == p.predecessor,
@@ -326,7 +369,8 @@ fn inspect(p: &Proposal) -> Result<Value> {
     Ok(
         json!({"status":"StoppedSuccessorPreview","previewDigest":digest,"predecessor":p.predecessor,
         "generation":p.successor.generation,"previous":p.previous,"successor":p.successor,
-        "executable":p.executable,"routeBindings":p.bindings.as_ref().map(|selection|bindings::summary(selection,&p.successor)).transpose()?,"state":"All signer, requester, recipient, content, tombstone and generation state is retained",
+        "executable":p.executable,"transportCertificates":p.transport.as_ref().map(certificates::summary).transpose()?,"routeBindings":p.bindings.as_ref().map(|selection|bindings::summary(selection,&p.successor)).transpose()?,"state":"All signer, requester, recipient, content, tombstone and generation state is retained",
+        "routeBindingsRequired":p.service && p.successor.transport_changed(&p.previous) && p.bindings.is_none(),
         "activation":"Stop the manager and workloads before apply. The successor remains stopped and needs current network admission and a fresh service activation."}),
     )
 }
@@ -385,12 +429,17 @@ fn launch_identity(root: &Path) -> Result<Option<(u64, u64)>> {
     }
 }
 fn begin(p: Proposal, operation: String, digest: String) -> Result<Transaction> {
+    ensure!(
+        !p.service || !p.successor.transport_changed(&p.previous) || p.bindings.is_some(),
+        "Certificate-changing services require the exact signed successor route; export the draft manifest, author its route, then prepare the complete transition"
+    );
     let root = &p.root;
     let mut replacements = BTreeMap::new();
     if !root.join("TransitionFiles").try_exists()? {
         files::directory(&root.join("TransitionFiles"))?;
     }
     files::private_dir(&root.join("TransitionFiles"))?;
+    certificates::stage_files(root, &p, &mut replacements)?;
     let (authority, service, initialised, lifecycle_generation) = if p.service {
         let (mut profile, state) = services::load(root)?;
         ensure!(
@@ -518,6 +567,13 @@ fn begin(p: Proposal, operation: String, digest: String) -> Result<Transaction> 
         profile.manifest =
             crate::runtime_authorization::Manifest::from_canonical(p.successor.clone())?;
         let config = serde_json::to_vec(&profile.config)?;
+        for (relative, replacement) in &replacements {
+            if relative.starts_with("Work/Config/Tls/") {
+                profile
+                    .artifacts
+                    .insert(relative.clone(), replacement.digest.clone());
+            }
+        }
         profile.artifacts.insert(
             "Work/Config/ReplicaConfig.json".into(),
             files::hex_digest(&config),
@@ -655,6 +711,9 @@ fn finish(mut t: Transaction, historical: bool) -> Result<Value> {
         artifacts::recover(&mut t)?;
     }
     let root = &t.proposal.root;
+    if !historical && let Some(selection) = &t.proposal.transport {
+        certificates::validate(&t.proposal.previous, &t.proposal.successor, selection, true)?;
+    }
     let image = format!(
         "sha256:{}",
         hex::encode(t.proposal.successor.roles[0].image_digest)
@@ -801,16 +860,33 @@ fn finish(mut t: Transaction, historical: bool) -> Result<Value> {
 }
 pub(super) fn run(command: Command, service: bool) -> Result<Value> {
     if let Command::Prepare(args) = command {
-        return prepare(args, service);
+        return prepare(*args, service);
     }
     let root = match &command {
-        Command::Preview(s) | Command::Apply { selection: s, .. } => &s.directory,
-        Command::Recover { directory, .. } => directory,
+        Command::Preview(s)
+        | Command::Apply { selection: s, .. }
+        | Command::Manifest { selection: s, .. } => &s.directory,
+        Command::Recover { directory, .. }
+        | Command::TransportTemplate { directory }
+        | Command::TransportStatus { directory } => directory,
         _ => unreachable!(),
     };
     let root = files::root(root)?;
     let _lock = files::lock(&root)?;
     match command {
+        Command::TransportTemplate { .. } => certificates::template(&root, service),
+        Command::TransportStatus { .. } => certificates::status(&root, service),
+        Command::Manifest { selection, output } => {
+            let p = proposal(&selection.proposal, &root, service)?;
+            inspect(&p)?;
+            files::private_dir(output.parent().context("Manifest output parent required")?)?;
+            files::create(&output, &p.successor.encode()?)?;
+            Ok(
+                json!({"status":"SuccessorManifestExported", "manifest":output, "generation":p.successor.generation,
+                "profileDigest":hex::encode(wire::digest(&p.successor.desired()?)),
+                "consentDigest":hex::encode(wire::digest(&p.successor.unsigned_consent(0)?))}),
+            )
+        }
         Command::Preview(s) => inspect(&proposal(&s.proposal, &root, service)?),
         Command::Apply {
             selection,

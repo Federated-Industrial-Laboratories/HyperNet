@@ -20,6 +20,26 @@ pub struct Identity {
     pub certificate_authority_pem: String,
 }
 impl Identity {
+    /// Certificate renewal changes only dates and signatures for the already pinned identities.
+    pub fn certificate_successor_of(&self, previous: &Self) -> Result<()> {
+        self.validate()?;
+        previous.validate()?;
+        ensure!(
+            self.service == previous.service
+                && self.server_name == previous.server_name
+                && self.transport_key == previous.transport_key,
+            "Certificate successor changes pinned route identity"
+        );
+        let original_issuer =
+            runtime_manifest::certificates::der(&previous.certificate_authority_pem)?;
+        let current_issuer = runtime_manifest::certificates::der(&self.certificate_authority_pem)?;
+        runtime_manifest::certificates::leaf_successor(
+            &previous.leaf_der,
+            &self.leaf_der,
+            &original_issuer,
+            &current_issuer,
+        )
+    }
     pub fn validate(&self) -> Result<()> {
         ensure!(self.service != [0; 32], "route service identity is absent");
         ensure!(

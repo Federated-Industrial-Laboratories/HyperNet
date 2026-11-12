@@ -9,7 +9,11 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 pub type Key = [u8; 32];
-pub const MAXIMUM: usize = 48 * 1024;
+pub const MAXIMUM: usize = 96 * 1024;
+#[path = "RuntimeCertificates.rs"]
+pub mod certificates;
+#[path = "RuntimeManifestTransport.rs"]
+pub mod transport;
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -105,6 +109,8 @@ pub struct Manifest {
     pub limits: [u64; 4],
     pub consent_policy: ConsentPolicy,
     pub authority_config: Option<AuthorityConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_certificates: Option<transport::Certificates>,
 }
 fn b(key: &Key) -> V {
     V::Bytes(key.to_vec())
@@ -482,6 +488,9 @@ impl Manifest {
                 "Authority storage admission requires journal replacement and pending-store headroom"
             );
         }
+        if let Some(transport) = &self.transport_certificates {
+            transport.validate(self)?;
+        }
         Ok(())
     }
     pub fn successor_of(&self, previous: &Self) -> Result<()> {
@@ -497,12 +506,34 @@ impl Manifest {
                 && self.previous_consent == Some(wire::digest(&previous.unsigned_consent(0)?)),
             "Successor does not name the exact preceding profile and consent"
         );
+        if let Some(old) = &previous.transport_certificates {
+            let current = self
+                .transport_certificates
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Certificate origin cannot be removed"))?;
+            ensure!(current.origin == old.origin, "Certificate origin changed");
+            certificates::issuer_successor(
+                &certificates::der(&old.issuer_pem)?,
+                &certificates::der(&current.issuer_pem)?,
+            )?;
+            for (before, after) in previous.endpoints.iter().zip(&self.endpoints) {
+                certificates::leaf_successor(
+                    &before.leaf_der,
+                    &after.leaf_der,
+                    &certificates::der(&old.issuer_pem)?,
+                    &certificates::der(&current.issuer_pem)?,
+                )?;
+            }
+        }
         self.same_operational_identity(previous)
     }
     /// Stable installed resource identity excludes only explicitly renewable operating conditions.
     pub fn operational_digest(&self) -> Result<Key> {
         self.validate()?;
         let mut stable = self.clone();
+        if let Some(transport) = &self.transport_certificates {
+            transport.restore_origin(&mut stable);
+        }
         stable.generation = 1;
         stable.previous_profile = None;
         stable.previous_consent = None;
@@ -616,9 +647,13 @@ impl Manifest {
             }
             a(fields)
         });
-        let bytes = wire::encode(&a([
+        let mut fields = vec![
             V::Uint(200),
-            V::Uint(1),
+            V::Uint(if self.transport_certificates.is_some() {
+                2
+            } else {
+                1
+            }),
             V::Text("HyperNetRuntimeManifest".into()),
             b(&self.network),
             b(&self.incarnation),
@@ -643,16 +678,35 @@ impl Manifest {
             V::Uint(self.generation),
             self.previous_profile.as_ref().map_or(V::Null, b),
             self.previous_consent.as_ref().map_or(V::Null, b),
-        ]))?;
-        ensure!(bytes.len() <= MAXIMUM, "Canonical manifest exceeds 48 KiB");
+        ];
+        if let Some(transport) = &self.transport_certificates {
+            fields.push(transport.value());
+        }
+        let bytes = wire::encode(&a(fields))?;
+        let maximum = if self.transport_certificates.is_some() {
+            MAXIMUM
+        } else {
+            48 * 1024
+        };
+        ensure!(
+            bytes.len() <= maximum,
+            "Canonical manifest exceeds its bound"
+        );
         Ok(bytes)
     }
     pub fn parse(bytes: &[u8]) -> Result<Self> {
-        ensure!(bytes.len() <= MAXIMUM, "Canonical manifest exceeds 48 KiB");
-        let value = wire::decode(bytes)?;
-        let v = value.array(23)?;
         ensure!(
-            v[0].uint()? == 200 && v[1].uint()? == 1 && v[2].text()? == "HyperNetRuntimeManifest",
+            bytes.len() <= MAXIMUM,
+            "Canonical manifest exceeds its versioned bound"
+        );
+        let value = wire::decode(bytes)?;
+        let v = value.list(24)?;
+        ensure!(
+            v.len() >= 23
+                && v[0].uint()? == 200
+                && ((v[1].uint()? == 1 && v.len() == 23 && bytes.len() <= 48 * 1024)
+                    || (v[1].uint()? == 2 && v.len() == 24))
+                && v[2].text()? == "HyperNetRuntimeManifest",
             "Invalid runtime manifest envelope"
         );
         let validity = Validity::parse(&v[10])?;
@@ -770,6 +824,11 @@ impl Manifest {
                 reviewer_roots: keys(&consent[1])?,
             },
             authority_config,
+            transport_certificates: if v.len() == 24 {
+                Some(transport::Certificates::parse(&v[23])?)
+            } else {
+                None
+            },
         };
         ensure!(manifest.encode()? == bytes, "Noncanonical manifest");
         Ok(manifest)

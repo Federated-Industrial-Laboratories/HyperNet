@@ -182,6 +182,7 @@ pub(crate) fn manifest() -> Manifest {
             allow_opaque: false,
             reviewer_roots: vec![],
         },
+        transport_certificates: None,
         authority_config: Some(AuthorityConfig {
             listen_address: Ipv4Addr::UNSPECIFIED.into(),
             listen_port: 24000,

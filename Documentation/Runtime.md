@@ -417,3 +417,86 @@ setting because other services may depend on it. After a successor, review and
 enable its new exact unit; stale unit profiles refuse to run. When other workloads
 still use the current monitor unit, `--clock-executable` can retain its already
 approved executable while changing the workload independently.
+
+## Stopped certificate successors
+
+Certificate successors use `TransportCertificates/1` and manifest wire version2.
+Older validators refuse that format. Existing manifests keep their original
+encoding. The new manifest retains its original certificates and authority TLS
+pins so its permanent resource digest, withdrawals and committee appointment
+remain unchanged. Every endpoint, service key, transport key, address, port,
+permission and resource limit stays bound. The issuer identity, SAN, usages and
+other certificate extensions cannot change. Fresh acceptance checks the current
+chain and finite dates; expired original certificates serve only as signed
+identity history.
+
+Export the existing public template:
+
+```sh
+HyperNet runtime transition transport-template --directory /Private/AuthorityOne
+```
+
+For a role5 endpoint, use `runtime services transition transport-template`.
+The JSON has format `HyperNetTransportCertificates/1`, an `issuerPem` and a
+`certificates` array. Each entry contains `endpoint`, `certificatePem`, and
+optional `serviceKey` and `transportKey` for matching the retained requests.
+Replace only the public issuer and leaf certificate values with the newly issued
+material. Include every exact endpoint, including peers and the approved relay.
+The optional duplicate keys are checked against the installed identity.
+
+```sh
+HyperNet runtime transition prepare --directory /Private/AuthorityOne \
+  --transport-bundle /Private/RenewedCertificates.json \
+  --output /Private/CertificateSuccessor.json
+HyperNet runtime transition preview --directory /Private/AuthorityOne \
+  --proposal /Private/CertificateSuccessor.json
+```
+
+Preview reports the old and new issuer pins, endpoint certificate hashes and
+finite validity intervals. Stop the committee managers and all four workloads,
+then apply each exact reviewed proposal through the ordinary transition command.
+The operation stages public TLS material, peer pins and signed consent behind the
+same durable barrier as other successors. Interrupted operations recover forward
+from their retained exact bundle; mixed files, changed inputs or a withdrawn host
+are refused. Keep the previous and new public artifacts until every peer has
+completed recovery. No requester, signer, admission or cache floor is reset.
+
+A role5 service also needs its new operator-signed route profile. Pass that file
+with `--route-profile`. Non-application attachments can pass `--route-config`
+with an exact certificate-only relay configuration; it requires the transport
+bundle. Chat endpoints instead pass their renewed `--application-config`, keeping
+the accepted local binding and owner permissions. A certificate-only successor
+may preserve an exact `UntilWithdrawn` interval. An ordinary route successor
+still has to extend its interval.
+
+Synchronise the signed deployment successors, register the new route profiles
+and application registrations, and obtain fresh activation before serving.
+Client route refresh uses current certified native service records, preserves the
+accepted network and identity keys, and installs their exact new certificate pins.
+Stop or release a client requester before replacing its selected route metadata.
+A live voucher refreshed for new certificate records carries its existing usage
+baseline; certificate renewal does not refill a connection or byte budget.
+
+`runtime transition transport-status --directory HOST` (or `runtime services
+transition transport-status`) reports the current finite issuer/leaf intersection
+as `notBeforeMs` and `notAfterMs`. It also reports `valid`, public endpoint keys,
+certificate intervals and the retained manifest generation. This read-only command
+works while the service is running and after certificate expiry. An incomplete
+stopped transition must be recovered first. The result does not admit a new
+certificate or authorise any workload start.
+
+For a role5 service, first prepare a draft with the public certificate bundle.
+Export its exact canonical manifest before signing the matching route:
+
+```sh
+HyperNet runtime services transition manifest --directory /Private/Service \
+  --proposal /Private/Exchange/Draft.json --output /Private/Exchange/Manifest.cbor
+```
+
+The result includes `profileDigest` for `HyperNetSuite routes profile`. Author the
+same route parameters with the new exact leaf and issuer, then prepare a final
+proposal with `--route-profile` and its required configuration. Application
+services also require fresh owner and operator signatures for their unchanged
+binding. A certificate-changing service draft without its signed route cannot be
+applied. The draft changes no installed state and can be discarded after the
+complete final proposal has been retained.

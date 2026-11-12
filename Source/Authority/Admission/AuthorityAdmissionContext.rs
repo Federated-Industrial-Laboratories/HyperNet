@@ -182,6 +182,8 @@ fn verify_routes(
                 .context("scoped destination absent")?;
             let relay = authority_domains::routes::Service::parse(&relay.payload, n, i)?;
             let target = authority_domains::routes::Service::parse(&target.payload, n, i)?;
+            relay.profile.manifest.current_transport(at)?;
+            target.profile.manifest.current_transport(at)?;
             let template = p.template(role.role)?;
             ensure!(
                 !relay.withdrawn

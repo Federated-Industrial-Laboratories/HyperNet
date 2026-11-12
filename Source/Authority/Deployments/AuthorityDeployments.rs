@@ -100,7 +100,7 @@ impl Offer {
         })
     }
     pub fn current(&self, at: u64) -> Result<bool> {
-        if !current(at, self.manifest.validity) {
+        if !current(at, self.manifest.validity) || self.manifest.current_transport(at).is_err() {
             return Ok(false);
         }
         for bytes in &self.possessions {

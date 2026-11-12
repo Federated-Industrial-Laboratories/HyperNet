@@ -12,7 +12,7 @@ pub(crate) use evaluation::{admission_routes, evaluate_read, scoped_vouchers};
 
 #[cfg(test)]
 #[path = "../../Tests/Unit/Routing/AuthorityRoutesTests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 #[derive(Clone, Debug)]
 pub struct RegisteredProfile {
@@ -70,15 +70,23 @@ impl RegisteredProfile {
     /// Explicit signed consent may extend the same endpoint; no permanent property is replaced.
     pub fn successor_of(&self, previous: &Self) -> Result<()> {
         self.manifest.permits_definition(&previous.manifest)?;
+        let certificates_changed = self.manifest.transport_changed(&previous.manifest);
+        let identity_matches = self.identity == previous.identity
+            || certificates_changed
+                && self
+                    .identity
+                    .certificate_successor_of(&previous.identity)
+                    .is_ok();
         ensure!(
             self.manifest.generation > previous.manifest.generation
                 && self.validity.0 >= previous.validity.0
-                && self.validity.1 > previous.validity.1
+                && (self.validity.1 > previous.validity.1
+                    || certificates_changed && self.validity == previous.validity)
                 && self.deployment == previous.deployment
                 && self.service == previous.service
                 && self.operator == previous.operator
                 && self.endpoint == previous.endpoint
-                && self.identity == previous.identity
+                && identity_matches
                 && self.address == previous.address
                 && self.domain == previous.domain
                 && self.protocol == previous.protocol
@@ -182,6 +190,12 @@ impl RegisteredProfile {
                 && p.validity.1 <= p.manifest.validity.1,
             "route profile differs from the exact consented manifest endpoint"
         );
+        if let Some(transport) = &p.manifest.transport_certificates {
+            ensure!(
+                p.identity.certificate_authority_pem == transport.issuer_pem,
+                "Route issuer differs from exact certificate successor consent"
+            );
+        }
         crate::trust_bootstrap::hex32(&p.domain)?;
         if let Some(address) = p.address {
             ensure!(

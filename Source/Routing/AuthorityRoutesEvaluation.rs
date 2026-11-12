@@ -161,6 +161,17 @@ impl Context<'_> {
             ensure!(!live, "route deployment is withdrawn");
         }
         if live {
+            r.manifest.current_transport(self.at)?;
+            p.manifest.current_transport(self.at)?;
+            for end in [
+                r.manifest.transport_expiry()?,
+                p.manifest.transport_expiry()?,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                self.expires = self.expires.min(end);
+            }
             let consent = wire::decode(self.governance.record_bytes(105, r.deployment)?)?;
             let f = consent.array(19)?;
             let validity = crate::trust_validity::Validity::parse(&f[16])?;
@@ -396,8 +407,13 @@ pub fn evaluate(
                 } else {
                     None
                 };
-                let (_, relay) = c.service(old.relay.id, true)?;
-                let (_, destination) = c.service(old.destination.id, true)?;
+                let (relay_record, relay) = c.service(old.relay.id, true)?;
+                let (destination_record, destination) = c.service(old.destination.id, true)?;
+                ensure!(
+                    relay_record.reference == old.relay
+                        && destination_record.reference == old.destination,
+                    "Live handover cannot change its pinned service certificates"
+                );
                 ensure!(
                     old.permits_next(
                         usage.as_ref(),
@@ -584,6 +600,7 @@ pub fn evaluate(
                         "relay possession key is an application identity"
                     );
                 }
+                let mut certificate_refresh = false;
                 let baseline = if let Some(previous) = state.records.get(&(166, *id)) {
                     let previous = previous.clone();
                     c.select(166, *id)?;
@@ -591,14 +608,24 @@ pub fn evaluate(
                     if replay {
                         old.baseline
                     } else {
+                        certificate_refresh = (old.relay != rr.reference
+                            || old.destination != dr.reference)
+                            && (old.relay == rr.reference
+                                || rr.reference.generation > old.relay.generation
+                                    && r.profile.manifest.transport_certificates.is_some())
+                            && (old.destination == dr.reference
+                                || dr.reference.generation > old.destination.generation
+                                    && d.profile.manifest.transport_certificates.is_some());
                         ensure!(
                             (at >= old.expires
-                                || (old.expires - at <= 60_000
-                                    && *expires > old.expires
+                                || ((old.expires - at <= 60_000 || certificate_refresh)
+                                    && (*expires > old.expires
+                                        || certificate_refresh && *expires == old.expires)
                                     && *connections == old.connections
                                     && *bytes == old.bytes
-                                    && rr.reference == old.relay
-                                    && dr.reference == old.destination
+                                    && (rr.reference == old.relay
+                                        && dr.reference == old.destination
+                                        || certificate_refresh)
                                     && *grant == old.grant))
                                 && old.sponsor == intent.requester
                                 && old.possession == *possession
@@ -639,7 +666,11 @@ pub fn evaluate(
                 };
                 Voucher::parse(&voucher.value())?;
                 if !replay && let Some(previous) = state.records.get(&(166, *id)) {
-                    let previous = Voucher::parse(&previous.payload)?;
+                    let mut previous = Voucher::parse(&previous.payload)?;
+                    if certificate_refresh {
+                        previous.relay = voucher.relay.clone();
+                        previous.destination = voucher.destination.clone();
+                    }
                     ensure!(
                         at >= previous.expires || voucher.continues(&previous),
                         "early route replacement changes live authority or usage baseline"
@@ -1131,15 +1162,37 @@ pub(crate) fn scoped_vouchers(
                 .get(&(166, id))
                 .map(|r| Voucher::parse(&r.payload))
                 .transpose()?;
-            let same = old.as_ref().is_some_and(|v| {
+            let same_budget = old.as_ref().is_some_and(|v| {
                 v.sponsor == role.member
                     && v.possession == role.relay
                     && v.grant == grant
-                    && v.relay == rr.reference
-                    && v.destination == dr.reference
+                    && v.relay.id == rr.reference.id
+                    && v.destination.id == dr.reference.id
                     && v.connections == template.connections
                     && v.bytes == template.bytes
             });
+            let same = same_budget
+                && old
+                    .as_ref()
+                    .is_some_and(|v| v.relay == rr.reference && v.destination == dr.reference);
+            let usage = next
+                .records
+                .get(&(167, id))
+                .map(|r| Usage::parse(&r.payload))
+                .transpose()?;
+            if same_budget
+                && old.as_ref().is_some_and(|v| v.expires > at)
+                && !old.as_ref().unwrap().permits_next(
+                    usage.as_ref(),
+                    relay.profile.limits.bytes.min(target.profile.limits.bytes),
+                )
+            {
+                ensure!(
+                    same,
+                    "Exhausted live route must expire before certificate and quota refresh"
+                );
+                continue;
+            }
             if same
                 && old
                     .as_ref()
@@ -1147,12 +1200,7 @@ pub(crate) fn scoped_vouchers(
             {
                 continue;
             }
-            let usage = next
-                .records
-                .get(&(167, id))
-                .map(|r| Usage::parse(&r.payload))
-                .transpose()?;
-            let baseline = if same && old.as_ref().is_some_and(|v| v.expires > at) {
+            let baseline = if same_budget && old.as_ref().is_some_and(|v| v.expires > at) {
                 old.as_ref().and_then(|v| v.baseline).unwrap_or((0, 0))
             } else {
                 usage.map_or((0, 0), |u| (u.connections, u.bytes))

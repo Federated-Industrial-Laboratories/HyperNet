@@ -300,6 +300,7 @@ pub fn setup(args: Setup) -> Result<serde_json::Value> {
     }
     let manifest = Manifest {
         generation: 1,
+        transport_certificates: None,
         previous_profile: None,
         previous_consent: None,
         version: 1,

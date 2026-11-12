@@ -113,6 +113,7 @@ pub(crate) fn fixture() -> Manifest {
                     read_only: false,
                     storage_admission_bytes: 1073741824,
                 }],
+                transport_certificates: None,
                 authority_config: Some(AuthorityConfig {
                     listen_address: Ipv4Addr::UNSPECIFIED.into(),
                     listen_port: 24443,
