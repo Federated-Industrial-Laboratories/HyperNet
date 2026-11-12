@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Every Page effect rechecks exact publication provenance, capability scope and host consent.
 use super::*;
+use crate::trust_validity::End;
 use crate::{
     authority_deployment_records::Index,
     authority_governance::{Governance, Requirement},
@@ -478,6 +479,22 @@ pub fn evaluate(
                 )?;
                 c.capability(grant, intent.requester, &[5], (3, profile.service), None, 0)?;
                 c.profile(profile, true)?;
+                if profile.retention_ms == End::UntilWithdrawn {
+                    c.persistent_capability(
+                        grant,
+                        intent.requester,
+                        &[26],
+                        (5, profile.manifest.deployment),
+                        None,
+                    )?;
+                    c.persistent_capability(
+                        grant,
+                        intent.requester,
+                        &[5],
+                        (3, profile.service),
+                        None,
+                    )?;
+                }
                 let kind = if profile.role == 1 { 147 } else { 143 };
                 let host = Host {
                     profile: profile.as_ref().clone(),
@@ -624,7 +641,7 @@ pub fn evaluate(
                             sum.checked_add(asset.bytes)
                                 .context("Page admission bytes overflow")
                         })?;
-                c.capability_usage(
+                let lifetime = c.capability_usage(
                     &author.grant,
                     intent.requester,
                     &[2],
@@ -632,7 +649,11 @@ pub fn evaluate(
                     Some(&author.namespace),
                     [bytes, 1 + revision.assets.len() as u64, 1, 1],
                 )?;
-                c.expires = c.expires.min(author.expires_ms);
+                ensure!(
+                    author.expires_ms != End::UntilWithdrawn || lifetime.1 == End::UntilWithdrawn,
+                    "Persistent author consent exceeds current capability or membership"
+                );
+                c.expires = author.expires_ms.bound(c.expires);
                 let old = state.records.get(&(140, author.intent.resource));
                 let mut ledger = if let Some(old) = old {
                     let old = c.select(140, old.reference.id)?;
@@ -684,7 +705,7 @@ pub fn evaluate(
                         )?;
                         let mut hosts = vec![];
                         let mut host_capacities = vec![];
-                        let mut expires = author.expires_ms;
+                        let mut expires = author.expires_ms.finite()?;
                         for host in &manifest.hosts {
                             let host = key(&V::Bytes(hex::decode(host)?))?;
                             let record = c.select(143, host)?;
@@ -695,7 +716,8 @@ pub fn evaluate(
                             );
                             host_capacities.push((host, h.profile.state_bytes));
                             expires = h.profile.manifest.validity.1.bound(expires);
-                            expires = expires.min(at.saturating_add(h.profile.retention_ms));
+                            expires =
+                                expires.min(at.saturating_add(h.profile.retention_ms.finite()?));
                             hosts.push(record.reference);
                         }
                         sorted(&mut hosts)?;
@@ -919,6 +941,19 @@ pub fn evaluate(
                         && review.source == revision.author.source,
                     "Page reviewer statement differs from exact author provenance"
                 );
+                if review.approve && revision.author.expires_ms == End::UntilWithdrawn {
+                    ensure!(
+                        review.application.is_none(),
+                        "Persistent Page review requires ordinary reviewer consent"
+                    );
+                    c.persistent_capability(
+                        &review.grant,
+                        intent.requester,
+                        &[3],
+                        (2, revision.author.intent.resource),
+                        Some(&ledger.namespace),
+                    )?;
+                }
                 let policy = c.principal(
                     intent.requester,
                     &review.grant,
@@ -1142,4 +1177,41 @@ pub(crate) fn evaluate_read(
         code: 0,
         expires_ms: c.expires,
     })
+}
+
+/// Reuse normal live Page-host consent when binding a restricted reader route.
+pub(crate) fn admission_host(
+    state: &State,
+    records: &[Vec<u8>],
+    reserved: &Reservations,
+    host: Key,
+    at: u64,
+) -> Result<(Vec<VersionRef>, Vec<Vec<u8>>, u64)> {
+    let mut c = Evaluation {
+        state,
+        governance: Governance::parse(state.network, state.incarnation, records)?,
+        index: Index::parse(records, reserved, state.network, state.incarnation)?,
+        at,
+        dependencies: vec![],
+        selected: BTreeMap::new(),
+        expires: u64::MAX,
+    };
+    let record = c.select(147, host)?;
+    let configured = c.host(&record.reference, None, true)?;
+    ensure!(
+        configured.profile.role == 1
+            && configured.profile.service == host
+            && configured
+                .profile
+                .content
+                .as_ref()
+                .is_some_and(|p| !p.opaque),
+        "Admission reader requires current host-readable Page storage consent"
+    );
+    sorted(&mut c.dependencies)?;
+    Ok((
+        c.dependencies,
+        c.selected.into_values().map(|r| r.bytes).collect(),
+        c.expires,
+    ))
 }

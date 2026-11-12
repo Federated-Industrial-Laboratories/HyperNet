@@ -136,3 +136,10 @@ Mail authority, including `SendMail` (15), rather than permission inferred from
 Page approval. The current Page evaluator supports host-readable publication.
 Sealed publication and a reader relay route have separate contracts; Page
 metadata approval does not establish either guarantee.
+
+## Optional persistent static content
+
+[Persistent access and hosting](PersistentAccess.md#persistent-static-pages)
+describes explicit until-withdrawn authoring, retention and placement. This mode
+requires the complete persistent authority chain and preserves finite review and
+execution proofs. The original timestamp-based workflow remains available.

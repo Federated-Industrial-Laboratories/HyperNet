@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Exact live Page authorization is reconstructed from committed governance and domain state.
 use super::*;
+use crate::trust_validity::{End, Validity};
 pub(crate) struct Evaluation<'a> {
     pub(crate) state: &'a State,
     pub(crate) governance: Governance,
@@ -52,6 +53,7 @@ impl Evaluation<'_> {
         bytes: u64,
     ) -> Result<()> {
         self.capability_usage(grant, subject, actions, scope, namespace, [bytes, 1, 1, 1])
+            .map(|_| ())
     }
     pub(crate) fn capability_usage(
         &mut self,
@@ -61,7 +63,7 @@ impl Evaluation<'_> {
         scope: (u64, Digest),
         namespace: Option<&str>,
         usage: [u64; 4],
-    ) -> Result<()> {
+    ) -> Result<Validity> {
         ensure!(
             grant.kind == 102 && self.governance.versions().contains(grant),
             "Page capability is stale"
@@ -90,6 +92,21 @@ impl Evaluation<'_> {
         )?;
         self.dependencies.extend(cap.dependencies);
         self.expires = self.expires.min(cap.expires_ms);
+        Ok(cap.validity)
+    }
+    pub(crate) fn persistent_capability(
+        &mut self,
+        grant: &VersionRef,
+        subject: Key,
+        actions: &[u64],
+        scope: (u64, Digest),
+        namespace: Option<&str>,
+    ) -> Result<()> {
+        let validity = self.capability_usage(grant, subject, actions, scope, namespace, [0; 4])?;
+        ensure!(
+            validity.1 == End::UntilWithdrawn,
+            "Persistent Page consent requires persistent membership and every capability ancestor"
+        );
         Ok(())
     }
     pub(crate) fn application(
@@ -296,6 +313,9 @@ impl Evaluation<'_> {
             ensure!(current(self.at, validity), "Page deployment expired");
             self.expires = validity.1.bound(self.expires);
             self.capability(&r.grant, r.registrar, &[13], (5, m.deployment), None, 0)?;
+            if p.retention_ms == End::UntilWithdrawn {
+                self.persistent_capability(&r.grant, r.registrar, &[13], (5, m.deployment), None)?;
+            }
         }
         Ok(())
     }
@@ -335,6 +355,22 @@ impl Evaluation<'_> {
                 0,
             )?;
         }
+        if live && host.profile.retention_ms == End::UntilWithdrawn {
+            self.persistent_capability(
+                &host.grant,
+                host.manager,
+                &[26],
+                (5, host.profile.manifest.deployment),
+                None,
+            )?;
+            self.persistent_capability(
+                &host.grant,
+                host.manager,
+                &[5],
+                (3, host.profile.service),
+                None,
+            )?;
+        }
         Ok(host)
     }
     pub(crate) fn ledger(&mut self, page: [u8; 16]) -> Result<(Record, Ledger)> {
@@ -358,7 +394,16 @@ impl Evaluation<'_> {
                 a.expires_ms > self.at.saturating_add(1250),
                 "Page author provenance expired"
             );
-            self.expires = self.expires.min(a.expires_ms);
+            self.expires = a.expires_ms.bound(self.expires);
+            if a.expires_ms == End::UntilWithdrawn {
+                self.persistent_capability(
+                    &a.grant,
+                    a.intent.requester,
+                    &[2],
+                    (2, a.intent.resource),
+                    Some(&a.namespace),
+                )?;
+            }
             let policy = self.principal(
                 a.intent.requester,
                 &a.grant,
@@ -386,6 +431,19 @@ impl Evaluation<'_> {
         let revision = self.revision(&review.statement.revision, true)?;
         let s = &review.statement;
         ensure!(s.approve, "Page publication is not approved");
+        if revision.author.expires_ms == End::UntilWithdrawn {
+            ensure!(
+                s.application.is_none(),
+                "Persistent Page review requires ordinary reviewer consent"
+            );
+            self.persistent_capability(
+                &s.grant,
+                s.intent.requester,
+                &[3],
+                (2, revision.author.intent.resource),
+                Some(&revision.author.namespace),
+            )?;
+        }
         let policy = self.principal(
             s.intent.requester,
             &s.grant,

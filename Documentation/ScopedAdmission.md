@@ -17,7 +17,7 @@ consent. It certifies an opaque application binding alongside the role identitie
 the application independently enforces its own consent and class policy.
 
 Policies and memberships support finite validity or `UntilWithdrawn`, subject to
-the current parent grant and its ancestors. Candidate possession challenges last
+the current parent grant, its ancestors and owner membership. Candidate possession challenges last
 at most 60 seconds. Current authority disclosures and execution proofs retain
 their ordinary finite deadlines. Route vouchers last between 120 seconds and one
 day, additionally bounded by current service and host consent. Permanent
@@ -75,3 +75,10 @@ binding before handing them to an application admission extension.
 A network retains at most four immutable registrar policies. Withdrawing a policy
 does not erase its purpose or claim fences. Participant slots within each policy
 remain reusable; changing passwords or invitations does not create a new policy.
+
+A reader template can explicitly bind the Page storage public key independently
+of its relay destination key. The optional role-0 Page extension is `[1, KEY]`
+after the original seven template fields. Unknown extensions and Page targets on
+chat templates are refused. The current disclosure includes the exact host-readable
+Page host and its registered deployment, manager and registrar capability closure.
+Clients reconstruct that consent before installing the subject-bound reader route.

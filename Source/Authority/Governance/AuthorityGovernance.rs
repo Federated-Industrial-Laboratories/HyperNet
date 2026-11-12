@@ -448,6 +448,7 @@ pub struct Requirement<'a> {
 }
 #[derive(Debug)]
 pub struct CapabilityDecision {
+    pub validity: Validity,
     pub dependencies: Vec<VersionRef>,
     pub not_before_ms: u64,
     pub expires_ms: u64,
@@ -809,7 +810,7 @@ impl Governance {
             .map(|(id, _)| id)
             .collect::<Vec<_>>();
         let mut effective = limits(&policy.fields[13])?;
-        let mut expiry = u64::MAX;
+        let mut lifetime = crate::trust_validity::End::UntilWithdrawn;
         let mut start = 0;
         let mut cursor = grant;
         let mut visited = BTreeSet::new();
@@ -909,7 +910,7 @@ impl Governance {
                 effective[i] = effective[i].min(gl[i]).min(tl[i]);
             }
             start = start.max(span.0).max(admission.0);
-            expiry = span.1.bound(admission.1.bound(expiry));
+            lifetime = lifetime.min(span.1).min(admission.1);
             dependencies.insert(current.reference.index(), current.reference.clone());
             dependencies.insert(tier.reference.index(), tier.reference.clone());
             if g[13] == V::Null {
@@ -927,7 +928,8 @@ impl Governance {
                 return Ok(CapabilityDecision {
                     dependencies,
                     not_before_ms: start,
-                    expires_ms: expiry,
+                    expires_ms: lifetime.bound(u64::MAX),
+                    validity: Validity(start, lifetime),
                 });
             }
             ensure!(depth < 8, "grant chain exceeds its depth bound");

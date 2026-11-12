@@ -50,7 +50,7 @@ fn publish(f: &mut Fixture, page: [u8; 16], expires: u64) -> VersionRef {
             hosts: vec![host],
             copies: 1,
             failure_domains: 1,
-            expires_ms: expires,
+            expires_ms: expires.into(),
         }),
         vec![],
         5000,

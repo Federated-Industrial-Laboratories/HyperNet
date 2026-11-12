@@ -238,7 +238,7 @@ pub(super) fn import(
             continue;
         }
         let mut hosts = vec![];
-        let mut expires = t.expires_ms.min(value.metadata.author.expires_ms);
+        let mut expires = value.metadata.author.expires_ms.bound(t.expires_ms);
         for host in &t.destination_hosts {
             let r = c.select(143, *host)?;
             let h = c.host(&r.reference, Some(&t.destination_namespace), true)?;
@@ -247,7 +247,7 @@ pub(super) fn import(
                 "foreign asset exceeds destination object consent"
             );
             expires = expires.min(
-                c.at.checked_add(h.profile.retention_ms)
+                c.at.checked_add(h.profile.retention_ms.finite()?)
                     .context("foreign media expiry overflow")?,
             );
             hosts.push(r.reference);

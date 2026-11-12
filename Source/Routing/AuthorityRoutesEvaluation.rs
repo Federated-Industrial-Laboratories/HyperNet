@@ -1054,6 +1054,18 @@ pub(crate) fn scoped_vouchers(
                     && target.profile.relay.is_none_or(|r| r == policy.relay),
                 "scoped route destination or relay changed"
             );
+            if purpose == 5
+                && let Some(host) = template.page
+            {
+                ensure!(
+                    target.profile.protocol == 2,
+                    "Admission Page destination protocol differs"
+                );
+                let (_, _, expiry) = crate::authority_domains::page::admission_host(
+                    &next, records, reserved, host, at,
+                )?;
+                c.expires = c.expires.min(expiry);
+            }
             let expires = at.saturating_add(template.voucher_ms).min(c.expires);
             ensure!(
                 expires > at.saturating_add(60_000),
@@ -1136,6 +1148,16 @@ pub(crate) fn admission_routes(
         .context("scoped route policy absent")?
         .clone();
     for role in &slot.roles {
+        if let Some(host) = policy.template(role.role)?.page {
+            let (dependencies, selected, expiry) =
+                crate::authority_domains::page::admission_host(state, records, reserved, host, at)?;
+            c.dependencies.extend(dependencies);
+            c.expires = c.expires.min(expiry);
+            for bytes in selected {
+                let record = Record::parse(&bytes, state.network, state.incarnation)?;
+                c.selected.insert(record.reference.index(), record);
+            }
+        }
         for purpose in [4, 5] {
             let id =
                 crate::authority_admission::identifier(slot.policy, slot.slot, role.role, purpose)?;

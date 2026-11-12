@@ -179,3 +179,29 @@ chosen public joining endpoint need external publication.
 Management sockets support long private storage paths through retained directory
 file descriptors. Directory ownership, non-writable ancestry, socket identity
 and peer-credential validation still apply.
+
+## Persistent static Pages
+
+Require `PersistentPages/1` on every authority, host and client. A static,
+host-readable Page can use `pages author --until-withdrawn`, a Page host profile
+with `--retention-until-withdrawn`, and `pages content place --until-withdrawn`.
+These flags replace the respective finite `--expires-ms` or `--retention-ms`
+option. Persistent author, reviewer, manager and registrar permissions require
+persistent current membership and every grant ancestor. The admitted deployment
+and exact signed hosting consent must also be persistent.
+
+The versioned end is retained in signed author provenance, host retention,
+placement, copy acknowledgement and durable storage metadata. Numeric host
+retention still means a duration in milliseconds; `{"untilWithdrawn":1}` means
+explicit retention until withdrawal. A persistent record does not use a numeric
+expiry ceiling. Finite formats and bounds retain their meaning.
+
+This mode supports ordinary author/reviewer identities and static source without
+media assets or forms. Application authoring, media retention, federation treaties
+and sealed publication keep their existing finite contracts. Upload authorisation,
+review statements, requester challenges and execution proofs remain finite.
+An approved Page may be read after the original review statement's acceptance
+window, but every read rechecks current publication, permissions and hosting.
+Content withdrawal, grant revocation, member removal and local host withdrawal
+still deny access. Reconciliation is required before a retained copy serves after
+restart, even when its explicit storage lifetime is permanent.

@@ -7,6 +7,7 @@ pub struct Template {
     pub role: u64,
     pub destination: Digest,
     pub application: Option<Digest>,
+    pub page: Option<Key>,
     pub limits: Limits,
     pub connections: u64,
     pub bytes: u64,
@@ -14,7 +15,11 @@ pub struct Template {
 }
 impl Template {
     pub fn parse(v: &V) -> Result<Self> {
-        let f = v.array(7)?;
+        let f = v.list(8)?;
+        ensure!(
+            f.len() == 7 || f.len() == 8,
+            "admission template version differs"
+        );
         let t = Self {
             role: f[0].uint()?,
             destination: id(&f[1])?,
@@ -22,6 +27,16 @@ impl Template {
                 None
             } else {
                 Some(id(&f[2])?)
+            },
+            page: if f.len() == 8 {
+                let extension = f[7].array(2)?;
+                ensure!(
+                    extension[0].uint()? == 1,
+                    "admission Page target version differs"
+                );
+                Some(key(&extension[1])?)
+            } else {
+                None
             },
             limits: limits(&f[3])?,
             connections: f[4].uint()?,
@@ -31,6 +46,7 @@ impl Template {
         ensure!(
             t.role < 2
                 && (t.role == 1) == t.application.is_some()
+                && (t.page.is_none() || t.role == 0)
                 && (1..=4096).contains(&t.connections)
                 && t.bytes > 0
                 && (120_000..=MAX_VOUCHER_MS).contains(&t.voucher_ms),
@@ -39,7 +55,7 @@ impl Template {
         Ok(t)
     }
     pub fn value(&self) -> V {
-        a(vec![
+        let mut fields = vec![
             V::Uint(self.role),
             b(&self.destination),
             self.application.map_or(V::Null, |x| b(&x)),
@@ -47,7 +63,11 @@ impl Template {
             V::Uint(self.connections),
             V::Uint(self.bytes),
             V::Uint(self.voucher_ms),
-        ])
+        ];
+        if let Some(page) = self.page {
+            fields.push(a(vec![V::Uint(1), b(&page)]));
+        }
+        a(fields)
     }
 }
 #[derive(Clone, Debug)]
@@ -173,6 +193,10 @@ impl Policy {
                 expected: &[],
             },
         )?;
+        ensure!(
+            self.validity.0 >= d.validity.0 && self.validity.1 <= d.validity.1,
+            "admission policy exceeds current parent membership or capability lifetime"
+        );
         let parent_limits = limits(&f[15])?;
         for t in &self.templates {
             ensure!(

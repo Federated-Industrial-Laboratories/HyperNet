@@ -121,7 +121,7 @@ impl Disclosure {
         for bytes in &domains {
             let r = authority_domains::Record::parse(bytes, n, i)?;
             ensure!(
-                matches!(r.reference.kind, 165 | 166),
+                matches!(r.reference.kind, 147 | 165 | 166),
                 "admission disclosure includes unrelated domain data"
             );
             domain_refs.push(r.reference);
@@ -139,6 +139,7 @@ impl Disclosure {
             .filter(|s| s.active() && !domains.is_empty())
         {
             verify_routes(&p, slot, &domains, n, i, at)?;
+            verify_page_targets(&p, slot, &domains, &records, n, i, at)?;
         }
         Ok(Self {
             policy: p,
@@ -370,4 +371,39 @@ pub fn disclose(
         versions,
     };
     Disclosure::parse(&out.value(), n, i, requester, policy, claim, at)
+}
+
+fn verify_page_targets(
+    p: &Policy,
+    slot: &Slot,
+    domains: &[Vec<u8>],
+    records: &[Vec<u8>],
+    n: Digest,
+    i: Digest,
+    at: u64,
+) -> Result<()> {
+    let mut state = authority_domains::State::empty(n, i);
+    for bytes in domains {
+        state.put(authority_domains::Record::parse(bytes, n, i)?)?;
+    }
+    for role in &slot.roles {
+        let template = p.template(role.role)?;
+        if let Some(host) = template.page {
+            let target = state.record(165, template.destination)?;
+            let target = authority_domains::routes::Service::parse(&target.payload, n, i)?;
+            ensure!(
+                target.profile.protocol == 2,
+                "Admission Page destination protocol differs"
+            );
+            // These are already quorum-certified registrations, not new key admissions.
+            authority_domains::page::admission_host(
+                &state,
+                records,
+                &crate::authority_membership::Reservations(vec![]),
+                host,
+                at,
+            )?;
+        }
+    }
+    Ok(())
 }

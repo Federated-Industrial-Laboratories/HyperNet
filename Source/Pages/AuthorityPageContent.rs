@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Content placement binds immutable bytes to explicit hosts before publication can become serving.
 use super::*;
+use crate::trust_validity::End;
 
 #[path = "AuthorityPageContentAuthorise.rs"]
 mod authorise;
@@ -25,7 +26,7 @@ pub struct Placement {
     pub hosts: Vec<VersionRef>,
     pub copies: u64,
     pub failure_domains: u64,
-    pub expires_ms: u64,
+    pub expires_ms: End,
 }
 impl Placement {
     pub fn parse(v: &V) -> Result<Self> {
@@ -45,7 +46,7 @@ impl Placement {
                 .collect::<Result<_>>()?,
             copies: f[8].uint()?,
             failure_domains: f[9].uint()?,
-            expires_ms: f[10].uint()?,
+            expires_ms: End::parse(&f[10])?,
         };
         validate_versions(&p.hosts, 16)?;
         ensure!(
@@ -56,7 +57,8 @@ impl Placement {
                 && p.failure_domains > 0
                 && p.failure_domains <= p.copies
                 && p.expires_ms > 0
-                && p.opaque == (p.revision.kind == 113),
+                && p.opaque == (p.revision.kind == 113)
+                && (!p.opaque || p.expires_ms != End::UntilWithdrawn),
             "content placement scope differs"
         );
         Ok(p)
@@ -79,7 +81,7 @@ impl Placement {
             a(self.hosts.iter().map(reference).collect()),
             V::Uint(self.copies),
             V::Uint(self.failure_domains),
-            V::Uint(self.expires_ms),
+            self.expires_ms.value(),
         ])
     }
 }
@@ -91,7 +93,7 @@ pub struct Copy {
     pub bytes: u64,
     pub request: Digest,
     pub recorded_ms: u64,
-    pub expires_ms: u64,
+    pub expires_ms: End,
     pub envelope: Vec<u8>,
 }
 impl Copy {
@@ -115,7 +117,7 @@ impl Copy {
             bytes: f[8].uint()?,
             request: id(&f[9])?,
             recorded_ms: f[10].uint()?,
-            expires_ms: f[11].uint()?,
+            expires_ms: End::parse(&f[11])?,
             envelope: bytes.to_vec(),
         };
         ensure!(
@@ -141,7 +143,7 @@ impl Copy {
             V::Uint(self.bytes),
             b(&self.request),
             V::Uint(self.recorded_ms),
-            V::Uint(self.expires_ms),
+            self.expires_ms.value(),
         ]))
     }
 }
@@ -232,7 +234,7 @@ pub enum Command {
         hosts: Vec<VersionRef>,
         copies: u64,
         failure_domains: u64,
-        expires_ms: u64,
+        expires_ms: End,
     },
     Get {
         placement: VersionRef,
@@ -305,7 +307,7 @@ impl Command {
                     hosts,
                     copies,
                     failure_domains,
-                    expires_ms: f[5].uint()?,
+                    expires_ms: End::parse(&f[5])?,
                 }
             }
             "PageContentGet" => Self::Get {
@@ -358,7 +360,7 @@ impl Command {
                 a(hosts.iter().map(reference).collect()),
                 V::Uint(*copies),
                 V::Uint(*failure_domains),
-                V::Uint(*expires_ms),
+                expires_ms.value(),
             ],
             Self::Get { placement } | Self::Withdraw { placement } => vec![reference(placement)],
             Self::Receipt { receipt } => vec![b(&receipt.envelope)],
@@ -433,7 +435,7 @@ pub(crate) fn live(c: &mut Evaluation<'_>, reference: &VersionRef) -> Result<Pla
                 && p.grant == state.author_grant,
             "opaque placement differs from sealed publication"
         );
-        c.expires = c.expires.min(p.expires_ms);
+        c.expires = p.expires_ms.bound(c.expires);
         return Ok(p);
     }
     let revision = c.revision(&p.revision, true)?;
@@ -462,7 +464,7 @@ pub(crate) fn live(c: &mut Evaluation<'_>, reference: &VersionRef) -> Result<Pla
         Some(revision.author.raw_page),
         p.bytes,
     )?;
-    c.expires = c.expires.min(p.expires_ms);
+    c.expires = p.expires_ms.bound(c.expires);
     Ok(p)
 }
 fn owner_scope(
@@ -631,12 +633,9 @@ pub(crate) fn evaluate(
                     "content exceeds host object bound"
                 );
                 domains.insert(policy.failure_domain);
-                expiry = h
-                    .profile
-                    .manifest
-                    .validity
-                    .1
-                    .bound(expiry.min(c.at.saturating_add(h.profile.retention_ms)));
+                expiry = expiry
+                    .min(h.profile.manifest.validity.1)
+                    .min(h.profile.retention_end(c.at)?);
                 let retained = next
                     .records
                     .values()

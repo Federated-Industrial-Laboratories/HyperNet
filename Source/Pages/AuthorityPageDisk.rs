@@ -70,7 +70,12 @@ impl<'a> Profile<'a> {
             Self::Bridge(_) => "AuthorityBridgeStorage",
         }
     }
-    fn expiry(self, object: &Object, state: &domains::State, used: u64) -> Result<u64> {
+    fn expiry(
+        self,
+        object: &Object,
+        state: &domains::State,
+        used: u64,
+    ) -> Result<crate::trust_validity::End> {
         ensure!(
             object.reference().class() == Class::PageBundle,
             "bundle cache object class differs"
@@ -84,10 +89,11 @@ impl<'a> Profile<'a> {
                         && p.namespaces.contains(&bundle.author.namespace),
                     "Page bundle exceeds host scope"
                 );
-                Ok(p.manifest.validity.1.bound(bundle.author.expires_ms).min(
-                    used.checked_add(p.retention_ms)
-                        .context("Page retention overflow")?,
-                ))
+                Ok(p.manifest
+                    .validity
+                    .1
+                    .min(bundle.author.expires_ms)
+                    .min(p.retention_end(used)?))
             }
             Self::Bridge(p) => {
                 let value = wire::decode(object.bytes())?;
@@ -113,13 +119,15 @@ impl<'a> Profile<'a> {
                                 .manifest
                                 .validity
                                 .1
-                                .bound(bundle.author.expires_ms)
-                                .min(agreement.treaty.expires_ms);
+                                .min(bundle.author.expires_ms)
+                                .bound(agreement.treaty.expires_ms);
                             expiry = Some(expiry.map_or(limit, |old: u64| old.max(limit)));
                         }
                     }
                 }
-                expiry.context("bridge cache bundle is outside its exact accepted treaty")
+                expiry
+                    .map(crate::trust_validity::End::At)
+                    .context("bridge cache bundle is outside its exact accepted treaty")
             }
         }
     }
@@ -127,7 +135,7 @@ impl<'a> Profile<'a> {
 #[derive(Clone)]
 struct Entry {
     object: Object,
-    expires: u64,
+    expires: crate::trust_validity::End,
     used: u64,
 }
 impl Entry {
@@ -135,7 +143,7 @@ impl Entry {
         a(vec![
             self.object.reference().value(),
             b(self.object.bytes()),
-            V::Uint(self.expires),
+            self.expires.value(),
             V::Uint(self.used),
         ])
     }
@@ -146,7 +154,7 @@ impl Entry {
             object.reference().class() == Class::PageBundle,
             "Page cache cannot retain another object class"
         );
-        let expires = f[2].uint()?;
+        let expires = crate::trust_validity::End::parse(&f[2])?;
         let used = f[3].uint()?;
         ensure!(
             expires > 0 && used <= time && expires <= p.expiry(&object, domain, used)?,

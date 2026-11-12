@@ -420,6 +420,7 @@ impl Disk {
                     && (*effect != MediaEffect::Upload || now < asset.upload_expires_ms),
                 "media upload payload differs from signed range or digest"
             );
+            let retention = profile.retention_ms.finite()?;
             state
                 .records
                 .entry(reference_asset.id)
@@ -427,9 +428,7 @@ impl Disk {
                     asset: reference_asset.clone(),
                     metadata: asset.clone(),
                     host: host.clone(),
-                    expires: asset
-                        .expires_ms
-                        .min(now.saturating_add(profile.retention_ms)),
+                    expires: asset.expires_ms.min(now.saturating_add(retention)),
                     payload: vec![],
                     receipt: None,
                 });

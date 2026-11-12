@@ -14,7 +14,7 @@ impl HostProfile {
             a(self.namespaces.iter().map(|n| V::Text(n.clone())).collect()),
             V::Uint(self.state_bytes),
             V::Uint(self.maximum_asset_bytes),
-            V::Uint(self.retention_ms),
+            self.retention_ms.value(),
             self.content.as_ref().map_or(V::Null, ContentPolicy::value),
         ]))
     }

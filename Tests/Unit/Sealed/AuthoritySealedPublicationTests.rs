@@ -71,7 +71,7 @@ impl Fixture {
             namespaces: vec!["Books".into()],
             state_bytes: 8 * 1024 * 1024,
             maximum_asset_bytes: 1024 * 1024,
-            retention_ms: 15000,
+            retention_ms: 15000.into(),
             content: Some(page::ContentPolicy {
                 search: false,
                 metadata_bytes: 65536,
@@ -393,7 +393,7 @@ impl Fixture {
             bytes: p.bytes,
             request: [81; 32],
             recorded_ms: 5000,
-            expires_ms: 17000,
+            expires_ms: 17000.into(),
             envelope: vec![],
         };
         receipt.envelope = wire::sign_envelope(
