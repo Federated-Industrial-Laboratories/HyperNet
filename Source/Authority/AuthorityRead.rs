@@ -37,17 +37,26 @@ fn record(v: &V, kind: u64, n: usize) -> Result<&[V]> {
 )]
 pub enum Query {
     PolicyContext,
+    Admission {
+        policy: Digest,
+        claim: Option<Digest>,
+    },
     Domain(Operation),
 }
 impl Query {
     pub fn value(&self) -> Result<V> {
         Ok(match self {
             Self::PolicyContext => a(vec![V::Uint(0)]),
+            Self::Admission { policy, claim } => a(vec![
+                V::Uint(2),
+                b(policy),
+                claim.map_or(V::Null, |c| b(&c)),
+            ]),
             Self::Domain(op) => a(vec![V::Uint(1), b(&op.parameters()?)]),
         })
     }
     fn parse(v: &V, scope: &Scope, minimum: u64) -> Result<Self> {
-        let f = v.list(2)?;
+        let f = v.list(3)?;
         match f.first().context("empty fresh query")?.uint()? {
             0 => {
                 v.array(1)?;
@@ -79,18 +88,30 @@ impl Query {
                 );
                 Ok(Self::Domain(op))
             }
+            2 => {
+                let f = v.array(3)?;
+                Ok(Self::Admission {
+                    policy: domains::id(&f[1])?,
+                    claim: if f[2] == V::Null {
+                        None
+                    } else {
+                        Some(domains::id(&f[2])?)
+                    },
+                })
+            }
             _ => anyhow::bail!("unsupported fresh query"),
         }
     }
     pub fn action(&self) -> &'static str {
         match self {
             Self::PolicyContext => "AuthorityPolicyContext",
+            Self::Admission { .. } => "AuthorityAdmissionContext",
             Self::Domain(_) => "AuthorityDomain",
         }
     }
     pub fn expected(&self) -> &[VersionRef] {
         match self {
-            Self::PolicyContext => &[],
+            Self::PolicyContext | Self::Admission { .. } => &[],
             Self::Domain(op) => &op.snapshot.references,
         }
     }
@@ -506,6 +527,7 @@ pub(crate) fn result_versions(result: &OperationResult) -> Result<Vec<VersionRef
     proof::validate_versions(&refs, 64)?;
     ensure!(
         result.action == "AuthorityDomain"
+            || result.action == "AuthorityAdmissionContext"
             || result.action == "AuthorityPolicyContext"
                 && refs.len() == 2
                 && refs[0].kind == 100

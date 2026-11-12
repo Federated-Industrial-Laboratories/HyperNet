@@ -1088,3 +1088,71 @@ fn epoch_adoption_preserves_pending_request_and_recovers_witness_interruption() 
     stored.as_object_mut().unwrap().remove("sealed");
     assert!(serde_json::from_value::<Stored>(stored).is_err());
 }
+
+#[test]
+fn scoped_rejoin_keeps_uncertain_effect_and_rejects_old_assignment() {
+    let (directory, sample, mut session, mut store) = setup();
+    let (pending, operation) = prepare(&mut store, sample);
+    let result = certified(
+        &store,
+        &mut session,
+        sample,
+        pending.signed(),
+        &operation,
+        None,
+    );
+    let permit = store.accept(result, &mut session, sample, 0).unwrap();
+    assert!(
+        permit
+            .perform_once(
+                &mut store,
+                &mut session,
+                sample,
+                1,
+                |_| Ok(()),
+                |_, _| -> Result<()> { anyhow::bail!("interrupted local effect") }
+            )
+            .is_err()
+    );
+    let old = store.stream_metadata().unwrap().unwrap();
+    let mut fields = wire::decode(old.canonical())
+        .unwrap()
+        .array(10)
+        .unwrap()
+        .to_vec();
+    let origin = proof::AdmissionOrigin {
+        policy: [97; 32],
+        slot: 3,
+        assignment: 2,
+        ordinal: 101,
+    };
+    fields[1] = V::Uint(2);
+    fields[6] = b(&origin
+        .initial(
+            old.scope().network,
+            old.scope().incarnation,
+            old.requester(),
+        )
+        .unwrap());
+    fields[8] = V::Null;
+    fields.push(origin.value());
+    let current = wire::encode(&V::Array(fields)).unwrap();
+    status(&mut store, &mut session, sample, &current);
+    assert!(store.resume_ordinary().unwrap().is_none());
+    assert_eq!(store.stored.tracker.outstanding_unknown.len(), 1);
+    assert_eq!(
+        store.stored.tracker.outstanding_unknown[0].signed,
+        hex::encode(pending.signed())
+    );
+    assert_eq!(
+        store.stored.tracker.outstanding_unknown[0].effect,
+        tracker::Effect::Claimed
+    );
+    let current = proof::OwnStreamMetadata::parse(&current).unwrap();
+    assert!(tracker::monotonic_metadata(&current, &old).is_err());
+    let descriptor = store.descriptor().clone();
+    drop(store);
+    let store = Store::open(&directory.0, descriptor).unwrap();
+    assert_eq!(store.stored.tracker.outstanding_unknown.len(), 1);
+    assert_eq!(store.stream_metadata().unwrap().unwrap(), current);
+}

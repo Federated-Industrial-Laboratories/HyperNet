@@ -40,7 +40,7 @@ pub(crate) fn complete_content(
             namespaces: vec!["Books".into()],
             state_bytes: 8 * 1024 * 1024,
             maximum_asset_bytes: crate::authority_objects::PAGE_BUNDLE_BYTES as u64,
-            retention_ms: MAXIMUM_LIFETIME_MS,
+            retention_ms: MAXIMUM_LIFETIME_MS.into(),
             content: Some(ContentPolicy {
                 search: false,
                 metadata_bytes: 65536,
@@ -103,8 +103,17 @@ impl Fixture {
         self.author_for([71; 16], body, revision)
     }
     fn author_for(&self, page: [u8; 16], body: &[u8], revision: u64) -> objects::Author {
+        self.author_until(page, body, revision, 700000.into())
+    }
+    fn author_until(
+        &self,
+        page: [u8; 16],
+        body: &[u8],
+        revision: u64,
+        end: crate::trust_validity::End,
+    ) -> objects::Author {
         let parameters =
-            objects::Author::parameters(page, "Books", body, &self.grant, None, 700000).unwrap();
+            objects::Author::parameters(page, "Books", body, &self.grant, None, end).unwrap();
         let bytes = deployment::signed(
             &deployment::key(5),
             "PageAuthorStatement",
@@ -315,8 +324,8 @@ impl Fixture {
                         .manifest
                         .validity
                         .1
-                        .bound(revision.author.expires_ms)
-                        .min(at + host.profile.retention_ms),
+                        .min(revision.author.expires_ms)
+                        .min(host.profile.retention_end(at).unwrap()),
                 }),
                 vec![],
                 at,
@@ -368,16 +377,17 @@ impl Fixture {
     fn hosts_with_storage_until(
         &mut self,
         physical_bytes: u64,
-        expires_ms: u64,
+        expires_ms: impl Into<crate::trust_validity::End>,
     ) -> Vec<HostProfile> {
         self.hosts_with_content_quota(physical_bytes, expires_ms, 2 * 1024 * 1024)
     }
     fn hosts_with_content_quota(
         &mut self,
         physical_bytes: u64,
-        expires_ms: u64,
+        expires_ms: impl Into<crate::trust_validity::End>,
         content_bytes: u64,
     ) -> Vec<HostProfile> {
+        let expires_ms = expires_ms.into();
         let governance =
             Governance::parse(self.state.network, self.state.incarnation, &self.records).unwrap();
         let value = wire::decode(governance.record_bytes(102, self.grant.id).unwrap()).unwrap();
@@ -387,9 +397,19 @@ impl Fixture {
             .iter()
             .map(|v| v.uint().unwrap())
             .collect();
-        let f = deployment::Fixture::with_actions(actions);
+        let f = if expires_ms == crate::trust_validity::End::UntilWithdrawn {
+            deployment::Fixture::persistent_with_actions(actions)
+        } else {
+            deployment::Fixture::with_actions(actions)
+        };
         let mut manifest = deployment::manifest();
-        manifest.validity.1 = expires_ms.into();
+        manifest.validity.1 = expires_ms;
+        self.grant = Governance::parse(self.state.network, self.state.incarnation, &f.records)
+            .unwrap()
+            .versions()
+            .into_iter()
+            .find(|r| r.kind == 102 && r.id == [23; 32])
+            .unwrap();
         (self.records, _, _, _) = deployment::admitted(&f, &deployment::offer(manifest.clone()));
         [1, 2]
             .into_iter()
@@ -410,7 +430,13 @@ impl Fixture {
                     } else {
                         markup::media::MAX_PAGE_BYTES.min(physical_bytes)
                     },
-                    retention_ms: MAXIMUM_LIFETIME_MS,
+                    retention_ms: if role == 1
+                        && expires_ms == crate::trust_validity::End::UntilWithdrawn
+                    {
+                        expires_ms
+                    } else {
+                        MAXIMUM_LIFETIME_MS.into()
+                    },
                     content: (role == 1).then_some(ContentPolicy {
                         search: self.search,
                         metadata_bytes: 65536,
@@ -1771,13 +1797,13 @@ fn page_content_placement_replay_at_quota_preserves_exact_allocation() {
             .reference
             .clone()
     });
-    let place = |revision: VersionRef, expires_ms| {
+    let place = |revision: VersionRef, expires_ms: u64| {
         Command::Content(content::Command::Place {
             revision,
             hosts: vec![host.clone()],
             copies: 1,
             failure_domains: 1,
-            expires_ms,
+            expires_ms: expires_ms.into(),
         })
     };
     let (intent, operation, decision, inputs) =
@@ -2023,7 +2049,7 @@ fn expired_body_placement_preserves_metadata_but_refuses_serving() {
             hosts: vec![host.clone()],
             copies: 1,
             failure_domains: 1,
-            expires_ms: 6500,
+            expires_ms: 6500.into(),
         }),
         vec![],
         5000,
@@ -2078,3 +2104,94 @@ mod backup_tests;
 
 #[path = "AuthorityPageViewTests.rs"]
 mod view_tests;
+
+#[test]
+fn persistent_static_page_survives_old_dates_but_rechecks_withdrawal_and_finite_review() {
+    use crate::trust_validity::End;
+    let body = b"HyperNetPage/2\n# Welcome\n: A persistent read-only Page.\n";
+    let mut f = Fixture::new();
+    let rejected = f.author_until([71; 16], body, 1, End::UntilWithdrawn);
+    assert_ne!(
+        f.evaluate(Command::Submit { author: rejected }, vec![], 5000)
+            .2
+            .code,
+        0,
+        "finite author ancestors cannot publish permanent provenance"
+    );
+    let hosts = f.hosts_with_storage_until(8 * 1024 * 1024, End::UntilWithdrawn);
+    let author = f.author_until([71; 16], body, 1, End::UntilWithdrawn);
+    f.apply(
+        Command::Submit {
+            author: author.clone(),
+        },
+        vec![],
+        5000,
+    );
+    let revision = f
+        .state
+        .record(141, revision_id(author.intent.resource, 1).unwrap())
+        .unwrap()
+        .reference
+        .clone();
+    let placement = f.content(&revision, 5000, true);
+    assert_eq!(
+        content::Placement::parse(
+            &f.state
+                .record(content::PLACEMENT_KIND, placement.id)
+                .unwrap()
+                .payload
+        )
+        .unwrap()
+        .expires_ms,
+        End::UntilWithdrawn
+    );
+    let review = f.reviewer(&author, true, 10000);
+    let bundle = objects::Bundle::encode(body, &author.bytes, &review.bytes).unwrap();
+    let command = Command::Review {
+        review,
+        bundle: Some(Reference::for_bytes(Class::PageBundle, &bundle).unwrap()),
+    };
+    assert_ne!(
+        f.evaluate(command.clone(), vec![], 10001).2.code,
+        0,
+        "permanent content cannot accept expired review proof"
+    );
+    let reviewed = f.apply(command, vec![], 5000).1;
+    assert_eq!(
+        reviewed.expires_ms, 10000,
+        "review execution remains finite"
+    );
+    let host = f
+        .state
+        .record(147, hosts[0].service)
+        .unwrap()
+        .reference
+        .clone();
+    let read = Command::Content(content::Command::Authorise {
+        placement,
+        host: host.clone(),
+        effect: content::Effect::Read,
+        offset: 0,
+        bytes: body.len() as u64,
+        digest: None,
+    });
+    assert_eq!(f.evaluate(read.clone(), vec![], 31_536_000_000).2.code, 0);
+    let (_, selected, _) =
+        admission_host(&f.state, &f.records, &f.reserved, host.id, 31_536_000_000).unwrap();
+    assert_eq!(selected.len(), 1);
+    assert!(admission_host(&f.state, &f.records, &f.reserved, [253; 32], 31_536_000_000).is_err());
+    f.apply(
+        Command::HostWithdraw {
+            role: 1,
+            host: host.id,
+            generation: host.generation,
+        },
+        vec![],
+        31_536_000_000,
+    );
+    assert_ne!(
+        f.evaluate(read, vec![], 31_536_000_001).2.code,
+        0,
+        "current withdrawal overrides permanent content lifetime"
+    );
+}

@@ -28,7 +28,7 @@ pub(super) fn result(
     sorted(&mut versions)?;
     let governance = dependencies
         .iter()
-        .filter(|r| r.kind < 132)
+        .filter(|r| r.kind < 132 || matches!(r.kind, 180 | 181))
         .map(|r| Ok(b(c.governance.record_bytes(r.kind, r.id)?)))
         .collect::<Result<Vec<_>>>()?;
     let value = a(vec![

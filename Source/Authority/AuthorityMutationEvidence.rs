@@ -46,6 +46,23 @@ impl Entry {
             config.evidence_context(intent.minimum_policy_epoch, self.height, self.at, height)?;
         let operation = transactions::Operation::parse(&intent, &historical)?;
         let (records, snapshot) = match operation {
+            transactions::Operation::Admission(admission) => {
+                let records = if self.created.kind == 125 {
+                    admission
+                        .retired_legacy(intent.network, intent.incarnation)?
+                        .into_iter()
+                        .filter(|bytes| {
+                            wire::decode(bytes).is_ok_and(|v| {
+                                v.array(12)
+                                    .is_ok_and(|f| f[6].fixed::<32>().ok() == Some(self.created.id))
+                            })
+                        })
+                        .collect()
+                } else {
+                    admission.derive(intent.network, intent.incarnation)?
+                };
+                (records, admission.snapshot.clone())
+            }
             transactions::Operation::Policy(policy) => {
                 let mut records = Vec::new();
                 if policy.recovery != policy.previous_recovery {
@@ -156,7 +173,8 @@ impl Entry {
                 && intent.minimum_policy_epoch == snapshot.epoch
                 && intent.minimum_policy_height == snapshot.height
                 && wire::digest(record) == self.created.digest
-                && (matches!(self.created.kind, 100 | 101 | 127 | 129)
+                && (matches!(self.created.kind, 100 | 101 | 127 | 129 | 180 | 181)
+                    || self.created.kind == 125 && intent.action == "AuthorityAdmission"
                     || self.created.generation == 1),
             "mutation evidence derivation or position differs"
         );
@@ -177,7 +195,11 @@ impl Entry {
         Ok(records)
     }
     fn maximum(&self) -> usize {
-        if matches!(self.created.kind, 100 | 129) {
+        if matches!(self.created.kind, 100 | 129 | 180 | 181)
+            || self.created.kind == 125
+                && Intent::from_signed(&self.signed)
+                    .is_ok_and(|intent| intent.action == "AuthorityAdmission")
+        {
             crate::authority_capacity::MAX_DEPLOYMENT_EVIDENCE
         } else {
             crate::authority_capacity::MAX_OTHER_EVIDENCE
@@ -470,6 +492,58 @@ impl Evidence {
         height: u64,
         at: u64,
     ) -> Result<()> {
+        if created.kind == 181 {
+            let intent = Intent::from_signed(signed)?;
+            let operation = crate::authority_admission::Operation::parse(&intent)?;
+            for bytes in operation.retired_legacy(intent.network, intent.incarnation)? {
+                let reference = crate::authority_governance::Governance::record_versions(
+                    intent.network,
+                    intent.incarnation,
+                    &[bytes],
+                )?
+                .remove(0);
+                let original = operation
+                    .legacy
+                    .iter()
+                    .find(|x| {
+                        wire::decode(x).is_ok_and(|v| {
+                            v.array(12)
+                                .is_ok_and(|f| f[6].fixed::<32>().ok() == Some(reference.id))
+                        })
+                    })
+                    .context("legacy original absent")?;
+                let old = crate::authority_governance::Governance::record_versions(
+                    intent.network,
+                    intent.incarnation,
+                    std::slice::from_ref(original),
+                )?
+                .remove(0);
+                ensure!(
+                    self.0.iter().any(|e| e.created == old),
+                    "legacy provenance absent or already retired"
+                );
+                self.0.retain(|e| e.created.index() != old.index());
+                self.0.push(Entry {
+                    created: reference,
+                    signed: signed.to_vec(),
+                    height,
+                    at,
+                });
+            }
+        }
+        if matches!(created.kind, 180 | 181) && created.generation > 1 {
+            let intent = Intent::from_signed(signed)?;
+            let operation = crate::authority_admission::Operation::parse(&intent)?;
+            let previous = operation
+                .previous_reference(intent.network, intent.incarnation)?
+                .context("admission successor lacks predecessor")?;
+            ensure!(
+                self.0.iter().any(|e| e.created == previous)
+                    && previous.generation.checked_add(1) == Some(created.generation),
+                "admission evidence replacement skips predecessor"
+            );
+            self.0.retain(|e| e.created.index() != created.index());
+        }
         if created.kind == 127 && created.generation > 1 {
             let intent = Intent::from_signed(signed)?;
             let crate::authority_applications::Operation::Renew { consent, .. } =

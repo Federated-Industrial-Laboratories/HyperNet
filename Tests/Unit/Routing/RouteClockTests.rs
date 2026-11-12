@@ -262,6 +262,7 @@ async fn private_route_failed_connection_read_preserves_unrelated_forwarding_unt
         anyhow::Error::new(HistoryOvertaken),
         anyhow::Error::new(crate::authority_challenge::ChallengeExpired),
         anyhow::Error::new(crate::authority_local_transport::ControlClosed::Read),
+        anyhow::Error::new(crate::authority_local_transport::InspectionDeadline),
     ] {
         let denied = clock_checked::<()>(Err(Client::retry_read(error)))
             .unwrap()
@@ -409,4 +410,28 @@ async fn private_route_fresh_read_backoff_rechecks_consent_and_allows_shutdown()
         .unwrap()
     );
     assert_eq!(checks, 2);
+}
+
+#[test]
+fn bounded_authority_timeout_recovers_without_reusing_a_connection_permission() {
+    use crate::authority_local_transport::InspectionDeadline;
+    for fresh_read in [false, true] {
+        let error = anyhow::Error::new(InspectionDeadline);
+        let error = if fresh_read {
+            Client::retry_read(error)
+        } else {
+            error
+        };
+        assert!(lifecycle_retry(&error));
+        assert_eq!(failure_code(&error), FailureCode::InspectionDeadline);
+        let classified = clock_checked::<()>(Err(error));
+        if fresh_read {
+            assert!(classified.unwrap().unwrap_err().is::<ReadRetry>());
+        } else {
+            assert!(classified.unwrap_err().is::<InspectionDeadline>());
+        }
+    }
+    let untyped = anyhow::anyhow!("original inspection deadline expired");
+    assert!(!lifecycle_retry(&untyped));
+    assert!(!Client::retry_read(untyped).is::<ReadRetry>());
 }

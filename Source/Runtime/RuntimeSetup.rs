@@ -43,6 +43,9 @@ pub struct Setup {
     pub peer_certificate: Vec<PathBuf>,
     #[arg(long)]
     pub bind: Ipv4Addr,
+    /// Permit private committee bridges while publishing authority ports only on 127.0.0.1.
+    #[arg(long)]
+    pub private_peer_routing: bool,
     #[arg(long)]
     pub port: u16,
     #[arg(long)]
@@ -319,6 +322,7 @@ pub fn setup(args: Setup) -> Result<serde_json::Value> {
             )
         },
         bind: args.bind,
+        private_peer_routing: args.private_peer_routing,
         port: args.port,
         subnet: args.subnet,
         resources: Resources {

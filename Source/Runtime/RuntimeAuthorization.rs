@@ -44,6 +44,8 @@ pub struct Manifest {
     pub created: u64,
     pub expires: End,
     pub bind: Ipv4Addr,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub private_peer_routing: bool,
     pub port: u16,
     pub subnet: Ipv4Addr,
     pub resources: Resources,
@@ -51,6 +53,9 @@ pub struct Manifest {
     pub tls_digests: BTreeMap<String, String>,
     pub endpoint_leaves: BTreeMap<String, String>,
     pub session_policy: String,
+}
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -120,6 +125,10 @@ impl Manifest {
         ensure!(
             !self.bind.is_multicast() && !self.bind.is_broadcast() && self.port != 0,
             "Invalid authority exposure"
+        );
+        ensure!(
+            !self.private_peer_routing || self.bind == Ipv4Addr::LOCALHOST,
+            "Private peer routing publishes only on the loopback address"
         );
         ensure!(
             self.subnet.is_private() && self.subnet.octets()[3] == 0,
@@ -271,7 +280,8 @@ impl Manifest {
             .find(|e| e.service_key == signer)
             .context("Own endpoint is absent")?;
         ensure!(
-            own.address == std::net::IpAddr::V4(self.bind) && own.port == self.port,
+            (self.private_peer_routing || own.address == std::net::IpAddr::V4(self.bind))
+                && own.port == self.port,
             "Published endpoint differs from local consent"
         );
         let crate::authority_clock_handoff::Source::Signed {
@@ -367,6 +377,7 @@ impl Manifest {
                 ],
                 subnet_address: self.subnet.into(),
                 subnet_prefix: 24,
+                private_peer_routing: self.private_peer_routing,
             }),
         };
         manifest.validate()?;
@@ -431,7 +442,12 @@ impl Manifest {
             image: format!("sha256:{}", hex::encode(role.image_digest)),
             created: manifest.validity.0 / 1000,
             expires: manifest.validity.1.divided(1000)?,
-            bind,
+            bind: if c.private_peer_routing {
+                Ipv4Addr::LOCALHOST
+            } else {
+                bind
+            },
+            private_peer_routing: c.private_peer_routing,
             port: own.port,
             subnet,
             resources: Resources {

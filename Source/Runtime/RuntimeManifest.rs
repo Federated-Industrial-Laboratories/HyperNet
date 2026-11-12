@@ -10,6 +10,9 @@ use std::{
 };
 pub type Key = [u8; 32];
 pub const MAXIMUM: usize = 48 * 1024;
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -75,6 +78,9 @@ pub struct AuthorityConfig {
     pub tls_file_digests: [Key; 3],
     pub subnet_address: IpAddr,
     pub subnet_prefix: u64,
+    /// Explicitly connect this private committee bridge and publish only on loopback.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub private_peer_routing: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -443,6 +449,19 @@ impl Manifest {
                 .iter()
                 .find(|e| e.service_key == role.service_key)
                 .unwrap();
+            if config.private_peer_routing {
+                let IpAddr::V4(subnet) = config.subnet_address else {
+                    anyhow::bail!("Private peer routing requires IPv4")
+                };
+                let [a, b, c, _] = subnet.octets();
+                ensure!(
+                    self.roles.len() == 1
+                        && owned.address == IpAddr::V4(Ipv4Addr::new(a, b, c, 20))
+                        && peers.iter().all(|e| matches!(e.address,
+                            IpAddr::V4(ip) if ip.is_private() && ip.octets()[3] == 20)),
+                    "Private peer routing requires the exact private committee endpoints"
+                );
+            }
             ensure!(
                 config.listen_address.is_ipv4() == owned.address.is_ipv4()
                     && (config.listen_address.is_unspecified()
@@ -582,7 +601,7 @@ impl Manifest {
         let config = self.authority_config.as_ref().map_or(V::Null, |c| {
             let [family, address] = address_values(c.listen_address);
             let [subnet_family, subnet] = address_values(c.subnet_address);
-            a([
+            let mut fields = vec![
                 family,
                 address,
                 V::Uint(u64::from(c.listen_port)),
@@ -591,7 +610,11 @@ impl Manifest {
                 subnet_family,
                 subnet,
                 V::Uint(c.subnet_prefix),
-            ])
+            ];
+            if c.private_peer_routing {
+                fields.push(a([V::Uint(1)]));
+            }
+            a(fields)
         });
         let bytes = wire::encode(&a([
             V::Uint(200),
@@ -687,7 +710,11 @@ impl Manifest {
         let authority_config = if v[19] == V::Null {
             None
         } else {
-            let r = v[19].array(8)?;
+            let r = v[19].list(9)?;
+            ensure!(
+                r.len() == 8 || (r.len() == 9 && r[8] == a([V::Uint(1)])),
+                "Unsupported private authority network configuration"
+            );
             Some(AuthorityConfig {
                 listen_address: address(&r[0], &r[1])?,
                 listen_port: r[2].uint()?.try_into()?,
@@ -697,6 +724,7 @@ impl Manifest {
                     .map_err(|_| anyhow::anyhow!("Three TLS file pins required"))?,
                 subnet_address: address(&r[5], &r[6])?,
                 subnet_prefix: r[7].uint()?,
+                private_peer_routing: r.len() == 9,
             })
         };
         let manifest = Self {

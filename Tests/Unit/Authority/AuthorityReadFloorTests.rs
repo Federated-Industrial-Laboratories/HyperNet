@@ -842,3 +842,42 @@ fn history_bound_before_concurrent_publication_is_not_rebased() {
             .is_err()
     );
 }
+
+#[test]
+fn scoped_admission_fresh_result_preserves_policy_shape() {
+    fn result(action: &str, kinds: &[u64]) -> proof::OperationResult {
+        let refs = kinds
+            .iter()
+            .map(|kind| {
+                V::Array(vec![
+                    V::Uint(*kind),
+                    b(&[*kind as u8; 32]),
+                    V::Uint(1),
+                    b(&[7; 32]),
+                ])
+            })
+            .collect();
+        proof::OperationResult {
+            action: action.into(),
+            disposition: Disposition::Permit,
+            code: 0,
+            value: wire::encode(&V::Array(vec![
+                V::Uint(201),
+                V::Uint(1),
+                V::Text(action.into()),
+                V::Array(refs),
+                V::Array(vec![]),
+            ]))
+            .unwrap(),
+        }
+    }
+    let native =
+        read::result_versions(&result("AuthorityAdmissionContext", &[100, 114, 180, 181])).unwrap();
+    assert_eq!(
+        native.iter().map(|r| r.kind).collect::<Vec<_>>(),
+        [100, 114, 180, 181]
+    );
+    assert!(read::result_versions(&result("AuthorityPolicyContext", &[100, 114])).is_ok());
+    assert!(read::result_versions(&result("AuthorityPolicyContext", &[100, 114, 180])).is_err());
+    assert!(read::result_versions(&result("UnrecognisedContext", &[180, 181])).is_err());
+}

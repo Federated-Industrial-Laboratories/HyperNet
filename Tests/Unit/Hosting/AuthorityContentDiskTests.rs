@@ -39,7 +39,7 @@ impl Fixture {
             placement: [4; 32],
             digest: Sha256::digest(&payload).into(),
             bytes: payload.len() as u64,
-            expires_ms: 100000,
+            expires_ms: 100000.into(),
             opaque: true,
         };
         Disk::initialise(&path, &limits).unwrap();
@@ -217,4 +217,39 @@ fn content_repair_reserves_staging_before_discarding_corruption() {
     assert_ne!(old, repaired);
     disk.reconcile(&f.object, 1001).unwrap();
     assert_eq!(disk.read(&f.object, 0, 19, 1001).unwrap(), f.payload[..19]);
+}
+
+#[test]
+fn persistent_content_receipt_survives_restart_and_still_requires_reconciliation() {
+    let mut f = Fixture::new();
+    f.object.expires_ms = crate::trust_validity::End::UntilWithdrawn;
+    let mut disk = f.open();
+    assert!(
+        disk.reserve(&f.object, 1000).is_err(),
+        "sealed retention remains finite"
+    );
+    f.object.opaque = false;
+    f.upload(&mut disk);
+    let receipt = disk
+        .complete(&f.object, [8; 32], &f.key, 1000, |_| Ok(()))
+        .unwrap();
+    drop(disk);
+    let at = 31_536_000_000;
+    let mut disk = Disk::open(&f.path, &f.limits, at).unwrap();
+    assert!(disk.read(&f.object, 0, 19, at).is_err());
+    assert_eq!(
+        disk.complete(&f.object, [8; 32], &f.key, at, |_| Ok(()))
+            .unwrap(),
+        receipt
+    );
+    disk.reconcile(&f.object, at).unwrap();
+    assert_eq!(disk.read(&f.object, 0, 19, at).unwrap(), f.payload[..19]);
+    disk.purge(f.object.placement, at).unwrap();
+    drop(disk);
+    assert!(
+        Disk::open(&f.path, &f.limits, at + 1)
+            .unwrap()
+            .inventory()
+            .is_empty()
+    );
 }

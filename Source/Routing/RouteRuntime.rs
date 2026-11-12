@@ -48,6 +48,7 @@ pub(crate) enum ReadRetry {
     HistoryOvertaken,
     ChallengeExpired,
     TransportClosed,
+    InspectionDeadline,
 }
 impl std::fmt::Display for ReadRetry {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -157,6 +158,9 @@ fn failure_code(error: &anyhow::Error) -> FailureCode {
     }
     if error.is::<crate::authority_local_transport::HistoryOvertaken>() {
         return FailureCode::HistoryOvertaken;
+    }
+    if error.is::<crate::authority_local_transport::InspectionDeadline>() {
+        return FailureCode::InspectionDeadline;
     }
     if error.is::<tokio::time::error::Elapsed>() {
         return FailureCode::Timeout;
@@ -1718,13 +1722,19 @@ fn clock_checked<T>(outcome: Result<T>) -> Result<Result<T>> {
     match outcome {
         Err(error)
             if error.is::<crate::consensus_clock::ObservationExpired>()
-                || (error.is::<crate::authority_challenge::ChallengeExpired>()
+                || ((error.is::<crate::authority_challenge::ChallengeExpired>()
+                    || error.is::<crate::authority_local_transport::InspectionDeadline>())
                     && !error.is::<ReadRetry>()) =>
         {
             Err(error)
         }
         outcome => Ok(outcome),
     }
+}
+fn lifecycle_retry(error: &anyhow::Error) -> bool {
+    error.is::<ReadRetry>()
+        || error.is::<crate::authority_challenge::ChallengeExpired>()
+        || error.is::<crate::authority_local_transport::InspectionDeadline>()
 }
 async fn wait_for_clock(
     check: impl FnMut() -> Result<()>,
@@ -1816,10 +1826,7 @@ pub async fn run(config: Config, guard: &Guard, active: &Active) -> Result<()> {
                     crate::authority_challenge::boot_time_ms().ok()
                 );
             }
-            Err(error)
-                if error.is::<ReadRetry>()
-                    || error.is::<crate::authority_challenge::ChallengeExpired>() =>
-            {
+            Err(error) if lifecycle_retry(&error) => {
                 // No admission survives. Reopening retains the exact pending ordinary request;
                 // a fresh challenge cannot replace its sequence or restore a consumed admission.
                 eprintln!(

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Portable Page statements use the existing signed Intent schema without online dispatch.
 use super::*;
+use crate::trust_validity::End;
 
 #[derive(Clone, Debug)]
 pub struct Author {
@@ -11,7 +12,7 @@ pub struct Author {
     pub metadata: SourceMetadata,
     pub grant: VersionRef,
     pub application: Option<VersionRef>,
-    pub expires_ms: u64,
+    pub expires_ms: End,
     pub bytes: Vec<u8>,
 }
 fn statement(bytes: &[u8], n: Digest, i: Digest, action: &str) -> Result<Intent> {
@@ -48,7 +49,15 @@ impl Author {
         let source = source(&f[7])?;
         let grant = required_version(&f[8], 102)?;
         let application = optional_version(&f[9], 148)?;
-        let expires_ms = f[10].uint()?;
+        let expires_ms = End::parse(&f[10])?;
+        let metadata = SourceMetadata::parse(&f[11])?;
+        ensure!(
+            expires_ms != End::UntilWithdrawn
+                || (application.is_none()
+                    && metadata.assets.is_empty()
+                    && metadata.forms.is_empty()),
+            "Persistent Pages require ordinary author consent and static source without media or forms"
+        );
         ensure!(
             intent.resource == page_id(&raw_page)? && intent.revision > 0 && expires_ms > 0,
             "Page author statement identity differs"
@@ -58,7 +67,7 @@ impl Author {
             raw_page,
             namespace,
             source,
-            metadata: SourceMetadata::parse(&f[11])?,
+            metadata,
             grant,
             application,
             expires_ms,

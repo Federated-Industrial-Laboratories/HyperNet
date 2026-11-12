@@ -10,6 +10,32 @@ struct Fixture {
     root: PathBuf,
     profile: Profile,
 }
+#[test]
+fn private_committee_consent_preserves_peer_identity_and_loopback_publication() {
+    let fixture = Fixture::new();
+    let mut manifest = fixture.profile.manifest.clone();
+    manifest.private_peer_routing = true;
+    manifest.bind = std::net::Ipv4Addr::LOCALHOST;
+    let subnet = manifest.subnet.octets()[2];
+    for (index, peer) in manifest.config.peers.iter_mut().enumerate() {
+        let octet = if hex::encode(peer.key) == manifest.signer {
+            subnet
+        } else {
+            subnet + 1 + index as u8
+        };
+        peer.origin = format!("https://10.89.{octet}.20:{}/", manifest.port);
+    }
+    let canonical = manifest.canonical().unwrap();
+    let restored = Manifest::from_canonical(canonical.clone()).unwrap();
+    assert!(restored.private_peer_routing);
+    assert_eq!(restored.bind, std::net::Ipv4Addr::LOCALHOST);
+    assert_eq!(
+        restored.canonical().unwrap().encode().unwrap(),
+        canonical.encode().unwrap()
+    );
+    manifest.bind = std::net::Ipv4Addr::new(192, 0, 2, 1);
+    assert!(manifest.canonical().is_err());
+}
 impl Fixture {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!("HyperNetLocalLifecycle{}", random_id()));

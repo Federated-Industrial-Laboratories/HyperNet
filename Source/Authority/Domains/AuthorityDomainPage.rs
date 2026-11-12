@@ -40,7 +40,7 @@ pub use commands::{Command, MediaEffect};
 #[path = "../../Pages/AuthorityPageEvaluation.rs"]
 mod evaluation;
 pub(crate) use evaluation::context::Evaluation;
-pub(crate) use evaluation::evaluate_read;
+pub(crate) use evaluation::{admission_host, evaluate_read};
 pub use evaluation::{evaluate, expected_recipient};
 #[path = "../../Pages/AuthorityPageResponse.rs"]
 mod response;

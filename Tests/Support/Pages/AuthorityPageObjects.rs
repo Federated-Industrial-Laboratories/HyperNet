@@ -8,7 +8,7 @@ impl Author {
         source: &[u8],
         grant: &VersionRef,
         application: Option<&VersionRef>,
-        expires_ms: u64,
+        expires_ms: impl Into<End>,
     ) -> Result<Vec<u8>> {
         wire::encode(&a(vec![
             V::Uint(200),
@@ -21,7 +21,7 @@ impl Author {
             Reference::for_bytes(Class::PageSource, source)?.value(),
             reference(grant),
             application.map_or(V::Null, reference),
-            V::Uint(expires_ms),
+            expires_ms.into().value(),
             SourceMetadata::from_source(source)?.value(),
         ]))
     }

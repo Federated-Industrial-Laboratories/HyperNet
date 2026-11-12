@@ -113,7 +113,7 @@ fn preview(p: &Profile, s: &State) -> Result<Value> {
         json!({"version":1,"deployment":p.deployment,"network":p.network,"signer":p.signer,
         "profileDigest":s.profile_digest,"generation":s.generation,"status":s.status,
         "backend":"BasicHotStuff","roles":["Authority"],"committeeSize":4,"quorumSize":3,
-        "endpoints":{"peerListener":format!("{}:{}",p.bind,p.port),"peers":p.config.peers},
+        "endpoints":{"peerListener":format!("{}:{}",p.bind,p.port),"peers":p.config.peers,"privatePeerRouting":p.private_peer_routing},
         "resources":p.resources,"storageEnforcement":"Engine bounded objects and journals; available-space admission is not a filesystem quota",
         "expires":p.expires,"sessionPolicy":p.session_policy,"selinuxRelabel":p.selinux_relabel,"managedBootPolicy":p.session_policy=="Managed",
         "logoutBehaviour":"Graceful foreground supervisor exit stops the owned replica; abrupt loss retains independent consent expiry and withdrawal enforcement",

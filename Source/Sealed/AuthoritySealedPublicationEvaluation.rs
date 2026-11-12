@@ -741,7 +741,7 @@ pub fn evaluate(
                     hosts,
                     copies: o.placement.copies,
                     failure_domains: *failure_domains,
-                    expires_ms: *expires_ms,
+                    expires_ms: (*expires_ms).into(),
                 };
                 for host in &placement.hosts {
                     let h = c.host(host, Some(namespace), true)?;
@@ -751,7 +751,7 @@ pub fn evaluate(
                         .as_ref()
                         .context("sealed durable consent absent")?;
                     ensure!(
-                        *expires_ms <= at.saturating_add(h.profile.retention_ms),
+                        *expires_ms <= at.saturating_add(h.profile.retention_ms.finite()?),
                         "sealed retention exceeds host consent"
                     );
                     let used = state
@@ -817,7 +817,7 @@ pub fn evaluate(
                         && !state.records.contains_key(&(161, pr.reference.id)),
                     "sealed placement expired or withdrawn"
                 );
-                c.expires = c.expires.min(p.expires_ms);
+                c.expires = p.expires_ms.bound(c.expires);
                 let copies = c.select(160, pr.reference.id)?;
                 let copies =
                     content::Copies::parse(&copies.payload, state.network, state.incarnation)?;
@@ -844,7 +844,7 @@ pub fn evaluate(
                                     .context("sealed copy consent absent")?
                                     .failure_domain,
                             );
-                            c.expires = c.expires.min(copy.expires_ms);
+                            c.expires = copy.expires_ms.bound(c.expires);
                         }
                     }
                 }

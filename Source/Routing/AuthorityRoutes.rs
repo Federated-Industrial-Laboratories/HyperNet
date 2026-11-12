@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 #[path = "AuthorityRoutesEvaluation.rs"]
 mod evaluation;
 pub use evaluation::evaluate;
-pub(crate) use evaluation::evaluate_read;
+pub(crate) use evaluation::{admission_routes, evaluate_read, scoped_vouchers};
 
 #[cfg(test)]
 #[path = "../../Tests/Unit/Routing/AuthorityRoutesTests.rs"]

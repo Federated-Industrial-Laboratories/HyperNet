@@ -344,3 +344,15 @@ fn drip_reads_do_not_extend_the_original_transport_deadline() {
     drop(client);
     sender.join().unwrap();
 }
+
+#[test]
+fn private_control_deadline_is_typed_and_does_not_extend_the_original_wait() {
+    let deadline = boot_time_ms().unwrap();
+    assert!(remaining(deadline).unwrap_err().is::<InspectionDeadline>());
+    let (client, _server) = UnixStream::pair().unwrap();
+    let deadline = boot_time_ms().unwrap() + 20;
+    let error = ready(&client, libc::POLLIN, deadline).unwrap_err();
+    assert!(error.is::<InspectionDeadline>());
+    assert!(boot_time_ms().unwrap() >= deadline);
+    assert!(!transport_closed(&error));
+}

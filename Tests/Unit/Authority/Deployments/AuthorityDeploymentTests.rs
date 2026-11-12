@@ -189,6 +189,7 @@ pub(crate) fn manifest() -> Manifest {
             tls_file_digests: [[64; 32], [65; 32], [66; 32]],
             subnet_address: Ipv4Addr::new(10, 91, 128, 0).into(),
             subnet_prefix: 24,
+            private_peer_routing: false,
         }),
     }
 }
@@ -244,6 +245,9 @@ impl Fixture {
             I,
             crate::trust_validity::End::UntilWithdrawn,
         )
+    }
+    pub fn persistent_with_actions(actions: Vec<u64>) -> Self {
+        Self::with_end(actions, N, I, crate::trust_validity::End::UntilWithdrawn)
     }
     pub fn with_network(administrator_actions: Vec<u64>, n: Key, i: Key) -> Self {
         Self::with_end(administrator_actions, n, i, 900000.into())

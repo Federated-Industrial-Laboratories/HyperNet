@@ -25,7 +25,7 @@ fn copy_receipt(
             && v[0].fixed::<32>()? == object.placement
             && v[1].fixed::<32>()? == object.digest
             && v[2].uint()? == object.bytes
-            && v[3].uint()? == object.expires_ms
+            && crate::trust_validity::End::parse(&v[3])? == object.expires_ms
             && v[4].boolean()? == object.opaque,
         "durable content receipt differs from the selected complete object"
     );

@@ -962,7 +962,7 @@ pub fn evaluate(
     let bytes = c.selected.values().map(|r| b(&r.bytes)).collect();
     let governance_records = versions
         .iter()
-        .filter(|r| r.kind < 132)
+        .filter(|r| r.kind < 132 || matches!(r.kind, 180 | 181))
         .map(|r| Ok(b(c.governance.record_bytes(r.kind, r.id)?)))
         .collect::<Result<Vec<_>>>()?;
     let value = a(vec![
