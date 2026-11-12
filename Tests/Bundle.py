@@ -261,6 +261,57 @@ class Packages(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     Bundle.image_matches(self.manifest)
 
+    def test_deferred_install_and_explicit_verified_image_loading_preserve_trust(self):
+        args = self.archive()
+        self.current(args)
+        args.defer_image_load = True
+        actual_run = Bundle.run
+        imported = []
+        def invoke(arguments, **kwargs):
+            if arguments[:2] == ['podman', 'load']:
+                snapshot = Path(arguments[3])
+                self.assertNotEqual(snapshot, args.prefix / 'Images/HyperNetOci.tar')
+                self.assertEqual(snapshot.read_bytes(), self.payload['Images/HyperNetOci.tar'])
+                imported.append(snapshot)
+                return b''
+            return actual_run(arguments, **kwargs)
+        with patch.object(Bundle, 'run', side_effect=invoke), patch.object(Bundle, 'image_matches') as image:
+            Bundle.install(args)
+            self.assertEqual(imported, [])
+            image.assert_not_called()
+            before = (args.trust_directory / 'Trust.json').read_bytes()
+            result = Bundle.load_installed_image(args)
+            self.assertTrue(result['imageLoaded'])
+            self.assertEqual(result['imageId'], self.image)
+            self.assertEqual(len(imported), 1)
+            image.assert_called_once_with(self.manifest)
+            self.assertFalse(imported[0].exists())
+            self.assertEqual((args.trust_directory / 'Trust.json').read_bytes(), before)
+            with patch.object(PackageTrust.time, 'time', return_value=int(time.time()) + 7200):
+                with self.assertRaisesRegex(ValueError, 'not currently valid'):
+                    Bundle.load_installed_image(args)
+            (args.prefix / 'Images/HyperNetOci.tar').write_bytes(b'Changed')
+            with self.assertRaisesRegex(ValueError, 'modified'):
+                Bundle.load_installed_image(args)
+            self.assertEqual(len(imported), 1)
+
+    def test_image_load_refuses_post_verification_mutation_before_podman(self):
+        args = self.archive()
+        args.defer_image_load = True
+        self.installed(args)
+        original_copy = Bundle.copy_private
+        def changing_copy(source, destination, maximum):
+            if Path(source) == args.prefix / 'Images/HyperNetOci.tar':
+                Path(source).write_bytes(b'Changed after verification')
+            return original_copy(source, destination, maximum)
+        actual_run = Bundle.run
+        def invoke(arguments, **kwargs):
+            self.assertNotEqual(arguments[:2], ['podman', 'load'])
+            return actual_run(arguments, **kwargs)
+        with patch.object(Bundle, 'copy_private', side_effect=changing_copy), patch.object(Bundle, 'run', side_effect=invoke):
+            with self.assertRaisesRegex(ValueError, 'changed before loading'):
+                Bundle.load_installed_image(args)
+
     def test_interrupted_publication_retains_floor_and_exact_retry_succeeds(self):
         args = self.archive()
         self.current(args)
