@@ -72,6 +72,9 @@ Existing joined profiles keep their original bootstrap and keys. For a new
 profile after the original bootstrap discovery interval ends, a server can export
 a fresh quorum policy read using `authority-inspection policy export --output
 CurrentPolicy.json`, with its usual location, requester, socket and clock arguments.
+Every root retained in the current policy must be persistent for this discovery
+certificate. Partial root adoption remains usable by existing joined profiles,
+but cannot override expired discovery while a retained root remains finite.
 Pass that file to `networks prepare --current-policy CurrentPolicy.json` alongside
 the original bootstrap and independently pinned fingerprint. The certificate
 binds the bootstrap digest, epoch succession, exact persistent roots and permitted

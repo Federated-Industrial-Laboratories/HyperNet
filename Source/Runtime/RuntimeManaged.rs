@@ -216,8 +216,8 @@ fn preview(i: &Installation) -> Result<Value> {
         json!({"status":"ManagedPreview","previewDigest":files::hex_digest(&serde_json::to_vec(i)?),
         "profileDigest":i.profile,"unit":i.unit,"clockUnit":i.clock_unit,"unitContents":i.unit_bytes,
         "clockUnitContents":i.clock_unit_bytes,"logout":"Continues only with explicit user lingering",
-        "boot":"Pinned monitor authenticates the actual kernel boot; finite consent and normal authority checks still apply",
-        "failure":"Failed boot remains stopped; correct the reported dependency and explicitly restart the unit"}),
+        "boot":"Pinned monitor authenticates the actual kernel boot; exact consent and normal authority checks still apply",
+        "failure":"Persistent units retry failures after five seconds while consent remains valid; finite units require an explicit restart"}),
     )
 }
 fn systemctl(arguments: &[String]) -> Result<Vec<u8>> {
