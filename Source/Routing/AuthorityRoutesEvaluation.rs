@@ -378,7 +378,62 @@ pub fn evaluate(
     let mut next = state.clone();
     let mut changed = None;
     let outcome = (|| -> Result<()> {
+        let handover;
+        let command = if let Command::Handover { voucher, expires } = command {
+            let current = c.select(166, voucher.id)?;
+            let old = Voucher::parse(&current.payload)?;
+            if replay {
+                ensure!(
+                    voucher.generation.checked_add(1) == Some(current.reference.generation)
+                        && current.predecessor == Some(voucher.digest)
+                        && old.creation == intent.digest
+                        && old.expires == *expires,
+                    "route handover replay differs from its exact successor"
+                );
+            } else {
+                let usage = if state.records.contains_key(&(167, voucher.id)) {
+                    Some(Usage::parse(&c.select(167, voucher.id)?.payload)?)
+                } else {
+                    None
+                };
+                let (_, relay) = c.service(old.relay.id, true)?;
+                let (_, destination) = c.service(old.destination.id, true)?;
+                ensure!(
+                    old.permits_next(
+                        usage.as_ref(),
+                        relay
+                            .profile
+                            .limits
+                            .bytes
+                            .min(destination.profile.limits.bytes)
+                    ),
+                    "exhausted route must expire before ordinary quota renewal"
+                );
+                ensure!(
+                    current.reference == *voucher
+                        && at < old.expires
+                        && old.expires - at <= 60_000
+                        && *expires > old.expires,
+                    "route handover requires its exact live voucher in the handover window"
+                );
+            }
+            handover = Command::Issue {
+                id: voucher.id,
+                relay: old.relay.id,
+                destination: old.destination.id,
+                possession: old.possession,
+                action: old.action,
+                scope: old.scope,
+                connections: old.connections,
+                bytes: old.bytes,
+                expires: *expires,
+            };
+            &handover
+        } else {
+            command
+        };
         match command {
+            Command::Handover { .. } => unreachable!("normalized handover"),
             Command::Context { action, scope } => {
                 c.capability(grant(operation)?, intent.requester, *action, *scope)?;
                 if *action == 26 && scope.0 == 5 {

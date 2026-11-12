@@ -194,5 +194,5 @@ impl std::fmt::Display for End {
 mod tests;
 
 pub fn features() -> serde_json::Value {
-    serde_json::json!({"schema":"HyperNetProtocolFeatures/1","features":["UntilWithdrawn/1","PersistentActivation/2","RouteHandover/1","PersistentRootPolicy/2","DiscoveryPolicy/1","PrivateAuthorityRouting/1","ManagedAuthoritySession/1","PersistentPages/1"]})
+    serde_json::json!({"schema":"HyperNetProtocolFeatures/1","features":["UntilWithdrawn/1","PersistentActivation/2","RouteHandover/1","RouteHandover/2","PersistentRootPolicy/2","DiscoveryPolicy/1","PrivateAuthorityRouting/1","ManagedAuthoritySession/1","PersistentPages/1"]})
 }

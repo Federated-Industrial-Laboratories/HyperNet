@@ -1383,3 +1383,122 @@ fn scoped_voucher_issuance_checks_real_service_consent_and_member_capability() {
         }
     }
 }
+
+#[test]
+fn exact_live_handover_refuses_delayed_expiry_and_replays_without_resetting_usage() {
+    let mut f = Fixture::new();
+    f.register();
+    let previous = f.issue(2, 2 * CHARGE);
+    f.apply(Fixture::permit(&previous, 210), 160, None);
+    let old = Voucher::parse(&f.state.record(166, previous.id).unwrap().payload).unwrap();
+    let usage = f.state.record(167, previous.id).unwrap().reference.clone();
+    let handover = Command::Handover {
+        voucher: previous.clone(),
+        expires: 19000,
+    };
+    let encoded = handover.value();
+    assert_eq!(
+        Command::parse(&encoded, N, I).unwrap().name(),
+        "RouteHandover"
+    );
+    assert!(
+        Command::parse(
+            &a(vec![
+                V::Text("RouteHandover".into()),
+                V::Uint(2),
+                reference(&previous),
+                V::Uint(19000)
+            ]),
+            N,
+            I
+        )
+        .is_err()
+    );
+    let (intent, operation, decision) =
+        f.request_at(handover.clone(), 5, Some(f.reader.clone()), 10000);
+    assert_eq!(decision.code, 0);
+    // A queued signed handover must not turn into post-expiry allowance renewal.
+    assert_ne!(
+        operation
+            .prepare(
+                &f.state,
+                &f.records,
+                &f.reserved,
+                &intent,
+                old.expires,
+                false,
+                true
+            )
+            .unwrap()
+            .code,
+        0
+    );
+    f.state = decision.state.unwrap();
+    let current = Voucher::parse(&f.state.record(166, previous.id).unwrap().payload).unwrap();
+    assert!(current.continues(&old));
+    assert_eq!(f.state.record(167, previous.id).unwrap().reference, usage);
+    assert_eq!(
+        operation
+            .prepare(
+                &f.state,
+                &f.records,
+                &f.reserved,
+                &intent,
+                10000,
+                true,
+                true
+            )
+            .unwrap()
+            .code,
+        0
+    );
+    assert_ne!(
+        f.request_at(handover, 5, Some(f.reader.clone()), 10000)
+            .2
+            .code,
+        0
+    );
+}
+
+#[test]
+fn depleted_handover_preserves_expiry_until_normal_post_expiry_renewal() {
+    let mut f = Fixture::new();
+    f.register();
+    let previous = f.issue(1, CHARGE);
+    f.apply(Fixture::permit(&previous, 210), 160, None);
+    let before = f.state.record(166, previous.id).unwrap().clone();
+    assert_ne!(
+        f.request_at(
+            Command::Handover {
+                voucher: previous.clone(),
+                expires: 19000
+            },
+            5,
+            Some(f.reader.clone()),
+            10000
+        )
+        .2
+        .code,
+        0
+    );
+    assert_eq!(
+        f.state.record(166, previous.id).unwrap().bytes,
+        before.bytes
+    );
+    let mut issue = f.issue_command(1, CHARGE);
+    if let Command::Issue { expires, .. } = &mut issue {
+        *expires = 19000;
+    }
+    let renewed = f.request_at(issue, 5, Some(f.reader.clone()), 15000).2;
+    assert_eq!(renewed.code, 0);
+    let record = renewed
+        .state
+        .unwrap()
+        .record(166, previous.id)
+        .unwrap()
+        .clone();
+    let voucher = Voucher::parse(&record.payload).unwrap();
+    assert_eq!(voucher.baseline, Some((1, CHARGE)));
+    assert_eq!(voucher.connections, 1);
+    assert_eq!(voucher.bytes, CHARGE);
+}
