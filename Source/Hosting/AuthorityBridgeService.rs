@@ -251,8 +251,8 @@ pub fn exchange_packet(packet: &[u8]) -> Result<Vec<u8>> {
         .manifest
         .validity
         .1
-        .checked_sub(now.wall_ms)
-        .context("bridge consent expired")?;
+        .remaining(now.wall_ms)?
+        .unwrap_or(60_000);
     let result = transport::LocalControl::open(Path::new("/State/Control/Control.sock"))?
         .exchange_limit(
             packet,

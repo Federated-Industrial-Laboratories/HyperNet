@@ -163,8 +163,7 @@ impl Context<'_> {
         if live {
             let consent = wire::decode(self.governance.record_bytes(105, r.deployment)?)?;
             let f = consent.array(19)?;
-            let span = f[16].array(2)?;
-            let validity = (span[0].uint()?, span[1].uint()?);
+            let validity = crate::trust_validity::Validity::parse(&f[16])?;
             ensure!(
                 current(self.at, effective)
                     && current(self.at, validity)
@@ -177,7 +176,7 @@ impl Context<'_> {
                         && f[1].fixed::<32>().ok() == Some(p.endpoint))),
                 "route profile exceeds current local consent"
             );
-            self.expires = self.expires.min(effective.1).min(validity.1);
+            self.expires = effective.1.bound(validity.1.bound(self.expires));
             self.capability(&r.grant, r.registrar, 13, (5, r.deployment))?;
         }
         Ok(())
@@ -233,9 +232,17 @@ impl Context<'_> {
         &mut self,
         reference: &VersionRef,
         requester: Key,
+        current_context: bool,
     ) -> Result<(Voucher, Service, Service)> {
         let r = self.select(166, reference.id)?;
-        ensure!(r.reference == *reference, "route voucher changed");
+        ensure!(
+            r.reference == *reference
+                || current_context
+                    && reference.kind == 166
+                    && reference.generation > 0
+                    && reference.generation < r.reference.generation,
+            "route voucher changed"
+        );
         let v = Voucher::parse(&r.payload)?;
         let (rr, relay) = self.service(v.relay.id, true)?;
         let (dr, destination) = self.service(v.destination.id, true)?;
@@ -517,7 +524,14 @@ pub fn evaluate(
                         old.baseline
                     } else {
                         ensure!(
-                            at >= old.expires
+                            (at >= old.expires
+                                || (old.expires - at <= 60_000
+                                    && *expires > old.expires
+                                    && *connections == old.connections
+                                    && *bytes == old.bytes
+                                    && rr.reference == old.relay
+                                    && dr.reference == old.destination
+                                    && *grant == old.grant))
                                 && old.sponsor == intent.requester
                                 && old.possession == *possession
                                 && old.relay.id == *relay
@@ -525,14 +539,18 @@ pub fn evaluate(
                                 && old.action == *action
                                 && old.scope == *scope
                                 && old.grant.id == grant.id,
-                            "voucher renewal changes ownership or overlaps its old admission"
+                            "voucher renewal changes ownership, limits, or precedes its handover window"
                         );
                         let usage = if state.records.contains_key(&(167, *id)) {
                             Some(Usage::parse(&c.select(167, *id)?.payload)?)
                         } else {
                             None
                         };
-                        Some(usage.map_or((0, 0), |u| (u.connections, u.bytes)))
+                        if at < old.expires {
+                            Some(old.baseline.unwrap_or((0, 0)))
+                        } else {
+                            Some(usage.map_or((0, 0), |u| (u.connections, u.bytes)))
+                        }
                     }
                 } else {
                     None
@@ -552,6 +570,14 @@ pub fn evaluate(
                     creation: intent.digest,
                 };
                 Voucher::parse(&voucher.value())?;
+                if !replay && let Some(previous) = state.records.get(&(166, *id)) {
+                    let previous = Voucher::parse(&previous.payload)?;
+                    ensure!(
+                        at >= previous.expires || voucher.continues(&previous),
+                        "early route replacement changes live authority or usage baseline"
+                    );
+                }
+
                 if replay {
                     let old = c.select(166, *id)?;
                     ensure!(
@@ -585,7 +611,11 @@ pub fn evaluate(
                     operation.grant.is_none(),
                     "relay admission uses intrinsic service authority"
                 );
-                let (v, r, d) = c.voucher(voucher, intent.requester)?;
+                let (v, r, d) = c.voucher(
+                    voucher,
+                    intent.requester,
+                    matches!(command, Command::VoucherContext { .. }),
+                )?;
                 let old = if state.records.contains_key(&(167, voucher.id)) {
                     Some(c.select(167, voucher.id)?)
                 } else {
@@ -895,7 +925,7 @@ pub(crate) fn evaluate_read(
                     operation.grant.is_none(),
                     "relay read uses intrinsic authority"
                 );
-                c.voucher(voucher, requester)?;
+                c.voucher(voucher, requester, true)?;
                 if state.records.contains_key(&(167, voucher.id)) {
                     c.select(167, voucher.id)?;
                 }

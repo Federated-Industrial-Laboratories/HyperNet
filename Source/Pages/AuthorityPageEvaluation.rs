@@ -378,7 +378,7 @@ pub fn evaluate(
                     0,
                 )?;
                 c.dependencies.push(registration.reference);
-                c.expires = c.expires.min(registration.validity.1);
+                c.expires = registration.validity.1.bound(c.expires);
                 if state.records.contains_key(&(148, *application)) {
                     c.select(148, *application)?;
                 }
@@ -692,9 +692,8 @@ pub fn evaluate(
                                 "media asset exceeds selected host maximum"
                             );
                             host_capacities.push((host, h.profile.state_bytes));
-                            expires = expires
-                                .min(h.profile.manifest.validity.1)
-                                .min(at.saturating_add(h.profile.retention_ms));
+                            expires = h.profile.manifest.validity.1.bound(expires);
+                            expires = expires.min(at.saturating_add(h.profile.retention_ms));
                             hosts.push(record.reference);
                         }
                         sorted(&mut hosts)?;

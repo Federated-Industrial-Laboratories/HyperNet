@@ -445,7 +445,7 @@ impl Fixture {
         manifest.generation += 1;
         manifest.previous_profile = Some(wire::digest(&old.manifest.desired().unwrap()));
         manifest.previous_consent = Some(wire::digest(&old.manifest.unsigned_consent(0).unwrap()));
-        manifest.validity.1 += 10000;
+        manifest.validity.1 = (manifest.validity.1.finite().unwrap() + 10000).into();
         let consent = wire::sign_envelope(
             &manifest.unsigned_consent(0).unwrap(),
             &deployment::key(operator),
@@ -1248,3 +1248,61 @@ fn fresh_route_reads_match_ordered_checks_without_consuming_voucher() {
 
 #[path = "ApplicationStreamsTests.rs"]
 mod application_stream_tests;
+
+#[test]
+fn early_handover_preserves_existing_charge_and_current_context_without_reopening_old_credentials()
+{
+    let mut f = Fixture::new();
+    f.register();
+    let old = f.issue(2, 2 * CHARGE);
+    f.apply(Fixture::permit(&old, 210), 160, None);
+    let old_voucher = Voucher::parse(&f.state.record(166, old.id).unwrap().payload).unwrap();
+    let usage = f.state.record(167, old.id).unwrap().clone();
+    let mut renewal = f.issue_command(2, 2 * CHARGE);
+    if let Command::Issue { expires, .. } = &mut renewal {
+        *expires = 19000;
+    }
+    let renewed = f.request_at(renewal, 5, Some(f.reader.clone()), 10000).2;
+    assert_eq!(renewed.code, 0);
+    f.state = renewed.state.unwrap();
+    let current = f.state.record(166, old.id).unwrap().reference.clone();
+    let replacement = Voucher::parse(&f.state.record(166, old.id).unwrap().payload).unwrap();
+    assert!(replacement.continues(&old_voucher));
+    assert_eq!(
+        f.state.record(167, old.id).unwrap().reference,
+        usage.reference
+    );
+    assert_eq!(
+        f.request_at(
+            Command::VoucherContext {
+                voucher: old.clone()
+            },
+            160,
+            None,
+            10000
+        )
+        .2
+        .code,
+        0
+    );
+    assert_ne!(
+        f.request_at(Fixture::permit(&old, 211), 160, None, 10000)
+            .2
+            .code,
+        0
+    );
+    let allowed = f
+        .request_at(Fixture::permit(&current, 212), 160, None, 10000)
+        .2;
+    assert_eq!(allowed.code, 0);
+    f.state = allowed.state.unwrap();
+    assert_ne!(
+        f.request_at(Fixture::permit(&current, 213), 160, None, 10000)
+            .2
+            .code,
+        0
+    );
+    let mut changed = replacement.clone();
+    changed.possession = public(201);
+    assert!(!changed.continues(&old_voucher));
+}

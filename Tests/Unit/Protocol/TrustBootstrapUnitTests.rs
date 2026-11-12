@@ -58,7 +58,7 @@ fn fixture() -> (Vec<u8>, Vec<SigningKey>) {
             admission_domain: "15".repeat(32),
             assurance: Assurance::Independent,
             not_before_ms: 50,
-            expires_ms: 1000,
+            expires_ms: 1000.into(),
         },
     };
     (

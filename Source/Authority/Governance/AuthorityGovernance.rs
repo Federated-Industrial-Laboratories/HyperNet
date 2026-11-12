@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Grant chains supply one restriction; they never replace object, consent or route checks.
+use crate::trust_validity::{End, Validity};
 use crate::{
     authority_proof::{Digest, Key, VersionRef},
     trust_wire::{self as wire, Value as V},
@@ -63,11 +64,8 @@ fn limits(value: &V) -> Result<Limits> {
     let f = value.array(4)?;
     Ok([f[0].uint()?, f[1].uint()?, f[2].uint()?, f[3].uint()?])
 }
-fn validity(value: &V) -> Result<(u64, u64)> {
-    let f = value.array(2)?;
-    let span = (f[0].uint()?, f[1].uint()?);
-    ensure!(span.0 < span.1, "invalid grant validity");
-    Ok(span)
+fn validity(value: &V) -> Result<Validity> {
+    Validity::parse(value)
 }
 fn within(child: Limits, parent: Limits) -> bool {
     child.iter().zip(parent).all(|(a, b)| *a <= b)
@@ -102,6 +100,39 @@ fn snapshot(value: &V) -> Result<()> {
     crate::authority_proof::validate_versions(&refs, 64)
 }
 
+/// Version two policy roots may explicitly extend one exact bootstrap grant.
+pub fn policy_roots(fields: &[V]) -> Result<Vec<(Digest, Option<VersionRef>)>> {
+    ensure!(
+        fields.len() == 17 && matches!(fields[1].uint()?, 1 | 2),
+        "unsupported policy schema"
+    );
+    let roots = fields[15]
+        .list(16)?
+        .iter()
+        .map(|entry| {
+            if let V::Bytes(_) = entry {
+                return Ok((id(entry)?, None));
+            }
+            ensure!(
+                fields[1].uint()? == 2,
+                "persistent root requires policy version two"
+            );
+            let f = entry.array(2)?;
+            let root = reference(&f[0])?;
+            ensure!(
+                root.kind == 102 && End::parse(&f[1])? == End::UntilWithdrawn,
+                "persistent root must pin an exact grant and UntilWithdrawn"
+            );
+            Ok((root.id, Some(root)))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ensure!(
+        !roots.is_empty() && roots.windows(2).all(|p| p[0].0 < p[1].0),
+        "invalid root grant set"
+    );
+    Ok(roots)
+}
+
 #[derive(Clone)]
 struct Record {
     reference: VersionRef,
@@ -131,7 +162,7 @@ impl Record {
         };
         let f = decoded.array(arity)?;
         ensure!(
-            (f[1].uint()? == 1 || kind == 127 && f[1].uint()? == 2)
+            (f[1].uint()? == 1 || matches!(kind, 100 | 127) && f[1].uint()? == 2)
                 && id(&f[2])? == network
                 && id(&f[3])? == incarnation
                 && f[4].uint()? > 0,
@@ -179,11 +210,7 @@ impl Record {
                     f[14].boolean()?,
                     "unscoped automated review is not supported"
                 );
-                let roots = f[15].list(16)?.iter().map(id).collect::<Result<Vec<_>>>()?;
-                ensure!(
-                    !roots.is_empty() && roots.windows(2).all(|p| p[0] < p[1]),
-                    "invalid root grant set"
-                );
+                policy_roots(f)?;
             }
             101 => {
                 ensure!(
@@ -244,7 +271,7 @@ impl Record {
                     application != owner
                         && (f[1].uint()? == 1 || f[4].uint()? > 1)
                         && reference(&f[8])?.kind == 102
-                        && span.1 - span.0 <= 7 * 24 * 60 * 60 * 1000,
+                        && span.bounded_duration(7 * 24 * 60 * 60 * 1000),
                     "invalid application admission"
                 );
             }
@@ -464,9 +491,12 @@ impl Governance {
         };
         let policy = result.record(100, network)?;
         result.exact(&reference(&policy.fields[12])?)?;
-        for root in policy.fields[15].list(16)? {
-            let grant = result.record(102, id(root)?)?;
+        for (root, extended) in policy_roots(&policy.fields)? {
+            let grant = result.record(102, root)?;
             grant.fields[13].null()?;
+            if let Some(exact) = extended {
+                result.exact(&exact)?;
+            }
         }
         ensure!(
             result.records.keys().filter(|(k, _)| *k == 101).count() <= 256,
@@ -497,7 +527,7 @@ impl Governance {
                     && grant.fields[14].uint()? == 0
                     && !actions(&grant.fields[10])?.contains(&11)
                     && (if application.fields[1].uint()? == 2 {
-                        let parent_span = validity(&parent.fields[12])?;
+                        let parent_span = result.grant_validity(parent.reference.id)?;
                         span.0 >= parent_span.0 && span.1 <= parent_span.1
                     } else {
                         span.0 >= grant_span.0 && span.1 <= grant_span.1
@@ -543,6 +573,25 @@ impl Governance {
     pub fn record_bytes(&self, kind: u64, id: Digest) -> Result<&[u8]> {
         Ok(&self.record(kind, id)?.bytes)
     }
+    /// Only explicit root policy or accepted application renewal changes declared validity.
+    pub fn grant_validity(&self, grant: Digest) -> Result<Validity> {
+        let record = self.record(102, grant)?;
+        let mut span = validity(&record.fields[12])?;
+        if let Some(application) = self.records.get(&(127, record.fields[8].fixed()?))
+            && application.fields[1].uint()? == 2
+            && reference(&application.fields[8])? == record.reference
+        {
+            span = validity(&application.fields[9])?;
+        }
+        if record.fields[13] == V::Null
+            && policy_roots(&self.record(100, self.network)?.fields)?
+                .iter()
+                .any(|(_, extended)| extended.as_ref() == Some(&record.reference))
+        {
+            span.1 = End::UntilWithdrawn;
+        }
+        Ok(span)
+    }
     pub fn versions(&self) -> Vec<VersionRef> {
         self.records.values().map(|r| r.reference.clone()).collect()
     }
@@ -551,13 +600,13 @@ impl Governance {
         subject: Key,
         t: u64,
         dependencies: &mut BTreeMap<(u64, Digest), VersionRef>,
-    ) -> Result<(u64, u64)> {
+    ) -> Result<Validity> {
         let policy = self.record(100, self.network)?;
         // Only exact root subjects receive the descriptor's initial governance admission.
-        for root in policy.fields[15].list(16)? {
-            let grant = self.record(102, id(root)?)?;
+        for (root, _) in policy_roots(&policy.fields)? {
+            let grant = self.record(102, root)?;
             if grant.fields[8].fixed::<32>()? == subject {
-                return Ok((0, u64::MAX));
+                return Ok(Validity(0, End::UntilWithdrawn));
             }
         }
         if let Some(application) = self.records.get(&(127, subject)) {
@@ -633,9 +682,9 @@ impl Governance {
             }
             if root {
                 ensure!(
-                    self.record(100, self.network)?.fields[15]
-                        .list(16)?
-                        .contains(&V::Bytes(cursor.to_vec())),
+                    policy_roots(&self.record(100, self.network)?.fields)?
+                        .iter()
+                        .any(|(id, _)| *id == cursor),
                     "grant root is not accepted by current governance"
                 );
                 return Ok(());
@@ -690,11 +739,10 @@ impl Governance {
             (policy.reference.index(), policy.reference.clone()),
             (recovery.reference.index(), recovery.reference.clone()),
         ]);
-        let roots = policy.fields[15]
-            .list(16)?
-            .iter()
-            .map(id)
-            .collect::<Result<Vec<_>>>()?;
+        let roots = policy_roots(&policy.fields)?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
         let mut effective = limits(&policy.fields[13])?;
         let mut expiry = u64::MAX;
         let mut start = 0;
@@ -726,7 +774,7 @@ impl Governance {
             {
                 validity(&application.fields[9])?
             } else {
-                validity(&g[12])?
+                self.grant_validity(current.reference.id)?
             };
             if tier.reference == pinned_tier {
                 ensure!(
@@ -796,7 +844,7 @@ impl Governance {
                 effective[i] = effective[i].min(gl[i]).min(tl[i]);
             }
             start = start.max(span.0).max(admission.0);
-            expiry = expiry.min(span.1).min(admission.1);
+            expiry = span.1.bound(admission.1.bound(expiry));
             dependencies.insert(current.reference.index(), current.reference.clone());
             dependencies.insert(tier.reference.index(), tier.reference.clone());
             if g[13] == V::Null {
@@ -826,11 +874,8 @@ impl Governance {
         anyhow::bail!("grant root is absent")
     }
 }
-fn conservative(t: u64, span: (u64, u64)) -> bool {
-    t.checked_sub(UNCERTAINTY_MS)
-        .is_some_and(|lower| lower >= span.0)
-        && t.checked_add(UNCERTAINTY_MS)
-            .is_some_and(|upper| upper < span.1)
+fn conservative(t: u64, span: impl Into<Validity>) -> bool {
+    span.into().current(t, UNCERTAINTY_MS)
 }
 
 #[cfg(test)]

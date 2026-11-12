@@ -31,7 +31,7 @@ impl Registration {
             b(&self.binding),
             limits_value(self.limits),
             V::Uint(SLOTS),
-            a(vec![V::Uint(self.validity.0), V::Uint(self.validity.1)]),
+            a(vec![V::Uint(self.validity.0), self.validity.1.value()]),
         ]))
     }
 }

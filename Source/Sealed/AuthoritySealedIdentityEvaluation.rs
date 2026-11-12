@@ -159,7 +159,7 @@ impl Context<'_> {
         let admitted =
             super::current_member(&self.governance, self.state.network, member, self.at)?;
         self.dependencies.extend(admitted.dependencies);
-        self.expires = self.expires.min(admitted.expires_ms);
+        self.expires = admitted.expires_ms.bound(self.expires);
         Ok(admitted.key)
     }
     fn active_root(&mut self, r: &VersionRef) -> Result<Root> {

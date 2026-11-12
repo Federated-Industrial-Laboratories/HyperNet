@@ -80,7 +80,7 @@ impl page::Evaluation<'_> {
             None,
             0,
         )?;
-        self.expires = self.expires.min(validity.1);
+        self.expires = validity.1.bound(self.expires);
         Ok(())
     }
     pub(super) fn federation_bridge(

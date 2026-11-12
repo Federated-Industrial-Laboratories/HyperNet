@@ -28,7 +28,7 @@ struct Configuration {
     maximum_bytes: u64,
     duration_ms: u64,
     idle_ms: u64,
-    expires_ms: u64,
+    expires_ms: crate::trust_validity::End,
 }
 pub(crate) fn configuration(manifest: &Manifest, profile: &RegisteredProfile) -> Result<Vec<u8>> {
     let role = manifest
@@ -334,13 +334,12 @@ pub(super) fn start(p: &Profile, s: &mut State) -> Result<()> {
         .manifest
         .validity
         .1
-        .checked_sub(
+        .remaining(
             files::now()?
                 .checked_mul(1000)
                 .context("egress time overflow")?,
-        )
-        .context("egress consent expired")?
-        .div_ceil(1000);
+        )?
+        .map(|remaining| remaining.div_ceil(1000));
     let profile = crate::authority_domains::routes::RegisteredProfile::parse(
         &files::read(&p.root.join("Config/RouteProfile.cbor"), wire::MAXIMUM)?,
         p.manifest.network,
@@ -378,7 +377,6 @@ pub(super) fn start(p: &Profile, s: &mut State) -> Result<()> {
         &format!("--pids-limit={}", role.pids / 4),
         &format!("--cpu-period={}", role.cpu_period),
         &format!("--cpu-quota={}", role.cpu_quota / 4),
-        &format!("--timeout={remaining}"),
         "--stop-timeout=15",
         "--log-driver=k8s-file",
         "--log-opt=max-size=1mb",
@@ -414,6 +412,9 @@ pub(super) fn start(p: &Profile, s: &mut State) -> Result<()> {
         false,
         true,
     );
+    if let Some(remaining) = remaining {
+        args.push(format!("--timeout={remaining}"));
+    }
     args.extend([p.image()?, "private-route-egress".into()]);
     s.egress = Some(Resource {
         kind: "container".into(),

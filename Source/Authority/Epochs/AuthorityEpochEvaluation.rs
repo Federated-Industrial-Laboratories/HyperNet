@@ -177,10 +177,10 @@ pub(super) fn evaluate(
                     expected: &[],
                 },
             )?;
-            out.expires = out
-                .expires
-                .min(manifest.validity.1)
-                .min(registrar.expires_ms);
+            out.expires = manifest
+                .validity
+                .1
+                .bound(out.expires.min(registrar.expires_ms));
             dependencies.extend(registrar.dependencies);
             dependencies.extend([
                 registration.reference.clone(),

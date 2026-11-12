@@ -159,7 +159,7 @@ pub(crate) fn manifest() -> Manifest {
         operator: public(90),
         bootstrap_digest: [62; 32],
         software_digest: [63; 32],
-        validity: (1000, 20000),
+        validity: (1000, 20000).into(),
         session_mode: 0,
         roles,
         volumes: volumes.clone(),
@@ -237,7 +237,23 @@ impl Fixture {
     pub fn with_actions(administrator_actions: Vec<u64>) -> Self {
         Self::with_network(administrator_actions, N, I)
     }
+    pub fn persistent() -> Self {
+        Self::with_end(
+            vec![0, 10, 11, 12, 13, 26],
+            N,
+            I,
+            crate::trust_validity::End::UntilWithdrawn,
+        )
+    }
     pub fn with_network(administrator_actions: Vec<u64>, n: Key, i: Key) -> Self {
+        Self::with_end(administrator_actions, n, i, 900000.into())
+    }
+    fn with_end(
+        administrator_actions: Vec<u64>,
+        n: Key,
+        i: Key,
+        end: crate::trust_validity::End,
+    ) -> Self {
         let mut voters = (1..=4).map(hex).collect::<Vec<_>>();
         voters.sort();
         let mut recoveries = (6..=8).collect::<Vec<_>>();
@@ -277,7 +293,7 @@ impl Fixture {
                 admission_domain: "15".repeat(32),
                 assurance: Assurance::Independent,
                 not_before_ms: 500,
-                expires_ms: 900000,
+                expires_ms: end,
             },
         };
         let draft = bootstrap::draft(spec, [n, i, [22; 32], [23; 32]], 1000).unwrap();
@@ -313,7 +329,14 @@ impl Fixture {
             reference(&tier),
             a(vec![V::Uint(13)]),
             a(vec![a(vec![V::Uint(5), b(&DEPLOYMENT)])]),
-            a(vec![V::Uint(1000), V::Uint(800000)]),
+            a(vec![
+                V::Uint(1000),
+                if end == crate::trust_validity::End::UntilWithdrawn {
+                    end.value()
+                } else {
+                    V::Uint(800000)
+                },
+            ]),
             reference(&root),
             V::Uint(0),
             a(vec![
@@ -995,7 +1018,7 @@ fn expired_operational_successor_preserves_history_without_serving_authority() {
     next.generation = 2;
     next.previous_profile = Some(wire::digest(&initial.manifest.desired().unwrap()));
     next.previous_consent = Some(wire::digest(&initial.manifest.unsigned_consent(0).unwrap()));
-    next.validity = (1000, 4000);
+    next.validity = (1000, 4000).into();
     let consent = wire::sign_envelope(&next.unsigned_consent(0).unwrap(), &key(90)).unwrap();
     let next = Offer::parse(&next.encode().unwrap(), &consent, &a(vec![])).unwrap();
     let prepare = |offer: &Offer, refs: &[VersionRef], historical: bool| {
@@ -1051,7 +1074,7 @@ fn expired_operational_successor_preserves_history_without_serving_authority() {
     fresh.generation = 3;
     fresh.previous_profile = Some(wire::digest(&next.manifest.desired().unwrap()));
     fresh.previous_consent = Some(wire::digest(&next.manifest.unsigned_consent(0).unwrap()));
-    fresh.validity = (3500, 800000);
+    fresh.validity = (3500, 800000).into();
     let consent = wire::sign_envelope(&fresh.unsigned_consent(0).unwrap(), &key(90)).unwrap();
     let fresh = Offer::parse(&fresh.encode().unwrap(), &consent, &a(vec![])).unwrap();
     let (intent, operation) = prepare(&fresh, &historical.dependencies, false);

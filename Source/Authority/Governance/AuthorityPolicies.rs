@@ -42,7 +42,7 @@ pub fn record_reference(
     ensure!(
         matches!(kind, 100 | 114)
             && f[0].uint()? == kind
-            && f[1].uint()? == 1
+            && (f[1].uint()? == 1 || kind == 100 && f[1].uint()? == 2)
             && f[2].fixed::<32>()? == network
             && f[3].fixed::<32>()? == incarnation
             && f[4].uint()? > 0,
@@ -346,15 +346,9 @@ pub fn custody_dependencies(
             .context("new recovery custodian must be an enrolled principal")?;
         let value = wire::decode(bytes)?;
         let f = value.array(12)?;
-        let span = f[8].array(2)?;
+        let span = crate::trust_validity::Validity::parse(&f[8])?;
         ensure!(
-            !f[9].boolean()?
-                && at
-                    .checked_sub(crate::authority_governance::UNCERTAINTY_MS)
-                    .is_some_and(|t| span[0].uint().is_ok_and(|start| t >= start))
-                && at
-                    .checked_add(crate::authority_governance::UNCERTAINTY_MS)
-                    .is_some_and(|t| span[1].uint().is_ok_and(|end| t < end)),
+            !f[9].boolean()? && span.current(at, crate::authority_governance::UNCERTAINTY_MS),
             "new recovery custodian membership is expired or revoked"
         );
         dependencies.push(
@@ -437,7 +431,27 @@ pub fn authorise(
             return Ok(decision);
         }
     };
+    // Widening requires the exact root to remain current and unrevoked before commit.
+    // Replays are historical observations and cannot grant a new extension.
+    let next_policy = wire::decode(&operation.policy)?;
+    let next_roots = crate::authority_governance::policy_roots(next_policy.array(17)?)?;
+    let old_policy = wire::decode(&operation.previous_policy)?;
+    let old_roots = crate::authority_governance::policy_roots(old_policy.array(17)?)?;
+    for (root, extension) in &next_roots {
+        if extension.is_some()
+            && !old_roots.contains(&(*root, extension.clone()))
+            && (!old_roots.iter().any(|(id, _)| id == root)
+                || !permission
+                    .grant_validity(*root)?
+                    .current(at, crate::authority_governance::UNCERTAINTY_MS)
+                || permission.revoked_chain(*root)?)
+        {
+            decision.code = 7;
+            return Ok(decision);
+        }
+    }
     let mut expected = cap.dependencies.clone();
+    expected.extend(next_roots.iter().filter_map(|(_, root)| root.clone()));
     expected.push(record_reference(
         &operation.previous_recovery,
         intent.network,

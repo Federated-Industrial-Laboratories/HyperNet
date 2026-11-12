@@ -91,12 +91,12 @@ pub(super) fn exchange(p: &Profile, s: &mut State, packet: &Path, receipt: &Path
             p.manifest
                 .validity
                 .1
-                .checked_sub(
+                .remaining(
                     files::now()?
                         .checked_mul(1000)
                         .context("bridge wall time overflow")?,
-                )
-                .context("bridge consent expired")?
+                )?
+                .unwrap_or(60_000)
                 .div_ceil(1000)
         } else {
             30

@@ -30,7 +30,7 @@ fn profile(c: &mut Evaluation<'_>, p: &Profile) -> Result<()> {
         "backup deployment is expired, withdrawn or changed"
     );
     c.dependencies.extend([r.reference, r.profile, r.consent]);
-    c.expires = c.expires.min(r.manifest.validity.1);
+    c.expires = r.manifest.validity.1.bound(c.expires);
     c.capability(
         &r.grant,
         r.registrar,

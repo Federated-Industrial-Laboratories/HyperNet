@@ -4,6 +4,20 @@
 impl Renewal {
     pub(crate) fn fixture(voucher: VersionRef, target: Vec<u8>, total_expires: u64) -> Self {
         Self {
+            admitted: routes::Voucher {
+                relay: voucher.clone(),
+                destination: voucher.clone(),
+                sponsor: [1; 32],
+                grant: voucher.clone(),
+                possession: [2; 32],
+                action: 0,
+                scope: (0, [3; 32]),
+                connections: 1,
+                bytes: 1,
+                expires: total_expires,
+                creation: [4; 32],
+                baseline: None,
+            },
             voucher,
             target,
             relay: b"Exact relay envelope".to_vec(),

@@ -571,7 +571,7 @@ pub async fn run(
             accepted=local_listener.accept(), if local_operation.is_none()=> {
                 let (mut stream, _)=accepted?;
                 if stream.peer_cred()?.uid()!=unsafe{libc::geteuid()} { continue; }
-                let duration=Duration::from_millis(config.profile.manifest.validity.1.saturating_sub(client.now()?));
+                let duration=Duration::from_millis(config.profile.manifest.validity.1.remaining(client.now()?)?.unwrap_or(60_000));
                 local_operation=Some(Box::pin(async move {
                     tokio::time::timeout(duration, async {
                         let input=tls::receive(&mut stream).await?;

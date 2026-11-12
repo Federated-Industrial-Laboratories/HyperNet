@@ -12,6 +12,7 @@ use crate::{
 use anyhow::Context;
 #[derive(Clone)]
 pub struct Request {
+    persistent: bool,
     signed: Vec<u8>,
     records: Vec<Vec<u8>>,
     intent: Intent,
@@ -33,6 +34,7 @@ impl Request {
             "activation records are not in canonical order"
         );
         let out = Self {
+            persistent: false,
             signed,
             records,
             intent,
@@ -45,21 +47,88 @@ impl Request {
         let value = wire::decode(bytes)?;
         let f = value.array(5)?;
         ensure!(
-            f[0].uint()? == 200 && f[1].uint()? == 1 && f[2].text()? == "RuntimeActivationRequest",
+            f[0].uint()? == 200
+                && matches!(f[1].uint()?, 1 | 2)
+                && f[2].text()? == "RuntimeActivationRequest",
             "invalid activation package"
         );
-        Self::new(
+        let request = Self::new(
             f[3].bytes()?.to_vec(),
             f[4].list(crate::authority_capacity::MAX_RECORDS)?
                 .iter()
                 .map(|v| Ok(v.bytes()?.to_vec()))
                 .collect::<Result<_>>()?,
-        )
+        )?;
+        if f[1].uint()? == 2 {
+            request.until_withdrawn()
+        } else {
+            Ok(request)
+        }
+    }
+    pub fn persistent(&self) -> bool {
+        self.persistent
+    }
+    /// Reserve a dedicated manager stream for one exact revocable deployment activation.
+    pub fn until_withdrawn(mut self) -> Result<Self> {
+        ensure!(
+            self.intent.generation == 1
+                && self.intent.sequence == 1
+                && self.intent.acknowledged_through == 0,
+            "Persistent activation requires the first intent of a dedicated manager profile"
+        );
+        let governance =
+            Governance::parse(self.intent.network, self.intent.incarnation, &self.records)?;
+        let registration = crate::authority_deployment_records::Registration::parse(
+            governance.record_bytes(129, self.intent.resource)?,
+            self.intent.network,
+            self.intent.incarnation,
+        )?;
+        ensure!(
+            self.intent.requester != registration.registrar
+                && self.intent.requester != registration.operator
+                && !registration
+                    .services
+                    .values()
+                    .any(|key| *key == self.intent.requester),
+            "Persistent activation requires a separate manager identity"
+        );
+        let grant = wire::decode(governance.record_bytes(102, self.operation.grant.id)?)?;
+        let g = grant.array(17)?;
+        ensure!(
+            g[10] == a(vec![V::Uint(26)])
+                && g[11] == a(vec![a(vec![V::Uint(5), b(&self.intent.resource)])])
+                && g[14].uint()? == 0,
+            "Persistent activation requires a non-delegating manager grant scoped only to this deployment"
+        );
+        for reference in &self.intent.expected {
+            let record = wire::decode(governance.record_bytes(reference.kind, reference.id)?)?;
+            let f = record.list(32)?;
+            let index = match reference.kind {
+                102 => Some(12),
+                125 => Some(8),
+                127 => Some(9),
+                105 => Some(16),
+                _ => None,
+            };
+            if let Some(index) = index {
+                ensure!(
+                    (if reference.kind == 102 {
+                        governance.grant_validity(reference.id)?
+                    } else {
+                        crate::trust_validity::Validity::parse(&f[index])?
+                    })
+                    .1 == crate::trust_validity::End::UntilWithdrawn,
+                    "Persistent activation has a finite authority or consent dependency"
+                );
+            }
+        }
+        self.persistent = true;
+        Ok(self)
     }
     pub fn encode(&self) -> Result<Vec<u8>> {
         wire::encode(&a(vec![
             V::Uint(200),
-            V::Uint(1),
+            V::Uint(if self.persistent { 2 } else { 1 }),
             V::Text("RuntimeActivationRequest".into()),
             b(&self.signed),
             a(self.records.iter().map(|v| b(v)).collect()),

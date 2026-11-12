@@ -227,7 +227,7 @@ impl Asset {
         hosts.sort();
         ensure!(
             (out.revision.kind == 155 || out.hosts.iter().map(|r| r.id).eq(hosts))
-                && out.required_copies >= out.manifest.copies.into()
+                && out.required_copies >= u64::from(out.manifest.copies)
                 && out.required_copies <= out.hosts.len() as u64
                 && out.upload_expires_ms > 0
                 && out.upload_expires_ms <= out.expires_ms,

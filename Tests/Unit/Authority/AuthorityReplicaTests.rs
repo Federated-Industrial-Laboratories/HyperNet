@@ -6,7 +6,7 @@ use std::{fs, os::unix::fs::PermissionsExt};
 fn installed_manifest() -> Manifest {
     let mut canonical = crate::runtime_manifest::tests::fixture();
     let now = crate::store::now().unwrap();
-    canonical.validity = (now * 1000, (now + 3600) * 1000);
+    canonical.validity = (now * 1000, (now + 3600) * 1000).into();
     let volume = trust_wire::digest(
         format!("{}/ReplicaState", hex::encode(canonical.deployment)).as_bytes(),
     );
@@ -96,7 +96,7 @@ fn hosting_authorization_refuses_expiry_withdrawal_and_writable_artifacts() {
     fs::write(&path, b"1").unwrap();
     assert!(verify(&manifest).is_err());
     manifest.created -= 5;
-    manifest.expires = crate::store::now().unwrap() - 1;
+    manifest.expires = (crate::store::now().unwrap() - 1).into();
     write_authorization(&directory, &manifest);
     assert!(
         verify(&manifest)
@@ -194,7 +194,7 @@ pub(crate) fn activate_prepared_after_operational_successor(
     successor.generation += 1;
     successor.previous_profile = Some(trust_wire::digest(&original.desired().unwrap()));
     successor.previous_consent = Some(trust_wire::digest(&original.unsigned_consent(0).unwrap()));
-    successor.validity.1 += 10000;
+    successor.validity.1 = (successor.validity.1.finite().unwrap() + 10000).into();
     successor.clock.kernel_boot = "22345678-1234-1234-1234-123456789abc".into();
     successor.successor_of(&original).unwrap();
     let appointed = Manifest::from_canonical(original).unwrap();

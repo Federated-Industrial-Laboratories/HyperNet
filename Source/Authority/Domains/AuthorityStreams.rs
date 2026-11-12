@@ -45,7 +45,7 @@ pub struct Registration {
     pub protocol: String,
     pub binding: Digest,
     pub limits: Limits,
-    pub validity: (u64, u64),
+    pub validity: crate::trust_validity::Validity,
     pub envelope: Vec<u8>,
 }
 impl Registration {
@@ -65,7 +65,7 @@ impl Registration {
                 && id(&f[4])? == i,
             "application service context differs"
         );
-        let span = f[13].array(2)?;
+        let span = crate::trust_validity::Validity::parse(&f[13])?;
         let out = Self {
             id: id(&f[5])?,
             route: version(&f[6])?,
@@ -74,7 +74,7 @@ impl Registration {
             protocol: label(&f[9], 96)?,
             binding: id(&f[10])?,
             limits: limits(&f[11])?,
-            validity: (span[0].uint()?, span[1].uint()?),
+            validity: span,
             envelope: bytes.to_vec(),
         };
         ensure!(
