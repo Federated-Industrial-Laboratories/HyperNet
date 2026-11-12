@@ -33,20 +33,7 @@ impl Read {
         sample: ClockHealth,
         nonce: Digest,
     ) -> Self {
-        let signer = SigningKey::from_bytes(&[1; 32]);
         let scope = store.descriptor().scope();
-        let request = Request::sign(
-            scope,
-            &signer,
-            store.requester(),
-            nonce,
-            store.prefix().height(),
-            Query::PolicyContext,
-        )
-        .unwrap();
-        let challenge = session
-            .issue_read(&request, &signer, nonce, 5000, None, sample)
-            .unwrap();
         let versions = [100, 114]
             .into_iter()
             .map(|kind| VersionRef {
@@ -56,10 +43,64 @@ impl Read {
                 digest: [kind as u8; 32],
             })
             .collect::<Vec<_>>();
+        Self::with_query(
+            store,
+            session,
+            sample,
+            nonce,
+            versions,
+            Query::PolicyContext,
+        )
+    }
+    pub(crate) fn with_versions(
+        store: &Store,
+        session: &mut Session,
+        sample: ClockHealth,
+        versions: Vec<VersionRef>,
+    ) -> Self {
+        let scope = store.descriptor().scope();
+        let query = Query::Domain(crate::authority_domains::Operation {
+            grant: None,
+            command: crate::authority_domains::routes::Command::Lookup { service: [7; 32] }.into(),
+            snapshot: crate::authority_domains::snapshot(&V::Array(vec![
+                V::Array(vec![
+                    V::Uint(scope.epoch),
+                    V::Uint(store.prefix().height()),
+                    b(store.prefix().policy_state()),
+                ]),
+                V::Array(vec![]),
+            ]))
+            .unwrap(),
+        });
+        Self::with_query(store, session, sample, [97; 32], versions, query)
+    }
+    fn with_query(
+        store: &Store,
+        session: &mut Session,
+        sample: ClockHealth,
+        nonce: Digest,
+        versions: Vec<VersionRef>,
+        query: Query,
+    ) -> Self {
+        let action = query.action();
+        let signer = SigningKey::from_bytes(&[1; 32]);
+        let scope = store.descriptor().scope();
+        let request = Request::sign(
+            scope,
+            &signer,
+            store.requester(),
+            nonce,
+            store.prefix().height(),
+            query,
+        )
+        .unwrap();
+        let challenge = session
+            .issue_read(&request, &signer, nonce, 5000, None, sample)
+            .unwrap();
         let value = encoded(vec![
             V::Uint(201),
             V::Uint(1),
-            V::Text("AuthorityPolicyContext".into()),
+            V::Text(action.into()),
             V::Array(
                 versions
                     .iter()
@@ -71,7 +112,7 @@ impl Read {
         let result = encoded(vec![
             V::Uint(24),
             V::Uint(1),
-            V::Text("AuthorityPolicyContext".into()),
+            V::Text(action.into()),
             V::Uint(0),
             V::Uint(0),
             b(&value),

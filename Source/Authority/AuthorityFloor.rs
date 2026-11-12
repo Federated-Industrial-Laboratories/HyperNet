@@ -316,6 +316,38 @@ impl Store {
     pub fn prefix(&self) -> &Prefix {
         &self.floor
     }
+    /// A cache transaction binds the exact independently witnessed durable floor.
+    pub(crate) fn cache_checkpoint(&self) -> Result<Digest> {
+        self.unchanged()?;
+        Ok(self.digest)
+    }
+    pub(crate) fn cache_wall_floor(&self) -> Result<u64> {
+        self.unchanged()?;
+        Ok(self.stored.wall_floor_ms)
+    }
+    /// The original certified result authenticates repair bytes, not current permission.
+    pub(crate) fn retained_cache_body(&self) -> Result<Option<OperationResult>> {
+        self.unchanged()?;
+        let Some(ordinary) = self
+            .stored
+            .tracker
+            .ordinary
+            .as_ref()
+            .filter(|o| o.body_saved)
+        else {
+            return Ok(None);
+        };
+        if ordinary.request()?.action != "AuthorityDomain" {
+            return Ok(None);
+        }
+        check_body(&self.directory, &self.stored)?;
+        Ok(Some(OperationResult::parse(&files::read_at(
+            &self.directory,
+            OsStr::new(BODY),
+            wire::MAXIMUM,
+            true,
+        )?)?))
+    }
     pub fn generations(&self) -> &[VersionRef] {
         &self.stored.generations
     }

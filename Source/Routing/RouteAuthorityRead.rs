@@ -151,6 +151,7 @@ impl Client<'_> {
         command: DomainCommand,
         challenge_ceiling: Option<u64>,
     ) -> Result<PreparedRead> {
+        self.disk.recover(&self.store)?;
         ensure!(
             matches!(
                 command,
@@ -249,6 +250,7 @@ impl Client<'_> {
             ..
         } = exchange;
         let outcome = (|| {
+            self.disk.recover(&self.store)?;
             self.active.check(self.guard)?;
             transport::remaining(deadline)?;
             require_read_idle(&self.store, ReadPendingStage::Finish)?;
@@ -322,14 +324,17 @@ impl Client<'_> {
             let candidate = candidate.context("fresh Route permit omitted verified context")?;
             transport::remaining(deadline)?;
             let (value, consumed) = observe_acceptance(&mut trace, || {
+                self.disk
+                    .stage(candidate.state, candidate.records, &self.store)?;
                 self.store.accept_read_consumed(
                     verified,
                     &mut self.session,
                     self.guard.health()?,
                     0,
-                    |_, _| {
+                    |_, store| {
                         self.active.check(self.guard)?;
-                        self.disk.publish(candidate.state, candidate.records)?;
+                        self.disk.recover(store)?;
+                        self.disk.check(store)?;
                         self.active.check(self.guard)?;
                         transport::remaining(deadline)?;
                         Ok(candidate.value)

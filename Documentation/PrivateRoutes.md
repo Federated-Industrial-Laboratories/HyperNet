@@ -163,6 +163,63 @@ require another disk replacement. Changed metadata and every new spent connectio
 still require durable publication. A failed replacement cannot count as a saved
 copy or suppress the next write.
 
+The spent-connection ledger admits at most 32,768 identifiers, subject to the
+separate signed metadata byte budget. Its local version 2 format uses arrays of
+at most 4,096 entries; network message bounds are unchanged. Version 1 caches
+remain readable and migrate on the next successful write. An earlier binary
+cannot read the version 2 cache. Do not restore an older cache to downgrade:
+that would remove replay protection for later connections.
+
+Before accepting either an ordinary domain result or a fresh read, the service
+persists changed candidate bytes in `RouteCachePending.cbor`. Identical durable
+bytes need no journal. Only exact
+record bytes authenticated by the retained requester floor can complete that
+publication. Startup resolves the candidate before checking or using the cache.
+If the floor did not advance, the unchanged prior cache remains selected. If it
+advanced, recovery publishes the authenticated candidate. An interrupted cache
+replacement can be retried. Missing, conflicting or unauthenticated records stop
+recovery; deleting the cache or lowering an authority floor is not a repair.
+Recovery restores metadata only and grants no live forwarding permission.
+
+The candidate retains every unexpired spent identifier. Cache publication prunes
+only identifiers whose expiry is at or below the already durable authority wall
+floor. New connection admission also prunes expired identifiers at its checked
+clock observation. Capacity or disk failure refuses the operation before any
+new destination bytes are released. Connection admission reserves one quarter of
+its metadata budget, capped at 256 KiB, plus 256 bytes for a later metadata update
+and its journal. An update larger than the remaining budget still refuses before
+its floor advances. The journal must fit the same per-file
+metadata allowance as the cache. Budget disk space for the old cache, journal
+and atomic replacement while publication is in progress.
+
+For a stopped, initialised role 5 service, inspect or repair through the native
+runtime using its normal deployment directory:
+
+```sh
+HyperNet runtime services stop --directory /private/relay
+HyperNet runtime services route-cache --directory /private/relay
+HyperNet runtime services route-cache --directory /private/relay --repair
+```
+
+Inspection reports bounded counts, authentication, stale records and whether the
+retained original domain result can repair them. It does not replace route cache
+bytes. `--repair` first completes any staged publication. For older interrupted
+publications without a journal, it replaces stale records only when the retained
+certified original result contains bytes matching the exact current floor.
+It preserves other cached records, native key reservations and live replay IDs.
+A missing proof, conflicting digest, backward generation or changed cache refuses
+repair. An absent cache is never recreated by this command.
+
+Legacy repair saves `RouteState.before-repair.cbor` privately beside the cache
+before its atomic replacement. A different existing backup is not overwritten.
+Retain that backup for diagnosis; restoring it is not an authorised rollback.
+The stopped helper runs in the exact consented image with no network and no
+application mount. It requires valid local consent and the normal local clock
+observation. It cannot activate the service, change requester floors or issue
+permission. Existing authenticated requester-transaction recovery may complete
+when that retained journal is opened. Start the service separately using its
+normal activation request after inspection succeeds.
+
 Queue time counts against the original admission deadline; excess connections
 close. Fixed-category, bounded diagnostics distinguish capacity refusal, TLS or
 request rejection, authority admission, admitted permission expiry, unavailable

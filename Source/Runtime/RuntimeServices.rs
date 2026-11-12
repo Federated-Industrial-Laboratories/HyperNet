@@ -94,6 +94,13 @@ pub enum Command {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Inspect certified route cache state; --repair completes authenticated stopped recovery.
+    RouteCache {
+        #[command(flatten)]
+        location: Location,
+        #[arg(long)]
+        repair: bool,
+    },
     Stop(Location),
     Withdraw(Location),
     /// Export the latest signed activation report; this is not a readiness assertion.
@@ -557,6 +564,7 @@ pub fn run(command: Command) -> Result<Value> {
                 | Command::Withdraw(l) => l,
                 Command::Exchange { location, .. }
                 | Command::Consent { location, .. }
+                | Command::RouteCache { location, .. }
                 | Command::RequesterStatus { location, .. }
                 | Command::RequesterFence { location, .. }
                 | Command::ActivationReceipt { location, .. }
@@ -590,6 +598,7 @@ pub fn run(command: Command) -> Result<Value> {
                     setup::consent(&p, &mut s, &profile_digest)
                 }
                 Command::Status(_) => control::status(&p, &mut s),
+                Command::RouteCache { repair, .. } => control::route_cache(&p, &mut s, repair),
                 Command::RequesterStatus { output, .. } => {
                     control::requester(&p, &mut s, None, &output)
                 }

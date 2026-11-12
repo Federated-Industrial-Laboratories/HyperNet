@@ -271,3 +271,12 @@ quorum, recipient floors, finite consent and actual pinned monitor boot. Managed
 startup grants no permission by itself. Use `managed status` and `managed disable`
 to inspect or stop automatic operation. A stale request or unavailable quorum
 leaves the service stopped; export a current request and explicitly enable it again.
+
+### Inspect or repair a stopped private route cache
+
+`runtime services route-cache --directory DIR` reports the retained route cache
+without replacing cache bytes. Add `--repair` to complete authenticated forward
+recovery while the role 5 service is stopped. The helper uses the exact installed
+image, private state mount and existing consent; it opens no network listener.
+See [Private routes](PrivateRoutes.md) for replay capacity, migration, proof
+requirements and the private backup retained by legacy repair.

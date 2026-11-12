@@ -218,6 +218,11 @@ enum Command {
     #[command(hide = true)]
     RuntimeServiceRequesterStatus,
     #[command(hide = true)]
+    RuntimeServiceRouteCache {
+        #[arg(long)]
+        repair: bool,
+    },
+    #[command(hide = true)]
     RuntimeServiceRequesterFence,
     #[command(hide = true)]
     RuntimeServiceEpoch {
@@ -288,6 +293,7 @@ fn run() -> Result<()> {
         }
         Command::RuntimeServiceVerify => runtime_service_entry::verify_existing()?,
         Command::RuntimeServiceReceipt => runtime_service_entry::receipt()?,
+        Command::RuntimeServiceRouteCache { repair } => runtime_service_entry::route_cache(repair)?,
         Command::RuntimeServiceRequesterStatus => runtime_service_entry::bridge_requester(false)?,
         Command::RuntimeServiceRequesterFence => runtime_service_entry::bridge_requester(true)?,
         Command::RuntimeServiceEpoch { command } => {
