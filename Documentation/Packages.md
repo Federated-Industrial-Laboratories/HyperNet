@@ -150,3 +150,27 @@ installation's managed files. Profiles, certificates, durable state, lifecycle
 locks and loaded OCI images remain. Remove an image separately only after all
 other installations and profiles have stopped using its immutable ID. Installation
 prefixes must never be used for application data or profile directories.
+
+## Install before container hosting
+
+`Install --defer-image-load` verifies and installs the complete signed package,
+including its OCI archive, and retains the same signed update floor. It does not
+invoke Podman. This allows a joining client to install the coordinated native
+tools before container hosting is needed. Ordinary `Install` still imports and
+checks the image by default.
+
+When hosting is requested, import the installed image explicitly:
+
+```sh
+python3 /Trusted/HyperNet/Tools/Bundle.py LoadInstalledImage \
+  --prefix /Private/HyperNetCurrent --public-key /Trust/Publisher.pub \
+  --trust-directory /Private/HyperNetTrust \
+  --policy /Trust/Target.json --policy-signature /Trust/Target.json.sig
+```
+
+This operation verifies every installed file and requires the exact retained,
+currently valid signed target. It imports a private authenticated image copy and
+checks its immutable ID and platform. Modified files, expired targets and rollback
+are refused before import. It preserves update floors and creates no network or
+hosting consent. Repeating it may load the same immutable image again; it does
+not authorise a different image or activate a service.

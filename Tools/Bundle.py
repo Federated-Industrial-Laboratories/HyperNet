@@ -21,7 +21,7 @@ sys.dont_write_bytecode = True
 import PackageTrust
 
 PRODUCT = 'HyperNet'
-VERSION = '0.10.4'
+VERSION = '0.11.0'
 NAMESPACE = 'HyperNetBundle1'
 PRINCIPAL = 'HyperNetPublisher'
 MAX_ARCHIVE = 512 * 1024 * 1024
@@ -379,8 +379,9 @@ def install_current(args, admission):
         runtime_matches(manifest)
         admission.check(archive, manifest, original, temporary)
         require((staged / 'ImageId.txt').read_text().strip() == manifest['metadata']['imageId'], 'Packaged image ID differs from the manifest')
-        run(['podman', 'load', '--input', str(staged / manifest['metadata']['imageArchive'])])
-        image_matches(manifest)
+        if not getattr(args, 'defer_image_load', False):
+            run(['podman', 'load', '--input', str(staged / manifest['metadata']['imageArchive'])])
+            image_matches(manifest)
         (staged / 'Manifest.json').write_bytes(original)
         (staged / 'Manifest.json').chmod(0o600)
         (staged / 'Package').mkdir(mode=0o700)
@@ -470,6 +471,33 @@ def inspect_installed_target(args):
             'targetDigest': inspection.target_digest,
             **{name: inspection.target[name] for name in
                ('notBefore', 'expires', 'rootGeneration', 'rootPin', 'sequence')}}
+
+
+def load_installed_image(args):
+    """Import the authenticated installed image without changing package trust."""
+    require(os.geteuid() != 0, 'Load for the dedicated rootless operator, not root')
+    with PackageTrust.Admission(sys.modules[__name__], args) as admission:
+        manifest = installed_manifest(args, admission)[0]
+        require(admission.target['sequence'] == admission.trust['sequence']
+                and admission.target_digest == admission.trust['targetDigest'],
+                'Image loading requires the exact retained installed target')
+        runtime_matches(manifest)
+        name = manifest['metadata']['imageArchive']
+        expected = next(entry for entry in manifest['files'] if entry['path'] == name)
+        with tempfile.TemporaryDirectory(prefix='HyperNetImage') as temporary_name:
+            snapshot = Path(temporary_name) / 'Image.tar'
+            copy_private(Path(args.prefix) / name, snapshot, MAX_FILE)
+            require(snapshot.stat().st_size == expected['size']
+                    and digest_file(snapshot) == expected['sha256'],
+                    'Installed image changed before loading')
+            admission.fresh()
+            run(['podman', 'load', '--input', str(snapshot)])
+            image_matches(manifest)
+            admission.fresh()
+        return {'product': PRODUCT, 'version': manifest['version'],
+                'imageId': manifest['metadata']['imageId'], 'imageLoaded': True,
+                'targetDigest': admission.target_digest,
+                'trustDigest': PackageTrust.digest(sys.modules[__name__], admission.trust)}
 
 
 def remove(args):
@@ -563,13 +591,15 @@ def main():
             option.add_argument('--trust-directory', required=True)
             option.add_argument('--policy', required=True)
             option.add_argument('--policy-signature', required=True)
-    for command in ('VerifyInstalled', 'AdmitInstalled', 'InspectInstalledTarget', 'Remove'):
+            option.add_argument('--defer-image-load', action='store_true',
+                                help='Verify and install the complete package without importing its image')
+    for command in ('VerifyInstalled', 'AdmitInstalled', 'InspectInstalledTarget', 'LoadInstalledImage', 'Remove'):
         option = commands.add_parser(command)
         option.add_argument('--prefix', required=True)
         option.add_argument('--public-key', required=True)
-        if command == 'AdmitInstalled':
+        if command in ('AdmitInstalled', 'LoadInstalledImage'):
             option.add_argument('--trust-directory', required=True)
-        if command in ('AdmitInstalled', 'InspectInstalledTarget'):
+        if command in ('AdmitInstalled', 'InspectInstalledTarget', 'LoadInstalledImage'):
             option.add_argument('--policy', required=True)
             option.add_argument('--policy-signature', required=True)
     args = parser.parse_args()
@@ -587,6 +617,8 @@ def main():
         result = admit_installed(args)
     elif args.command == 'InspectInstalledTarget':
         result = inspect_installed_target(args)
+    elif args.command == 'LoadInstalledImage':
+        result = load_installed_image(args)
     else:
         with tempfile.TemporaryDirectory(prefix='HyperNetVerify') as temporary_name:
             temporary = Path(temporary_name)
