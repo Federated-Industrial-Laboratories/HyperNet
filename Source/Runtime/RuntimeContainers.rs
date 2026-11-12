@@ -118,6 +118,7 @@ fn verify_topology(p: &Profile, r: &Resource, value: &Value) -> Result<()> {
             network["id"] == *id
                 && network["name"] == *name
                 && network["internal"] == false
+                && (!p.private_peer_routing || network["options"]["isolate"] == "false")
                 && network["labels"]["io.hypernet.deployment"] == p.deployment
                 && network["labels"]["io.hypernet.configuration"] == p.configuration_digest()?,
             "Effective network identity differs from consent"
@@ -151,6 +152,10 @@ pub fn verify(p: &Profile, r: &Resource) -> Result<Value> {
         r.id.as_deref()
             .context("Unresolved resource creation requires recovery")?;
     let value = inspect(&r.kind, id)?;
+    ensure!(
+        r.kind != "network" || !p.private_peer_routing || value["options"]["isolate"] == "false",
+        "Private committee bridge isolation differs from signed consent"
+    );
     let (actual_id, name, labels) = if r.kind == "network" {
         (&value["id"], &value["name"], &value["labels"])
     } else {
@@ -265,10 +270,17 @@ pub fn network(root: &Path, p: &Profile, s: &mut State) -> Result<()> {
         "--gateway",
         &p.ip(1),
     ]);
+    if p.private_peer_routing {
+        args.extend(strings(&["--opt", "isolate=false"]));
+    }
     args.extend(labels(p)?);
     args.push(name.clone());
     podman(&args)?;
     let value = inspect("network", &name)?;
+    ensure!(
+        !p.private_peer_routing || value["options"]["isolate"] == "false",
+        "Engine did not apply the explicitly consented private peer routing"
+    );
     let id = value["id"]
         .as_str()
         .context("Missing network identity")?

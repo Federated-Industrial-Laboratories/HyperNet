@@ -35,7 +35,7 @@ use std::{
     os::{
         fd::AsRawFd,
         unix::{
-            fs::{FileTypeExt, MetadataExt, PermissionsExt},
+            fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
             net::{UnixListener, UnixStream},
         },
     },
@@ -47,6 +47,14 @@ use std::{
 pub struct Location {
     #[arg(long)]
     directory: PathBuf,
+}
+#[derive(Args)]
+pub struct Serve {
+    #[arg(long)]
+    directory: PathBuf,
+    /// Start exact reviewed Managed consent using an existing pinned clock monitor.
+    #[arg(long)]
+    managed_minimum_signer_generation: Option<u64>,
 }
 #[derive(Args)]
 pub struct Mutation {
@@ -100,7 +108,7 @@ pub enum Command {
     Withdraw(Mutation),
     /// Export an operator assertion after the permanent local withdrawal is durable.
     WithdrawalReceipt(Location),
-    Serve(Location),
+    Serve(Serve),
 }
 static STOP: AtomicBool = AtomicBool::new(false);
 extern "C" fn terminate(_: libc::c_int) {
@@ -147,8 +155,28 @@ fn write_frame(stream: &mut UnixStream, bytes: &[u8]) -> Result<()> {
     stream.write_all(bytes)?;
     Ok(())
 }
+fn management_address(root: &Path) -> Result<(fs::File, PathBuf)> {
+    let root = files::root(root)?;
+    let directory = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(root)?;
+    let metadata = directory.metadata()?;
+    ensure!(
+        metadata.is_dir()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o7777 == 0o700,
+        "Management directory must remain private"
+    );
+    let address = PathBuf::from(format!(
+        "/proc/self/fd/{}/Management.sock",
+        directory.as_raw_fd()
+    ));
+    Ok((directory, address))
+}
 fn client(root: &Path, request: &Request) -> Result<serde_json::Value> {
-    let mut stream = UnixStream::connect(root.join("Management.sock"))
+    let (_directory, address) = management_address(root)?;
+    let mut stream = UnixStream::connect(address)
         .context("Start requires the foreground runtime serve session")?;
     peer(&stream)?;
     stream.set_read_timeout(Some(Duration::from_secs(180)))?;
@@ -175,6 +203,7 @@ fn serve_session(path: &Path, managed_floor: Option<u64>) -> Result<()> {
     }
     let _manager = files::manager_lock(&root.join("Manager"))?;
     let socket = root.join("Management.sock");
+    let (_directory, address) = management_address(&root)?;
     if let Ok(m) = fs::symlink_metadata(&socket) {
         ensure!(
             m.file_type().is_socket()
@@ -183,12 +212,12 @@ fn serve_session(path: &Path, managed_floor: Option<u64>) -> Result<()> {
             "Unexpected management socket"
         );
         ensure!(
-            UnixStream::connect(&socket).is_err(),
+            UnixStream::connect(&address).is_err(),
             "Manager already running"
         );
         fs::remove_file(&socket)?;
     }
-    let listener = UnixListener::bind(&socket)?;
+    let listener = UnixListener::bind(address)?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
     let identity = fs::symlink_metadata(&socket)?;
     listener.set_nonblocking(true)?;
@@ -301,7 +330,29 @@ pub fn run(command: Command) -> Result<()> {
         Command::Epoch { command } => epoch::run(command)?,
         Command::Setup(args) => setup::setup(args)?,
         Command::NetworkPreview => network_preview::run()?,
-        Command::Serve(args) => return serve(&args.directory),
+        Command::Serve(args) => {
+            return if let Some(floor) = args.managed_minimum_signer_generation {
+                let root = files::root(&args.directory)?;
+                let (profile, state) = model::load(&root)?;
+                let manifest = profile.manifest.canonical()?;
+                ensure!(
+                    floor > 0
+                        && manifest.session_mode == 1
+                        && manifest.clock.kernel_boot == "CurrentHost"
+                        && state.accepted_consent.is_some()
+                        && state.withdrawal_generation == 0,
+                    "Managed serve requires explicit unwithdrawn Managed/CurrentHost consent and a retained signer floor"
+                );
+                ensure!(
+                    files::executable(&std::env::current_exe()?.canonicalize()?)?
+                        == hex::encode(manifest.software_digest),
+                    "Managed executable differs from explicit consent"
+                );
+                serve_managed(&root, floor)
+            } else {
+                serve(&args.directory)
+            };
+        }
         Command::Preview(args) => operate(args.directory, Operation::Preview, None)?,
         Command::Status(args) => operate(args.directory, Operation::Status, None)?,
         Command::Diagnose(args) => diagnostics::run(args, diagnostics::collect_authority)?,

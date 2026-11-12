@@ -155,3 +155,27 @@ expiry, idle limit and byte budget. Old credentials cannot open new sessions.
 After expiry, the original renewal workflow may establish a new budget baseline.
 An exhausted early replacement needs that normal expired-voucher renewal or a
 separately authorised new voucher; it does not silently replenish capacity.
+
+## Private authority routing and one clock owner
+
+A host supervisor may share one pinned clock monitor across its native services.
+For an authority with exact unwithdrawn `Managed`/`CurrentHost` consent, run
+`runtime serve --directory PRIVATE --managed-minimum-signer-generation N`.
+This starts through the normal managed lifecycle and checks the admitted executable,
+consent, signer generation and current clock. It never creates a clock monitor.
+The independent minimum is combined with the retained local signer generation;
+it cannot lower that generation. Omitting the option keeps foreground behaviour.
+Require `ManagedAuthoritySession/1` before selecting this setup.
+
+Normal hosts can confine authority publication to loopback using
+`runtime setup --private-peer-routing --bind 127.0.0.1`. Each authority's signed
+peer origin must name its actual private bridge address ending in `.20`, and its
+own origin must match its declared subnet. This explicit `PrivateAuthorityRouting/1`
+consent permits communication between those committee bridges (`isolate=false`).
+Other runtime networks retain their previous isolation settings. The service
+TLS identities and endpoint certificates remain exact. Only the relay and
+chosen public joining endpoint need external publication.
+
+Management sockets support long private storage paths through retained directory
+file descriptors. Directory ownership, non-writable ancestry, socket identity
+and peer-credential validation still apply.
