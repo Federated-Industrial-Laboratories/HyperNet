@@ -580,19 +580,16 @@ async fn serve(input: Location, authorization: PathBuf) -> Result<Json> {
     );
     let consent = approved(&deployment, &authorization)?;
     let start = crate::consensus_clock::moment()?;
-    let expires_ms = consent
-        .manifest
-        .expires
-        .checked_mul(1000)
-        .context("Consent deadline overflow")?;
-    let deadline = start
-        .boot_ms
-        .checked_add(
-            expires_ms
-                .checked_sub(start.wall_ms)
-                .context("Consent has expired")?,
-        )
-        .context("Boot deadline overflow")?;
+    let expires_ms = consent.manifest.expires.scaled(1000)?;
+    let deadline = expires_ms
+        .remaining(start.wall_ms)?
+        .map(|remaining| {
+            start
+                .boot_ms
+                .checked_add(remaining)
+                .context("Boot deadline overflow")
+        })
+        .transpose()?;
     deployment.runtime.clock.health()?.observe()?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -608,7 +605,7 @@ async fn serve(input: Location, authorization: PathBuf) -> Result<Json> {
                 _ = interval.tick() => {
                     let valid = (|| -> Result<()> {
                         let now = crate::consensus_clock::moment()?;
-                        ensure!(now.wall_ms >= previous && now.wall_ms < expires_ms && now.boot_ms < deadline, "Consent expired or clock moved backwards");
+                        ensure!(now.wall_ms >= previous && now.wall_ms < expires_ms && deadline.is_none_or(|end| now.boot_ms < end), "Consent expired or clock moved backwards");
                         previous = now.wall_ms;
                         let withdrawal: u64 = serde_json::from_slice(&authorization::public_read(&authorization.join("Withdrawal.json"),64)?)?;
                         ensure!(withdrawal == 0, "Consent withdrawn");

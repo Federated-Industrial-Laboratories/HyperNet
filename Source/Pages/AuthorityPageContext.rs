@@ -213,9 +213,9 @@ impl Evaluation<'_> {
         self.exact(&binding.reference)?;
         self.exact(&admission.reference)?;
         self.dependencies.extend(member.dependencies);
-        self.expires = self
-            .expires
-            .min(member.expires_ms)
+        self.expires = member
+            .expires_ms
+            .bound(self.expires)
             .min(binding.validity.1)
             .min(admission.validity.1);
         Ok(subject)
@@ -294,7 +294,7 @@ impl Evaluation<'_> {
         }
         if live {
             ensure!(current(self.at, validity), "Page deployment expired");
-            self.expires = self.expires.min(validity.1);
+            self.expires = validity.1.bound(self.expires);
             self.capability(&r.grant, r.registrar, &[13], (5, m.deployment), None, 0)?;
         }
         Ok(())

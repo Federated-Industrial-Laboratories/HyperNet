@@ -341,8 +341,7 @@ fn reader(
     let member_key = if let Ok(bytes) = c.governance.record_bytes(125, d.member) {
         let v = wire::decode(bytes)?;
         let f = v.array(12)?;
-        let validity = f[8].array(2)?;
-        let lifetime = (validity[0].uint()?, validity[1].uint()?);
+        let lifetime = crate::trust_validity::Validity::parse(&f[8])?;
         ensure!(
             !f[9].boolean()? && current(c.at, lifetime),
             "sealed reader member is revoked or expired"
@@ -354,7 +353,7 @@ fn reader(
                 .find(|r| r.kind == 125 && r.id == d.member)
                 .context("sealed member reference absent")?,
         );
-        c.expires = c.expires.min(lifetime.1);
+        c.expires = lifetime.1.bound(c.expires);
         key(&f[7])?
     } else {
         d.member

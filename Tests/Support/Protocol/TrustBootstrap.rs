@@ -118,7 +118,7 @@ pub fn draft(spec: DraftSpec, identities: [[u8; 32]; 4], time: u64) -> Result<Ve
         version(101, &tier_id, &tier_bytes),
         actions,
         scope,
-        array([u(spec.route.not_before_ms), u(spec.route.expires_ms)]),
+        array([u(spec.route.not_before_ms), spec.route.expires_ms.value()]),
         V::Null,
         u(8),
         limit.clone(),
@@ -249,7 +249,7 @@ pub fn draft(spec: DraftSpec, identities: [[u8; 32]; 4], time: u64) -> Result<Ve
         as_bytes(&r.admission_domain)?,
         u(r.assurance.number()),
         u(r.not_before_ms),
-        u(r.expires_ms),
+        r.expires_ms.value(),
     ]))?;
     let result = wire::encode(&array([
         u(30),

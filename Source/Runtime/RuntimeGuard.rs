@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Enforce the absolute operator deadline independently of the local manager.
+use crate::trust_validity::End;
 use anyhow::{Context, Result, ensure};
 use clap::ValueEnum;
 use std::{
@@ -28,19 +29,26 @@ fn boottime() -> Result<u64> {
     ensure!(value.tv_sec >= 0, "Invalid boot clock");
     Ok(value.tv_sec as u64)
 }
-fn expired(previous: u64, wall: u64, expires: u64, boot: u64, deadline: u64) -> bool {
-    wall < previous || wall >= expires || boot >= deadline
+fn expired(previous: u64, wall: u64, expires: End, boot: u64, deadline: Option<u64>) -> bool {
+    wall < previous || !expires.contains(wall) || deadline.is_some_and(|end| boot >= end)
 }
-pub fn run(kind: Kind, expires: u64, arguments: Vec<String>) -> Result<()> {
+pub fn run(kind: Kind, expires: End, arguments: Vec<String>) -> Result<()> {
     crate::confinement::preflight()?;
     let now = crate::store::now()?;
-    ensure!(
-        expires > now && expires - now <= 604800,
-        "Runtime consent deadline is expired or invalid"
-    );
-    let deadline = boottime()?
-        .checked_add(expires - now)
-        .context("Deadline overflow")?;
+    let deadline = match expires {
+        End::At(end) => {
+            ensure!(
+                end > now && end - now <= 604800,
+                "Runtime consent deadline is expired or invalid"
+            );
+            Some(
+                boottime()?
+                    .checked_add(end - now)
+                    .context("Deadline overflow")?,
+            )
+        }
+        End::UntilWithdrawn => None,
+    };
     let authorization = std::path::Path::new("/Authorization");
     let manifest = crate::runtime_authorization::Manifest::read(authorization)?;
     crate::runtime_authorization::verify(

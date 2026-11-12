@@ -12,8 +12,12 @@ impl Offer {
         class: u64,
         key: Key,
         nonce: Digest,
-        validity: (u64, u64),
+        validity: impl Into<crate::trust_validity::Validity>,
     ) -> Result<Vec<u8>> {
+        let validity = validity.into();
+        let end = validity
+            .1
+            .bound(validity.0.checked_add(86_400_000).unwrap());
         wire::encode(&a(vec![
             V::Uint(200),
             V::Uint(1),
@@ -26,7 +30,7 @@ impl Offer {
             b(&wire::digest(&manifest.desired()?)),
             b(&wire::digest(&manifest.unsigned_consent(0)?)),
             b(&nonce),
-            a(vec![V::Uint(validity.0), V::Uint(validity.1)]),
+            a(vec![V::Uint(validity.0), V::Uint(end)]),
         ]))
     }
 }

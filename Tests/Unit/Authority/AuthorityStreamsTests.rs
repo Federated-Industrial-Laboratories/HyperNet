@@ -691,3 +691,37 @@ fn terminal_withdrawal_reserve_survives_ordinary_receipt_pressure() {
         );
     }
 }
+
+#[test]
+fn dedicated_activation_survives_restart_and_other_requester_activity() {
+    let mut streams = Streams::default();
+    let activation = key(81);
+    let registrar = key(82);
+    admit(&mut streams, activation).unwrap();
+    admit(&mut streams, registrar).unwrap();
+    let pending = request(activation, 1, 0);
+    let response = result(30, false);
+    let refusal = result(0, true);
+    streams.record(&pending, &response, &refusal).unwrap();
+    for sequence in 1..=4 {
+        streams
+            .record(
+                &request(registrar, sequence, sequence - 1),
+                &response,
+                &refusal,
+            )
+            .unwrap();
+        streams = parsed(&streams.value()).unwrap();
+        assert!(
+            matches!(streams.classify(&pending).unwrap(),Classification::Replay(value) if value==response)
+        );
+    }
+    assert_eq!(
+        streams
+            .metadata(&activation)
+            .unwrap()
+            .unwrap()
+            .retired_through,
+        0
+    );
+}

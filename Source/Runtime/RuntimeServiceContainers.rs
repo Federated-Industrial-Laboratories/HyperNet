@@ -318,16 +318,15 @@ pub(super) fn create(
         .context("wall time overflow")?;
     let reporting = helper && command == files::strings(&["runtime-service-receipt"]);
     let remaining = if reporting {
-        60
+        Some(60)
     } else {
         p.manifest
             .validity
             .1
-            .checked_sub(now)
-            .context("service consent expired")?
-            / 1000
+            .remaining(now)?
+            .map(|remaining| remaining / 1000)
     };
-    ensure!(remaining > 0, "service consent expired");
+    ensure!(remaining != Some(0), "service consent expired");
     let descriptors = if role.role == 5 {
         route_descriptors(
             crate::authority_domains::routes::RegisteredProfile::parse(
@@ -398,10 +397,6 @@ pub(super) fn create(
                 role.cpu_quota
             }
         ),
-        &format!(
-            "--timeout={}",
-            if helper { remaining.min(60) } else { remaining }
-        ),
         "--stop-timeout=15",
         "--log-driver=k8s-file",
         "--log-opt=max-size=1mb",
@@ -411,6 +406,14 @@ pub(super) fn create(
             role.state_admission_bytes
         ),
     ]);
+    let timeout = if helper {
+        Some(remaining.unwrap_or(60).min(60))
+    } else {
+        remaining
+    };
+    if let Some(timeout) = timeout {
+        args.push(format!("--timeout={timeout}"));
+    }
     args.extend(labels(p)?);
     let mut r = resource("container", name);
     let attached_route = role.role == 5

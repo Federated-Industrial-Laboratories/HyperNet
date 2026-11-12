@@ -310,10 +310,12 @@ impl Fixture {
                     hosts: vec![host_record.reference.clone()],
                     copies: 1,
                     failure_domains: 1,
-                    expires_ms: revision
-                        .author
-                        .expires_ms
-                        .min(host.profile.manifest.validity.1)
+                    expires_ms: host
+                        .profile
+                        .manifest
+                        .validity
+                        .1
+                        .bound(revision.author.expires_ms)
                         .min(at + host.profile.retention_ms),
                 }),
                 vec![],
@@ -387,7 +389,7 @@ impl Fixture {
             .collect();
         let f = deployment::Fixture::with_actions(actions);
         let mut manifest = deployment::manifest();
-        manifest.validity.1 = expires_ms;
+        manifest.validity.1 = expires_ms.into();
         (self.records, _, _, _) = deployment::admitted(&f, &deployment::offer(manifest.clone()));
         [1, 2]
             .into_iter()

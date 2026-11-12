@@ -270,3 +270,162 @@ fn immutable_shared_custody_and_client_minima_refuse_weaker_trust() {
         .is_err()
     );
 }
+
+#[test]
+fn persistent_root_policy_preserves_exact_grants_and_requires_current_opt_in() {
+    let (boot, mut op, mut intent, _) = fixture();
+    let scope = boot.descriptor().scope();
+    let original =
+        Governance::parse(scope.network, scope.incarnation, boot.governance_records()).unwrap();
+    let root = original
+        .versions()
+        .into_iter()
+        .find(|r| r.kind == 102)
+        .unwrap();
+    let original_bytes = original.record_bytes(102, root.id).unwrap().to_vec();
+    let mut policy = wire::decode(&op.policy)
+        .unwrap()
+        .array(17)
+        .unwrap()
+        .to_vec();
+    policy[1] = V::Uint(2);
+    policy[15] = a(vec![a(vec![
+        reference(&root),
+        crate::trust_validity::End::UntilWithdrawn.value(),
+    ])]);
+    op.policy = wire::encode(&a(policy.clone())).unwrap();
+    intent.parameters = op.parameters().unwrap();
+    Operation::parse(&intent).unwrap();
+    let reserved = crate::authority_membership::Reservations(boot.reservations().to_vec());
+    let decision = authorise(
+        &op,
+        boot.governance_records(),
+        &reserved,
+        &intent,
+        20000,
+        false,
+    )
+    .unwrap();
+    assert_eq!(decision.code, 0);
+    let records = decision.records.unwrap();
+    let current = Governance::parse(scope.network, scope.incarnation, &records).unwrap();
+    assert_eq!(current.record_bytes(102, root.id).unwrap(), original_bytes);
+    assert_eq!(
+        current.grant_validity(root.id).unwrap().1,
+        crate::trust_validity::End::UntilWithdrawn
+    );
+    let request = Requirement {
+        subject: intent.requester,
+        actions: &[9],
+        scope: (0, scope.network),
+        namespace: None,
+        usage: [0, 1, 0, 1],
+        evaluated_at_ms: 31_536_000_000,
+        expected: &[],
+    };
+    assert!(original.current_capability(root.id, &request).is_err());
+    let permit = current.current_capability(root.id, &request).unwrap();
+    assert_eq!(
+        crate::authority_domains::sealed_identity::current_member(
+            &current,
+            scope.network,
+            intent.requester,
+            request.evaluated_at_ms
+        )
+        .unwrap()
+        .expires_ms,
+        crate::trust_validity::End::UntilWithdrawn
+    );
+    assert!(
+        permit
+            .dependencies
+            .iter()
+            .any(|r| r.kind == 100 && r.generation == 2)
+    );
+    // An expired root cannot be resurrected by submitting its old proposal late.
+    assert_ne!(
+        authorise(
+            &op,
+            boot.governance_records(),
+            &reserved,
+            &intent,
+            request.evaluated_at_ms,
+            false
+        )
+        .unwrap()
+        .code,
+        0
+    );
+    // Descendants keep their exact parent binding and their own finite limit.
+    let mut child = wire::decode(&original_bytes)
+        .unwrap()
+        .array(17)
+        .unwrap()
+        .to_vec();
+    child[6] = b(&[241; 32]);
+    child[10] = a(vec![V::Uint(9)]);
+    child[13] = reference(&root);
+    child[14] = V::Uint(0);
+    child[16] = op.snapshot.value.clone();
+    let mut descendants = records.clone();
+    descendants.push(wire::encode(&a(child.clone())).unwrap());
+    crate::authority_membership::sort_records(&mut descendants).unwrap();
+    let delegated = Governance::parse(scope.network, scope.incarnation, &descendants).unwrap();
+    let early = Requirement {
+        evaluated_at_ms: 20000,
+        ..request
+    };
+    assert!(delegated.current_capability([241; 32], &early).is_ok());
+    assert!(delegated.current_capability([241; 32], &request).is_err());
+    child[12] =
+        crate::trust_validity::Validity(10000, crate::trust_validity::End::UntilWithdrawn).value();
+    *descendants
+        .iter_mut()
+        .find(|bytes| wire::decode(bytes).unwrap().list(32).unwrap().get(6) == Some(&b(&[241; 32])))
+        .unwrap() = wire::encode(&a(child)).unwrap();
+    assert!(
+        Governance::parse(scope.network, scope.incarnation, &descendants)
+            .unwrap()
+            .current_capability([241; 32], &request)
+            .is_ok()
+    );
+    // Removing the explicit extension restores the original finite interval.
+    policy[15] = a(vec![b(&root.id)]);
+    let mut withdrawn = records.clone();
+    *withdrawn
+        .iter_mut()
+        .find(|bytes| wire::decode(bytes).unwrap().list(32).unwrap()[0] == V::Uint(100))
+        .unwrap() = wire::encode(&a(policy.clone())).unwrap();
+    assert!(
+        Governance::parse(scope.network, scope.incarnation, &withdrawn)
+            .unwrap()
+            .current_capability(root.id, &request)
+            .is_err()
+    );
+    // An old schema cannot smuggle the extension, and an altered pin fails closed.
+    policy[1] = V::Uint(1);
+    policy[15] = a(vec![a(vec![
+        reference(&root),
+        crate::trust_validity::End::UntilWithdrawn.value(),
+    ])]);
+    assert!(
+        Governance::record_versions(
+            scope.network,
+            scope.incarnation,
+            &[wire::encode(&a(policy.clone())).unwrap()]
+        )
+        .is_err()
+    );
+    policy[1] = V::Uint(2);
+    let mut false_root = root.clone();
+    false_root.digest = [99; 32];
+    policy[15] = a(vec![a(vec![
+        reference(&false_root),
+        crate::trust_validity::End::UntilWithdrawn.value(),
+    ])]);
+    *withdrawn
+        .iter_mut()
+        .find(|bytes| wire::decode(bytes).unwrap().list(32).unwrap()[0] == V::Uint(100))
+        .unwrap() = wire::encode(&a(policy)).unwrap();
+    assert!(Governance::parse(scope.network, scope.incarnation, &withdrawn).is_err());
+}

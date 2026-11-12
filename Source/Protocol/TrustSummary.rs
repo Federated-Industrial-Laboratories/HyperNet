@@ -43,7 +43,7 @@ pub struct Limits {
 #[serde(rename_all = "camelCase")]
 pub struct Validity {
     not_before_ms: u64,
-    expires_ms: u64,
+    expires_ms: crate::trust_validity::End,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -329,7 +329,7 @@ pub fn describe(records: &Records, network: &[u8; 32], governance: &[u8]) -> Res
                 scopes: scopes(&record[11])?,
                 validity: Validity {
                     not_before_ms: validity[0].uint()?,
-                    expires_ms: validity[1].uint()?,
+                    expires_ms: crate::trust_validity::End::parse(&validity[1])?,
                 },
                 parent_grant: None,
                 remaining_delegation_depth: record[14].uint()?,

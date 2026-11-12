@@ -10,7 +10,7 @@ Unsupported confinement stops activation. It does not start an unconfined daemon
 Authority deployment is documented in [Runtime](Runtime.md). Page, Media, Mail,
 Transfer, Bridge and SSH roles use [ServiceRuntime](ServiceRuntime.md) and their
 role-specific manuals. A hardware operator separately approves exact software,
-image, local paths, resources, endpoints, storage and finite lifetime. Membership
+image, local paths, resources, endpoints, storage and an explicit finite or [until-withdrawn lifetime](PersistentAccess.md). Membership
 and a hosting grant cannot substitute for that local consent.
 
 ## Isolation and storage

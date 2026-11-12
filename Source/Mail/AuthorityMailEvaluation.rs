@@ -76,7 +76,7 @@ impl Evaluation<'_> {
         }
         if live {
             ensure!(current(self.at, validity), "mail consent expired");
-            self.expires = self.expires.min(validity.1);
+            self.expires = validity.1.bound(self.expires);
             self.capability(&r.grant, r.registrar, &[13], (5, m.deployment), 0)?;
         }
         Ok(())

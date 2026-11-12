@@ -54,7 +54,7 @@ impl RetainedRoute {
         successor.generation += 1;
         successor.previous_profile = Some(wire::digest(&manifest.desired().unwrap()));
         successor.previous_consent = Some(wire::digest(&manifest.unsigned_consent(0).unwrap()));
-        successor.validity = (15000, 40000);
+        successor.validity = (15000, 40000).into();
         successor.successor_of(&manifest).unwrap();
         let endpoint = &successor.endpoints[0];
         let certificate = pem("CERTIFICATE", &endpoint.leaf_der);

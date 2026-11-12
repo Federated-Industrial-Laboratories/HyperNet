@@ -1112,7 +1112,7 @@ async fn relay(
                         if opened.open.attachment {
                             if attachments.len() < capacity && attachments.iter().filter(|a| a.service == admission.target.identity.service).count() < admission.target.maximum_connections as usize {
                                 // This socket is inert. Only a later current reader Permit can release bytes.
-                                let expires = own.validity.1.min(admission.target.validity.1);
+                                let expires = own.validity.1.min(admission.target.validity.1).bound(admission.total_expires);
                                 let Ok(deadline) = parking_deadline(started.saturating_add(admission.limits.idle_ms), expires, now, boot) else {
                                     incoming.diagnostics.refuse(Refusal::Deadline);
                                     continue;

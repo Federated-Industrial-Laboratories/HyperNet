@@ -25,7 +25,7 @@ impl Fixture {
         let operator = SigningKey::from_bytes(&[2; 32]);
         create(&root.join("Keys/Operator.key"), &operator.to_bytes()).unwrap();
         let mut canonical = crate::runtime_manifest::tests::fixture();
-        canonical.validity = (now().unwrap() * 1000, (now().unwrap() + 3600) * 1000);
+        canonical.validity = (now().unwrap() * 1000, (now().unwrap() + 3600) * 1000).into();
         canonical.deployment = rand::random();
         canonical.host = canonical.deployment;
         canonical.placement.hosts = vec![canonical.host];
@@ -259,7 +259,7 @@ fn interrupted_successor_withdrawal_exports_permanent_resource_binding() {
     successor.previous_consent = Some(crate::trust_wire::digest(
         &previous.unsigned_consent(0).unwrap(),
     ));
-    successor.validity.1 += 1000;
+    successor.validity.1 = (successor.validity.1.finite().unwrap() + 1000).into();
     super::files::save(&f.root.join("Transition.json"), &serde_json::json!({
         "operation":hex::encode([21;16]),"digest":hex::encode([22;32]),
         "proposal":{"root":f.root,"service":false,"predecessor":f.profile.configuration_digest().unwrap(),

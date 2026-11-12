@@ -55,8 +55,11 @@ pub struct Setup {
     pub cpu_quota: u64,
     #[arg(long, default_value_t = 1073741824)]
     pub state_bytes: u64,
-    #[arg(long, default_value_t = 3600)]
-    pub lifetime_seconds: u64,
+    #[arg(long, conflicts_with = "until_withdrawn")]
+    pub lifetime_seconds: Option<u64>,
+    /// Keep reviewed hosting consent until explicitly withdrawn.
+    #[arg(long)]
+    pub until_withdrawn: bool,
     #[arg(long, default_value = "Session", value_parser = ["Session", "Managed"])]
     pub session_policy: String,
 }
@@ -128,7 +131,7 @@ pub fn setup(args: Setup) -> Result<serde_json::Value> {
     let parent = args.directory.parent().context("Runtime parent required")?;
     super::files::root(parent)?;
     ensure!(
-        (30..=604800).contains(&args.lifetime_seconds),
+        (30..=604800).contains(&args.lifetime_seconds.unwrap_or(3600)),
         "Consent lifetime must be 30 seconds through seven days"
     );
     let bootstrap = read(&args.bootstrap, MAXIMUM)?;
@@ -306,9 +309,15 @@ pub fn setup(args: Setup) -> Result<serde_json::Value> {
         software_digest: executable(&std::env::current_exe()?.canonicalize()?)?,
         image: args.image,
         created,
-        expires: created
-            .checked_add(args.lifetime_seconds)
-            .context("Consent deadline overflow")?,
+        expires: if args.until_withdrawn {
+            crate::trust_validity::End::UntilWithdrawn
+        } else {
+            crate::trust_validity::End::At(
+                created
+                    .checked_add(args.lifetime_seconds.unwrap_or(3600))
+                    .context("Consent deadline overflow")?,
+            )
+        },
         bind: args.bind,
         port: args.port,
         subnet: args.subnet,

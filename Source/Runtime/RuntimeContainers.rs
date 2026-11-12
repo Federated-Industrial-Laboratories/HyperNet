@@ -335,11 +335,16 @@ fn recover_absent_networks(root: &Path, p: &Profile, s: &mut State) -> Result<()
 }
 fn common(p: &Profile, role: &str, memory: u64, pids: u64, quota: u64) -> Result<Vec<String>> {
     let lifetime = if role == "Inspect" {
-        45
+        Some(45)
     } else {
-        p.expires.checked_sub(now()?).context("Consent expired")?
+        match p.expires {
+            crate::trust_validity::End::At(end) => {
+                Some(end.checked_sub(now()?).context("Consent expired")?)
+            }
+            crate::trust_validity::End::UntilWithdrawn => None,
+        }
     };
-    ensure!(lifetime > 0, "Consent expired");
+    ensure!(lifetime != Some(0), "Consent expired");
     let mut args = strings(&[
         "create",
         "--name",
@@ -367,11 +372,13 @@ fn common(p: &Profile, role: &str, memory: u64, pids: u64, quota: u64) -> Result
         &format!("--pids-limit={pids}"),
         &format!("--cpu-period={}", p.resources.cpu_period),
         &format!("--cpu-quota={quota}"),
-        &format!("--timeout={lifetime}"),
         "--stop-timeout=15",
         "--log-driver=k8s-file",
         "--log-opt=max-size=1mb",
     ]);
+    if let Some(lifetime) = lifetime {
+        args.push(format!("--timeout={lifetime}"));
+    }
     args.extend(labels(p)?);
     Ok(args)
 }

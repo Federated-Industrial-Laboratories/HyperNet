@@ -44,7 +44,7 @@ impl RegisteredProfile {
             limits_value(self.limits),
             V::Uint(self.maximum_connections),
             V::Uint(u64::from(self.assurance == Assurance::Independent)),
-            a(vec![V::Uint(self.validity.0), V::Uint(self.validity.1)]),
+            a(vec![V::Uint(self.validity.0), self.validity.1.value()]),
             b(&self.manifest.encode()?),
         ]))
     }

@@ -42,6 +42,12 @@ fn rec(kind: u64, body: Vec<V>) -> Vec<u8> {
     wire::encode(&list(value)).unwrap()
 }
 fn fixture() -> (Vec<Vec<u8>>, Key, Key) {
+    fixture_lifetimes(100000.into(), 100000.into())
+}
+fn fixture_lifetimes(
+    parent_end: crate::trust_validity::End,
+    child_end: crate::trust_validity::End,
+) -> (Vec<Vec<u8>>, Key, Key) {
     let root = ed25519_dalek::SigningKey::from_bytes(&[71; 32])
         .verifying_key()
         .to_bytes();
@@ -54,7 +60,7 @@ fn fixture() -> (Vec<Vec<u8>>, Key, Key) {
     let lim = list(vec![V::Uint(100); 4]);
     let scope = list(vec![list(vec![V::Uint(0), b([1; 32])])]);
     let actions = list(vec![V::Uint(0), V::Uint(11), V::Uint(25)]);
-    let validity = list(vec![V::Uint(0), V::Uint(100000)]);
+    let validity = crate::trust_validity::Validity(0, child_end).value();
     let recovery_record = rec(
         114,
         vec![
@@ -89,7 +95,7 @@ fn fixture() -> (Vec<Vec<u8>>, Key, Key) {
             vr(101, [3; 32], &tier),
             actions,
             scope.clone(),
-            validity.clone(),
+            crate::trust_validity::Validity(0, parent_end).value(),
             V::Null,
             V::Uint(2),
             lim.clone(),
@@ -205,6 +211,105 @@ fn complete_chain_binds_actions_current_parent_and_signed_dependencies() {
     let expected = revoked.versions();
     request.expected = &expected;
     assert!(revoked.capability([5; 32], &request).is_err());
+}
+
+#[test]
+fn shared_actions_refuse_laundering_through_broad_or_mixed_ancestors() {
+    use crate::trust_action_scope::ActionPurpose;
+    for (ancestor_kinds, leaf_kind, permitted) in [
+        (vec![0], 2, false),
+        (vec![0], 3, false),
+        (vec![2, 3], 2, false),
+        (vec![2, 3], 3, false),
+        (vec![2], 2, true),
+        (vec![1, 2], 2, true),
+        (vec![3], 3, true),
+    ] {
+        let (mut records, _, child) = fixture();
+        let actions = list([0, 11, 25, 29, 30].into_iter().map(V::Uint).collect());
+        let mut tier = wire::decode(&records[1])
+            .unwrap()
+            .array(14)
+            .unwrap()
+            .to_vec();
+        tier[9] = actions.clone();
+        records[1] = wire::encode(&list(tier)).unwrap();
+        let tier = vr(101, [3; 32], &records[1]);
+        let mut root = wire::decode(&records[2])
+            .unwrap()
+            .array(17)
+            .unwrap()
+            .to_vec();
+        root[9] = tier.clone();
+        root[10] = actions;
+        records[2] = wire::encode(&list(root)).unwrap();
+        let root = vr(102, [4; 32], &records[2]);
+        let mut intermediate = wire::decode(&records[3])
+            .unwrap()
+            .array(17)
+            .unwrap()
+            .to_vec();
+        intermediate[9] = tier;
+        intermediate[10] = list([0, 11, 29, 30].into_iter().map(V::Uint).collect());
+        intermediate[11] = list(
+            ancestor_kinds
+                .iter()
+                .map(|kind| {
+                    list(vec![
+                        V::Uint(*kind),
+                        b(if *kind == 0 { [1; 32] } else { [88; 32] }),
+                    ])
+                })
+                .collect(),
+        );
+        intermediate[13] = root;
+        intermediate[14] = V::Uint(1);
+        records[3] = wire::encode(&list(intermediate.clone())).unwrap();
+        let intermediate_ref = vr(102, [5; 32], &records[3]);
+        let mut admission = wire::decode(&records[5])
+            .unwrap()
+            .array(12)
+            .unwrap()
+            .to_vec();
+        admission[10] = intermediate_ref.clone();
+        records[5] = wire::encode(&list(admission)).unwrap();
+        let mut leaf = intermediate;
+        leaf[6] = b([10; 32]);
+        leaf[7] = b(child);
+        leaf[10] = list(vec![V::Uint(29), V::Uint(30)]);
+        leaf[11] = list(vec![list(vec![V::Uint(leaf_kind), b([88; 32])])]);
+        leaf[13] = intermediate_ref;
+        leaf[14] = V::Uint(0);
+        records.push(wire::encode(&list(leaf)).unwrap());
+        crate::authority_membership::sort_records(&mut records).unwrap();
+        let governance = Governance::parse([1; 32], [2; 32], &records).unwrap();
+        assert!(
+            governance
+                .current_capability(
+                    [10; 32],
+                    &Requirement {
+                        subject: child,
+                        actions: &[29, 30],
+                        scope: (leaf_kind, [88; 32]),
+                        namespace: Some([88; 32]),
+                        usage: [0, 1, 0, 1],
+                        evaluated_at_ms: 5000,
+                        expected: &[],
+                    }
+                )
+                .is_ok()
+        );
+        let purpose = if leaf_kind == 3 {
+            ActionPurpose::ApplicationStream
+        } else {
+            ActionPurpose::SealedPublication
+        };
+        assert_eq!(
+            governance.require_action_purpose([10; 32], purpose).is_ok(),
+            permitted
+        );
+        assert!(governance.require_action_purpose([4; 32], purpose).is_err());
+    }
 }
 
 fn expected_snapshot() -> V {
@@ -479,5 +584,47 @@ fn admission_validity_bounds_the_subject_and_every_delegating_ancestor() {
     assert_eq!(
         capability(&governance, [10; 32], child).unwrap().expires_ms,
         8501
+    );
+}
+
+#[test]
+fn persistent_membership_requires_persistent_ancestors_and_remains_revocable() {
+    use crate::trust_validity::End;
+    let (records, _, child) = fixture_lifetimes(End::UntilWithdrawn, End::UntilWithdrawn);
+    let request = Requirement {
+        subject: child,
+        actions: &[0],
+        scope: (2, [88; 32]),
+        namespace: None,
+        usage: [1, 1, 0, 0],
+        evaluated_at_ms: 31_536_000_000,
+        expected: &[],
+    };
+    let governance = Governance::parse([1; 32], [2; 32], &records).unwrap();
+    assert!(governance.current_capability([5; 32], &request).is_ok());
+    let (finite, _, _) = fixture_lifetimes(End::At(100000), End::UntilWithdrawn);
+    let finite = Governance::parse([1; 32], [2; 32], &finite).unwrap();
+    let current = Requirement {
+        evaluated_at_ms: 5000,
+        ..request
+    };
+    assert!(finite.current_capability([5; 32], &current).is_err());
+    let mut revoked = records;
+    let index = revoked
+        .iter()
+        .position(|bytes| wire::decode(bytes).unwrap().list(32).unwrap()[0] == V::Uint(125))
+        .unwrap();
+    let mut member = wire::decode(&revoked[index])
+        .unwrap()
+        .array(12)
+        .unwrap()
+        .to_vec();
+    member[9] = V::Bool(true);
+    revoked[index] = wire::encode(&list(member)).unwrap();
+    assert!(
+        Governance::parse([1; 32], [2; 32], &revoked)
+            .unwrap()
+            .current_capability([5; 32], &current)
+            .is_err()
     );
 }

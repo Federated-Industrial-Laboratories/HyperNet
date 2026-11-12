@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Explicit finite Linux user services reuse the ordinary consent, clock and activation gates.
+//! Explicit Linux user services reuse the ordinary consent, clock and activation gates.
 use super::{files, model, services};
 use crate::runtime_manifest::Manifest;
 use anyhow::{Context, Result, ensure};
@@ -47,6 +47,11 @@ pub enum Command {
         directory: PathBuf,
     },
     /// Fixed systemd entry point; invokes the normal runtime checks before serving.
+    #[command(hide = true)]
+    Check {
+        #[arg(long)]
+        directory: PathBuf,
+    },
     Run {
         #[arg(long)]
         directory: PathBuf,
@@ -109,7 +114,7 @@ fn candidate(options: Options, service: bool) -> Result<Installation> {
     let (manifest, profile, clock_export) = profile(&root, service)?;
     ensure!(
         manifest.session_mode == 1 && manifest.clock.kernel_boot == "CurrentHost",
-        "Managed boot requires explicit finite Managed consent; use a reviewed stopped successor first"
+        "Managed boot requires explicit Managed consent; use a reviewed stopped successor first"
     );
     let clock_monitor = files::root(&options.clock_monitor)?;
     let clock_config: Value = files::json(&clock_monitor.join("ClockConfig.json"))?;
@@ -142,6 +147,12 @@ fn candidate(options: Options, service: bool) -> Result<Installation> {
             request.operation().recipient == manifest.roles[0].service_key,
             "Activation has another service recipient"
         );
+        if manifest.validity.1 == crate::trust_validity::End::UntilWithdrawn {
+            ensure!(
+                request.persistent(),
+                "Persistent managed hosting requires a dedicated persistent activation request"
+            );
+        }
         Some(bytes)
     } else {
         ensure!(
@@ -160,8 +171,19 @@ fn candidate(options: Options, service: bool) -> Result<Installation> {
     } else {
         "runtime managed run"
     };
+    let persistent = manifest.validity.1 == crate::trust_validity::End::UntilWithdrawn;
+    let restart = if persistent { "on-failure" } else { "no" };
+    let condition = if persistent {
+        format!(
+            "ExecCondition={exe} {runtime} --directory {}\n",
+            quoted(&root)?
+        )
+        .replace("managed run", "managed check")
+    } else {
+        String::new()
+    };
     let unit_bytes = format!(
-        "[Unit]\nDescription=HyperNet consented runtime\nRequires={clock_unit}\nAfter={clock_unit}\nStartLimitIntervalSec=0\n\n[Service]\nType=simple\nExecStart={exe} {runtime} --directory {}\nKillMode=mixed\nTimeoutStopSec=90\nUMask=0077\nDelegate=yes\nRestart=no\nEnvironment=TMPDIR={}\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=HyperNet consented runtime\nRequires={clock_unit}\nAfter={clock_unit}\nStartLimitIntervalSec=0\n\n[Service]\nType=simple\n{condition}ExecStart={exe} {runtime} --directory {}\nKillMode=mixed\nTimeoutStopSec=90\nUMask=0077\nDelegate=yes\nRestart={restart}\nRestartSec=5\nEnvironment=TMPDIR={}\n\n[Install]\nWantedBy=default.target\n",
         quoted(&root)?,
         quoted(&root.join("Temporary"))?
     );
@@ -194,8 +216,8 @@ fn preview(i: &Installation) -> Result<Value> {
         json!({"status":"ManagedPreview","previewDigest":files::hex_digest(&serde_json::to_vec(i)?),
         "profileDigest":i.profile,"unit":i.unit,"clockUnit":i.clock_unit,"unitContents":i.unit_bytes,
         "clockUnitContents":i.clock_unit_bytes,"logout":"Continues only with explicit user lingering",
-        "boot":"Pinned monitor authenticates the actual kernel boot; finite consent and normal authority checks still apply",
-        "failure":"Failed boot remains stopped; correct the reported dependency and explicitly restart the unit"}),
+        "boot":"Pinned monitor authenticates the actual kernel boot; exact consent and normal authority checks still apply",
+        "failure":"Persistent units retry failures after five seconds while consent remains valid; finite units require an explicit restart"}),
     )
 }
 fn systemctl(arguments: &[String]) -> Result<Vec<u8>> {
@@ -420,6 +442,10 @@ pub(super) fn run(command: Command, service: bool) -> Result<Value> {
             Ok(
                 json!({"unit":i.unit,"profileCurrent":check(&i).is_ok(),"manager":String::from_utf8(output)?}),
             )
+        }
+        Command::Check { directory } => {
+            check(&load(&files::root(&directory)?, service)?)?;
+            Ok(json!({"status":"Consented"}))
         }
         Command::Run { directory } => run_installed(&files::root(&directory)?, service),
     }

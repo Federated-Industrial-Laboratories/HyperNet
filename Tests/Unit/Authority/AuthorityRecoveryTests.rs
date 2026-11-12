@@ -58,7 +58,7 @@ pub(crate) fn fixture(scope: u8, now: u64) -> (Vec<u8>, Vec<SigningKey>) {
             admission_domain: hex::encode([15; 32]),
             assurance: Assurance::Independent,
             not_before_ms: now - 1,
-            expires_ms: now + 3600000,
+            expires_ms: (now + 3600000).into(),
         },
     };
     let draft = trust::draft(

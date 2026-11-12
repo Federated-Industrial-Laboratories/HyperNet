@@ -170,13 +170,12 @@ impl Operation {
         }
         let value = wire::decode(g.record_bytes(105, intent.resource)?)?;
         let consent = value.array(19)?;
-        let validity = consent[16].array(2)?;
-        let span = (validity[0].uint()?, validity[1].uint()?);
+        let span = crate::trust_validity::Validity::parse(&consent[16])?;
         if !members::current(at, span) || consent[18].uint()? != 0 {
             d.refuse(7);
             return Ok(d);
         }
-        d.expires_ms = manager.expires_ms.min(registrar.expires_ms).min(span.1);
+        d.expires_ms = span.1.bound(manager.expires_ms.min(registrar.expires_ms));
         d.versions = manager.dependencies;
         d.versions.extend(registrar.dependencies);
         d.versions.extend([
