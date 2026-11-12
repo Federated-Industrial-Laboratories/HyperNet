@@ -95,6 +95,9 @@ pub enum Command {
         preview_digest: String,
         #[arg(long)]
         operation_id: String,
+        /// Retain an expired exact certificate successor as non-serving history before fresh renewal.
+        #[arg(long)]
+        historical: bool,
     },
     /// Resume only the already durable exact stopped operation; no rollback or fresh consent.
     Recover {
@@ -350,8 +353,14 @@ fn prepare(args: Prepare, service: bool) -> Result<Value> {
     )
 }
 fn inspect(p: &Proposal) -> Result<Value> {
+    inspect_mode(p, false)
+}
+fn inspect_mode(p: &Proposal, historical: bool) -> Result<Value> {
+    if historical {
+        certificates::historical(p)?;
+    }
     if let Some(selection) = &p.transport {
-        certificates::validate(&p.previous, &p.successor, selection, true)?;
+        certificates::validate(&p.previous, &p.successor, selection, !historical)?;
     }
     let (old, digest) = current(&p.root, p.service)?;
     ensure!(
@@ -428,7 +437,7 @@ fn launch_identity(root: &Path) -> Result<Option<(u64, u64)>> {
         Err(e) => Err(e.into()),
     }
 }
-fn begin(p: Proposal, operation: String, digest: String) -> Result<Transaction> {
+fn begin(p: Proposal, operation: String, digest: String, historical: bool) -> Result<Transaction> {
     ensure!(
         !p.service || !p.successor.transport_changed(&p.previous) || p.bindings.is_some(),
         "Certificate-changing services require the exact signed successor route; export the draft manifest, author its route, then prepare the complete transition"
@@ -439,7 +448,7 @@ fn begin(p: Proposal, operation: String, digest: String) -> Result<Transaction> 
         files::directory(&root.join("TransitionFiles"))?;
     }
     files::private_dir(&root.join("TransitionFiles"))?;
-    certificates::stage_files(root, &p, &mut replacements)?;
+    certificates::stage_files(root, &p, &mut replacements, !historical)?;
     let (authority, service, initialised, lifecycle_generation) = if p.service {
         let (mut profile, state) = services::load(root)?;
         ensure!(
@@ -892,6 +901,7 @@ pub(super) fn run(command: Command, service: bool) -> Result<Value> {
             selection,
             preview_digest,
             operation_id,
+            historical,
         } => {
             crate::protocol::fixed_hex::<16>(&operation_id).map_err(anyhow::Error::msg)?;
             let _manager = files::manager_lock(&root.join("Manager"))?;
@@ -916,12 +926,15 @@ pub(super) fn run(command: Command, service: bool) -> Result<Value> {
                                 json!({"status":if blocked {"HistoricalSuccessorRetained"} else {"SuccessorApplied"},"generation":t.proposal.successor.generation,"operationId":operation_id,"running":false,"servingBlocked":blocked}),
                             );
                         }
-                        return finish(t, false);
+                        if historical {
+                            certificates::historical(&t.proposal)?;
+                        }
+                        return finish(t, historical);
                     }
                 }
             }
-            inspect(&p)?;
-            finish(begin(p, operation_id, digest)?, false)
+            inspect_mode(&p, historical)?;
+            finish(begin(p, operation_id, digest, historical)?, historical)
         }
         Command::Recover {
             operation_id,

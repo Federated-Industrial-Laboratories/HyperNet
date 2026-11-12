@@ -1579,8 +1579,16 @@ fn depleted_handover_preserves_expiry_until_normal_post_expiry_renewal() {
 
 // Real certificates exercise the independent route decoder without synthetic TLS pins.
 pub(crate) fn certificate_profiles() -> (RegisteredProfile, RegisteredProfile) {
+    certificate_profiles_until(b"700102000000Z", b"700103000000Z")
+}
+pub(crate) fn certificate_profiles_until(
+    before_end: &[u8],
+    after_end: &[u8],
+) -> (RegisteredProfile, RegisteredProfile) {
     let (issuer, next_issuer, leaf, next_leaf) =
-        crate::runtime_manifest::certificates::tests::route_certificates();
+        crate::runtime_manifest::certificates::tests::route_certificates_until(
+            before_end, after_end,
+        );
     let mut before = Fixture::with_route_transport(true, Some((110, leaf))).profiles[0].clone();
     before.manifest.validity =
         crate::trust_validity::Validity(1000, crate::trust_validity::End::UntilWithdrawn);

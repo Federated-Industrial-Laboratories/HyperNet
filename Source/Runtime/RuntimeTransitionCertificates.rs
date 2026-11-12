@@ -206,11 +206,12 @@ pub(super) fn stage_files(
     root: &Path,
     proposal: &Proposal,
     replacements: &mut BTreeMap<String, Replacement>,
+    fresh: bool,
 ) -> Result<()> {
     let Some(selection) = &proposal.transport else {
         return Ok(());
     };
-    validate(&proposal.previous, &proposal.successor, selection, true)?;
+    validate(&proposal.previous, &proposal.successor, selection, fresh)?;
     let own = proposal
         .successor
         .endpoints
@@ -263,4 +264,29 @@ pub(super) fn summary(selection: &Selection) -> Result<Value> {
         "endpoints":selection.leaves()?.iter().map(|(id, leaf)| Ok(json!({"endpoint":hex::encode(id),"certificateDigest":files::hex_digest(leaf),"validitySeconds":certificates::interval(leaf)?}))).collect::<Result<Vec<_>>>()?,
         "authority":"Same keys, addresses, ports, issuer identity, SAN and usages; no new capability or budget"}),
     )
+}
+
+/// Historical application cannot select different software or authorise serving.
+pub(super) fn historical(proposal: &Proposal) -> Result<()> {
+    historical_at(
+        proposal,
+        files::now()?
+            .checked_mul(1000)
+            .context("Certificate time overflow")?,
+    )
+}
+pub(super) fn historical_at(proposal: &Proposal, now: u64) -> Result<()> {
+    ensure!(
+        proposal.transport.is_some() && proposal.package.is_none(),
+        "Historical apply requires an exact certificate-only successor"
+    );
+    let interval = proposal
+        .successor
+        .transport_interval()?
+        .context("Historical certificate successor absent")?;
+    ensure!(
+        now >= interval.0 && now >= interval.1 && now >= proposal.successor.validity.0,
+        "Historical certificate successor must have expired and already started"
+    );
+    Ok(())
 }

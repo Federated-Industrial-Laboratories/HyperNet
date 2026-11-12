@@ -653,6 +653,9 @@ pub fn verify(
         "Hosting consent signature or exact profile differs"
     );
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    manifest
+        .canonical()?
+        .current_transport(now.checked_mul(1000).context("Certificate time overflow")?)?;
     ensure!(
         now >= manifest.created && now < manifest.expires,
         "Hosting consent is outside its validity interval"

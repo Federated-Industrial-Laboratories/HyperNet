@@ -159,17 +159,27 @@ impl Manifest {
             self.endpoints != previous.endpoints || current.issuer_pem != *old_issuer
         })
     }
-    pub fn transport_expiry(&self) -> Result<Option<u64>> {
+    pub fn transport_interval(&self) -> Result<Option<(u64, u64)>> {
         let Some(transport) = &self.transport_certificates else {
             return Ok(None);
         };
-        let mut end = certificates::interval(&certificates::der(&transport.issuer_pem)?)?.1;
+        let (mut start, mut end) =
+            certificates::interval(&certificates::der(&transport.issuer_pem)?)?;
         for endpoint in &self.endpoints {
-            end = end.min(certificates::interval(&endpoint.leaf_der)?.1);
+            let (before, after) = certificates::interval(&endpoint.leaf_der)?;
+            start = start.max(before);
+            end = end.min(after);
         }
-        Ok(Some(end.checked_mul(1000).ok_or_else(|| {
-            anyhow::anyhow!("Certificate expiry overflow")
-        })?))
+        Ok(Some((
+            start
+                .checked_mul(1000)
+                .ok_or_else(|| anyhow::anyhow!("Certificate time overflow"))?,
+            end.checked_mul(1000)
+                .ok_or_else(|| anyhow::anyhow!("Certificate time overflow"))?,
+        )))
+    }
+    pub fn transport_expiry(&self) -> Result<Option<u64>> {
+        Ok(self.transport_interval()?.map(|(_, end)| end))
     }
     pub fn current_transport(&self, at: u64) -> Result<()> {
         if let Some(transport) = &self.transport_certificates {

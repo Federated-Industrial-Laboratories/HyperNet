@@ -281,6 +281,12 @@ fn expired_issuer_signature_remains_history_but_cannot_serve_as_current_certific
 
 /// Real signatures at the small logical clock used by the authority integration fixtures.
 pub(crate) fn route_certificates() -> (String, String, Vec<u8>, Vec<u8>) {
+    route_certificates_until(b"700102000000Z", b"700103000000Z")
+}
+pub(crate) fn route_certificates_until(
+    before: &[u8],
+    after: &[u8],
+) -> (String, String, Vec<u8>, Vec<u8>) {
     let root = std::env::temp_dir().join(format!(
         "HyperNetRouteCertificates{}",
         hex::encode(rand::random::<[u8; 16]>())
@@ -370,15 +376,15 @@ pub(crate) fn route_certificates() -> (String, String, Vec<u8>, Vec<u8>) {
             end,
         )
     };
-    let before_issuer = date(&issuer, b"700102000000Z");
-    let after_issuer = date(&issuer, b"700103000000Z");
-    let before_leaf = der(&date(&leaf, b"700102000000Z")).unwrap();
-    let after_leaf = der(&date(&leaf, b"700103000000Z")).unwrap();
+    let before_issuer = date(&issuer, before);
+    let after_issuer = date(&issuer, after);
+    let before_leaf = der(&date(&leaf, before)).unwrap();
+    let after_leaf = der(&date(&leaf, after)).unwrap();
     current(
         &after_leaf,
         &der(&after_issuer).unwrap(),
         "192.0.2.10".parse().unwrap(),
-        5000,
+        1000,
     )
     .unwrap();
     fs::remove_dir_all(root).unwrap();

@@ -500,3 +500,17 @@ services also require fresh owner and operator signatures for their unchanged
 binding. A certificate-changing service draft without its signed route cannot be
 applied. The draft changes no installed state and can be discarded after the
 complete final proposal has been retained.
+
+Expired certificate successors can be retained as non-serving deployment history.
+The certificate interval must already have started; an invalid signature, identity
+or future certificate is not an expired historical record. Native activation and
+local workload guards intersect persistent permission with the finite certificate
+deadline, including a monotonic boot deadline.
+
+If an exact reviewed certificate proposal expires before its first apply, use
+`transition apply --historical` with the retained proposal, preview digest and
+operation ID. This option accepts only an expired certificate-only successor;
+it cannot change software or enable serving. It retains the exact signed
+intermediate so a fresh stopped successor can continue its generation chain.
+Already-started operations retain the existing `transition recover --historical`
+path. Neither operation extends a permission, certificate or execution proof.

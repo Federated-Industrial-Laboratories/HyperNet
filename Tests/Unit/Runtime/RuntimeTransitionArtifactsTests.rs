@@ -240,8 +240,17 @@ fn certificate_bundle_stages_only_exact_public_tls_files_and_rejects_mixed_ident
         bindings: None,
         transport: Some(selection),
     };
+    let (_, deadline) = proposal.successor.transport_interval().unwrap().unwrap();
+    assert!(certificates::historical_at(&proposal, deadline - 1).is_err());
+    certificates::historical_at(&proposal, deadline).unwrap();
+    let mut no_transport = proposal.clone();
+    no_transport.transport = None;
+    assert!(certificates::historical_at(&no_transport, deadline).is_err());
+    let mut future = proposal.clone();
+    future.successor.validity.0 = deadline + 1;
+    assert!(certificates::historical_at(&future, deadline).is_err());
     let mut replacements = BTreeMap::new();
-    certificates::stage_files(root, &proposal, &mut replacements).unwrap();
+    certificates::stage_files(root, &proposal, &mut replacements, true).unwrap();
     assert_eq!(replacements.len(), 2);
     assert_eq!(
         read(root, &replacements["Work/Config/Tls/Authority.pem"]).unwrap(),
