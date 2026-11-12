@@ -225,6 +225,7 @@ impl Config {
             key.verifying_key().to_bytes() == profile.service,
             "route service key differs from consent"
         );
+        // Disk admission reserves bounded maintenance and journal space inside this ceiling.
         let metadata_bytes =
             usize::try_from(manifest.roles[0].state_admission_bytes.min(4 * 1024 * 1024))?;
         let relay = configuration

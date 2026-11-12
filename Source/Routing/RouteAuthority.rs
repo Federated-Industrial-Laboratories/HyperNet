@@ -364,36 +364,19 @@ impl<'a> Client<'a> {
             deadline: None,
             read_challenge_ceiling: None,
         };
+        out.disk.recover(&out.store)?;
         out.check_cache()?;
         // Recover the exact retained request before any new connection can consume permission.
         out.recover()?;
         Ok(out)
     }
     fn check_cache(&self) -> Result<()> {
-        let (state, records) = self.disk.context();
-        let scope = self.store.descriptor().scope();
-        let mut refs = crate::authority_governance::Governance::record_versions(
-            scope.network,
-            scope.incarnation,
-            records,
-        )?;
-        refs.extend(state.records.values().map(|r| r.reference.clone()));
+        self.disk.check(&self.store)?;
         let pending = self
             .store
             .resume_ordinary()?
             .map(|r| Intent::from_signed(r.signed()))
             .transpose()?;
-        let historical = self.store.historical_cache_references()?;
-        for r in refs {
-            ensure!(
-                self.store.generations().contains(&r)
-                    || historical.contains(&r)
-                    || pending
-                        .as_ref()
-                        .is_some_and(|p| p.action == "AuthorityDomain" && p.expected.contains(&r)),
-                "Route cache lacks retained quorum authentication"
-            );
-        }
         if let Some(intent) = pending {
             let operation = Operation::parse(&intent)?;
             self.permitted(&operation.command)?;
@@ -641,6 +624,7 @@ impl<'a> Client<'a> {
         self.domain_action(DomainCommand::Route(command))
     }
     fn domain_action(&mut self, command: DomainCommand) -> Result<V> {
+        self.disk.recover(&self.store)?;
         self.active.check(self.guard)?;
         if let Some(deadline) = self.deadline {
             transport::remaining(deadline)?;
@@ -773,6 +757,8 @@ impl<'a> Client<'a> {
             let candidate = candidate.context("Route permit omitted verified domain context")?;
             result::minimum(&candidate.versions, self.store.generations())?;
             transport::remaining(deadline)?;
+            self.disk
+                .stage(candidate.state, candidate.records, &self.store)?;
             self.store
                 .accept_with_clock(verified, &mut self.session, &mut || self.guard.health(), 0)?
                 .perform_with_clock(
@@ -788,12 +774,13 @@ impl<'a> Client<'a> {
                         );
                         Ok(())
                     },
-                    |_, _| {
+                    |_, store| {
                         ensure!(
                             outputs.references().is_empty(),
                             "route authority returned unexpected content objects"
                         );
-                        self.disk.publish(candidate.state, candidate.records)?;
+                        self.disk.recover(store)?;
+                        self.disk.check(store)?;
                         transport::remaining(deadline)?;
                         Ok(candidate.value)
                     },
@@ -824,6 +811,7 @@ impl<'a> Client<'a> {
         self.costs.own_ms.unwrap_or(0)
     }
     fn recover(&mut self) -> Result<()> {
+        self.disk.recover(&self.store)?;
         // A disclosure refusal is not an original outcome. Resolve it before
         // selecting a retained command so status cannot turn it into new work.
         if self.store.refusal_needs_status()? {

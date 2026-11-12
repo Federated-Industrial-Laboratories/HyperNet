@@ -482,7 +482,9 @@ pub(super) fn create(
     mount(p, &mut args, &p.clock_directory, "/Clock", false, true);
     let requester_recovery = helper
         && (command == files::strings(&["runtime-service-requester-status"])
-            || command == files::strings(&["runtime-service-requester-fence"]));
+            || command == files::strings(&["runtime-service-requester-fence"])
+            || command == files::strings(&["runtime-service-route-cache"])
+            || command == files::strings(&["runtime-service-route-cache", "--repair"]));
     if !requester_recovery {
         for (key, selected) in &p.media_controls {
             mount(

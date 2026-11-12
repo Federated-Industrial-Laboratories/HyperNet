@@ -327,6 +327,11 @@ fn policy_quorum(delayed: bool, capacity: bool, acknowledge: bool) {
             (signed, challenge)
         };
         let finish = |drivers: &mut Vec<Driver>, signed: &[u8], challenge: &[u8]| {
+            // Filling the collection may exceed one clock observation in debug builds.
+            // Refresh the independent clock witness, not the original read challenge.
+            for directory in &directories {
+                runtime_clock(&directory.0);
+            }
             let id = read::read_id(signed, challenge).unwrap();
             let submission = wire::encode(&V::Array(vec![
                 V::Bytes(signed.to_vec()),
@@ -402,6 +407,10 @@ fn policy_quorum(delayed: bool, capacity: bool, acknowledge: bool) {
                 health,
             )
             .unwrap();
+            // Storage initialization can outlive the driver's independent clock witness.
+            for directory in &directories {
+                runtime_clock(&directory.0);
+            }
             // Negative vectors precede the bounded consume-and-acknowledge section.
             let signed = read::Acknowledgement::sign(
                 &verified.statement,

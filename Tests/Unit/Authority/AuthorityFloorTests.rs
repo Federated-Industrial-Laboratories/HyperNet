@@ -627,6 +627,12 @@ pub(crate) fn certified(
             ancestry: &[node],
         },
         |intent, result, _| {
+            if intent.action == "AuthorityDomain" {
+                crate::authority_domains::Operation::parse(intent)?;
+                return proof::ActionValidation::new(crate::authority_read::result_versions(
+                    result,
+                )?);
+            }
             ensure!(
                 intent.action == "ReadPage" && result.value == intent.parameters,
                 "test ordinary schema differs"
@@ -718,6 +724,40 @@ pub(crate) fn prepare(store: &mut Store, sample: ClockHealth) -> (PreparedReques
     )
     .unwrap();
     (store.prepare_ordinary(slot, &signed).unwrap(), f.operation)
+}
+pub(crate) fn prepare_domain(store: &mut Store, sample: ClockHealth) -> PreparedRequest {
+    let f = Fixture::new(sample.observe().unwrap().wall_ms);
+    let (payload, _) = wire::envelope(&f.intent, 1).unwrap();
+    let V::Array(mut fields) = wire::decode(&payload).unwrap() else {
+        unreachable!()
+    };
+    let slot = store.ordinary_slot().unwrap();
+    let operation = crate::authority_domains::Operation {
+        grant: None,
+        command: crate::authority_domains::routes::Command::Lookup { service: [7; 32] }.into(),
+        snapshot: crate::authority_domains::snapshot(&V::Array(vec![
+            V::Array(vec![
+                V::Uint(slot.minimum_policy_epoch()),
+                V::Uint(slot.minimum_policy_height()),
+                b(store.prefix().policy_state()),
+            ]),
+            V::Array(vec![]),
+        ]))
+        .unwrap(),
+    };
+    fields[4] = V::Uint(slot.generation());
+    fields[5] = b(&slot.generation_id());
+    fields[6] = V::Uint(slot.sequence());
+    fields[7] = V::Uint(slot.acknowledged_through());
+    fields[9] = V::Text("AuthorityDomain".into());
+    fields[10] = b(&operation.command.resource());
+    fields[11] = V::Uint(0);
+    fields[12] = V::Uint(0);
+    fields[13] = V::Uint(slot.minimum_policy_epoch());
+    fields[14] = V::Uint(slot.minimum_policy_height());
+    fields[16] = b(&operation.parameters().unwrap());
+    let signed = wire::sign_envelope(&encoded(fields), &SigningKey::from_bytes(&[1; 32])).unwrap();
+    store.prepare_ordinary(slot, &signed).unwrap()
 }
 #[test]
 fn saved_body_and_exact_request_survive_failed_workflow_then_allow_successor() {

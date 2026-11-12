@@ -262,6 +262,36 @@ pub(super) fn epoch(p: &Profile, s: &mut State, input: &Path, args: &[String]) -
     crate::runtime_audit::record(&p.root, &p.manifest, "EpochAdvance", "Committed")?;
     Ok(result)
 }
+fn route_cache_scope(role: u64, initialised: bool, resources: bool) -> Result<()> {
+    ensure!(
+        role == 5 && initialised,
+        "cache recovery requires an initialised private route service"
+    );
+    ensure!(
+        !resources,
+        "stop the private route service before cache recovery"
+    );
+    Ok(())
+}
+pub(super) fn route_cache(p: &Profile, s: &mut State, repair: bool) -> Result<Value> {
+    permitted(p, s)?;
+    route_cache_scope(
+        p.role()?.role,
+        s.initialised,
+        s.container.is_some() || s.network.is_some() || s.egress.is_some(),
+    )?;
+    preparation::prepare(p)?;
+    let mut command = files::strings(&["runtime-service-route-cache"]);
+    if repair {
+        crate::runtime_audit::record(&p.root, &p.manifest, "Recovery", "Prepared")?;
+        command.push("--repair".into());
+    }
+    let result = serde_json::from_slice(&workload::finite(p, s, &command, None)?)?;
+    if repair {
+        crate::runtime_audit::record(&p.root, &p.manifest, "Recovery", "Committed")?;
+    }
+    Ok(result)
+}
 fn requester_scope(role: u64, initialised: bool, resources: bool) -> Result<()> {
     ensure!(
         role == 7,

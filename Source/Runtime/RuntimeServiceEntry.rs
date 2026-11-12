@@ -175,6 +175,39 @@ pub fn bridge() -> Result<()> {
         .block_on(bridge::run(config, &guard, &mut active))
         .map_err(|error| anyhow::anyhow!("Bridge startup or serving failed: {error:#}"))
 }
+pub fn route_cache(repair: bool) -> Result<()> {
+    ensure!(
+        role()? == 5,
+        "cache recovery requires its own private route role"
+    );
+    let guard = Guard::load(Path::new("/Authorization"), Path::new("/Config"), 5)?;
+    let config = crate::route_config::Config::load()?;
+    let profile = store_confinement()?;
+    config.resources(&profile)?;
+    ensure!(
+        Path::new("/State/RouteState.cbor").try_exists()?,
+        "route cache is absent; no empty replacement created"
+    );
+    let store = crate::authority_floor::Store::open(
+        Path::new("/State/Requester"),
+        guard.bootstrap.descriptor().clone(),
+    )?;
+    store.require_requester(guard.key())?;
+    let mut disk = crate::route_state::Disk::open(
+        Path::new("/State"),
+        config.manifest.network,
+        config.manifest.incarnation,
+        config.metadata_bytes,
+    )?;
+    guard.check()?;
+    let report = if repair {
+        disk.repair(&store)?
+    } else {
+        disk.inspect(&store)?
+    };
+    println!("{}", report);
+    Ok(())
+}
 pub fn bridge_requester(fence: bool) -> Result<()> {
     ensure!(
         role()? == 7,
