@@ -84,7 +84,7 @@ impl<'a> Profile<'a> {
                         && p.namespaces.contains(&bundle.author.namespace),
                     "Page bundle exceeds host scope"
                 );
-                Ok(bundle.author.expires_ms.min(p.manifest.validity.1).min(
+                Ok(p.manifest.validity.1.bound(bundle.author.expires_ms).min(
                     used.checked_add(p.retention_ms)
                         .context("Page retention overflow")?,
                 ))
@@ -109,10 +109,11 @@ impl<'a> Profile<'a> {
                                 .matches(author.network, author.incarnation)
                             && agreement.treaty.source_namespace == bundle.author.namespace
                         {
-                            let limit = bundle
-                                .author
-                                .expires_ms
-                                .min(p.manifest.validity.1)
+                            let limit = p
+                                .manifest
+                                .validity
+                                .1
+                                .bound(bundle.author.expires_ms)
                                 .min(agreement.treaty.expires_ms);
                             expiry = Some(expiry.map_or(limit, |old: u64| old.max(limit)));
                         }

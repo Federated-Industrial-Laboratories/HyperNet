@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Creation codecs are shared by execution and independent admission inspection.
+use crate::trust_validity::Validity;
 use crate::{
     authority_governance::{Governance, Requirement, UNCERTAINTY_MS},
     authority_proof::{Digest, Intent, Key, VersionRef, validate_versions},
@@ -45,18 +46,15 @@ pub fn version(value: &V) -> Result<VersionRef> {
     );
     Ok(result)
 }
-fn span(value: &V) -> Result<(u64, u64)> {
-    let f = value.array(2)?;
-    let result = (f[0].uint()?, f[1].uint()?);
-    ensure!(result.0 < result.1, "invalid validity interval");
-    Ok(result)
+fn span(value: &V) -> Result<Validity> {
+    Validity::parse(value)
 }
-pub fn current(at: u64, validity: (u64, u64)) -> bool {
-    at.checked_sub(UNCERTAINTY_MS)
-        .is_some_and(|t| t >= validity.0)
-        && at
-            .checked_add(UNCERTAINTY_MS)
-            .is_some_and(|t| t < validity.1)
+fn finite_span(value: &V) -> Result<(u64, u64)> {
+    let span = Validity::parse(value)?;
+    Ok((span.0, span.1.finite()?))
+}
+pub fn current(at: u64, validity: impl Into<Validity>) -> bool {
+    validity.into().current(at, UNCERTAINTY_MS)
 }
 fn limits(value: &V) -> Result<[u64; 4]> {
     let f = value.array(4)?;
@@ -115,7 +113,10 @@ pub fn capability_failure(governance: &Governance, grant: Digest, at: u64) -> u6
         let Ok(fields) = value.array(17) else {
             return 3;
         };
-        if span(&fields[12]).is_ok_and(|span| !current(at, span)) {
+        if governance
+            .grant_validity(cursor)
+            .is_ok_and(|span| !current(at, span))
+        {
             return 7;
         }
         let subject = fields[8].fixed::<32>().ok();
@@ -214,7 +215,7 @@ pub struct ChildSpec {
     pub tier: VersionRef,
     pub actions: Vec<u64>,
     pub scopes: Vec<(u64, Digest)>,
-    pub validity: (u64, u64),
+    pub validity: Validity,
     pub depth: u64,
     pub limits: [u64; 4],
     pub value: V,
@@ -247,7 +248,7 @@ impl ChildSpec {
 pub struct Acceptance {
     pub member_id: Digest,
     pub candidate: Key,
-    pub validity: (u64, u64),
+    pub validity: Validity,
     pub reader: VersionRef,
     pub administrator: Key,
     pub acceptance_validity: (u64, u64),
@@ -280,7 +281,7 @@ impl Acceptance {
         wire::valid_key(&administrator)?;
         let reader = version(&f[8])?;
         let validity = span(&f[7])?;
-        let acceptance_validity = span(&f[11])?;
+        let acceptance_validity = finite_span(&f[11])?;
         ensure!(
             candidate != administrator
                 && reader.kind == 102
@@ -427,7 +428,7 @@ impl Mutation {
                 b(&acceptance.candidate),
                 a(vec![
                     V::Uint(acceptance.validity.0),
-                    V::Uint(acceptance.validity.1),
+                    acceptance.validity.1.value(),
                 ]),
                 V::Bool(false),
                 reference(&acceptance.reader),
@@ -581,7 +582,7 @@ impl Mutation {
                     let ts = scopes(&t[10], intent.network)?;
                     let pl = limits(&p[15])?;
                     let tl = limits(&t[12])?;
-                    let pv = span(&p[12])?;
+                    let pv = governance.grant_validity(parent.id)?;
                     if p[8].fixed::<32>()? != intent.requester
                         || !pa.contains(&11)
                         || !child
@@ -652,7 +653,7 @@ impl Mutation {
                     }
                     decision.dependencies.push(child.tier.clone());
                     decision.not_before_ms = decision.not_before_ms.max(child.validity.0);
-                    decision.expires_ms = decision.expires_ms.min(child.validity.1);
+                    decision.expires_ms = child.validity.1.bound(decision.expires_ms);
                 } else {
                     decision.refuse(3);
                 }

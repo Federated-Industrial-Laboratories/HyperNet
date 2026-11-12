@@ -6,8 +6,9 @@ use anyhow::{Result, ensure};
 pub fn validity(
     current: &Manifest,
     definition: &Manifest,
-    interval: (u64, u64),
-) -> Result<(u64, u64)> {
+    interval: impl Into<crate::trust_validity::Validity>,
+) -> Result<crate::trust_validity::Validity> {
+    let interval = interval.into();
     current.permits_definition(definition)?;
     ensure!(
         interval.0 >= definition.validity.0
@@ -18,7 +19,7 @@ pub fn validity(
     let span = if interval == definition.validity {
         current.validity
     } else {
-        (
+        crate::trust_validity::Validity(
             interval.0.max(current.validity.0),
             interval.1.min(current.validity.1),
         )

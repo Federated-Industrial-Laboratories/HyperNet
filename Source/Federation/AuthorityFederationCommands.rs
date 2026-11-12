@@ -3,6 +3,10 @@
 use super::*;
 
 #[derive(Clone, Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Bounded wire commands are processed individually without another allocation."
+)]
 pub enum Command {
     SourceContext {
         agreement: Digest,

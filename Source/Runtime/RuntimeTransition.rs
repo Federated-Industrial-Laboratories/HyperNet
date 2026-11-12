@@ -26,8 +26,11 @@ pub struct Prepare {
     #[arg(long)]
     directory: PathBuf,
     /// New absolute consent expiry in Unix seconds; omission retains the existing interval.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "until_withdrawn")]
     valid_until: Option<u64>,
+    /// Consent continues until explicit withdrawal; exact resources and software remain bound.
+    #[arg(long)]
+    until_withdrawn: bool,
     /// Bind a freshly authenticated witness from the already approved monitor to this host boot.
     #[arg(long)]
     refresh_host_boot: bool,
@@ -224,6 +227,13 @@ fn prepare(args: Prepare, service: bool) -> Result<Value> {
         successor.validity = (
             files::now()?.checked_mul(1000).context("Time overflow")?,
             until.checked_mul(1000).context("Time overflow")?,
+        )
+            .into();
+    }
+    if args.until_withdrawn {
+        successor.validity = crate::trust_validity::Validity(
+            files::now()?.checked_mul(1000).context("Time overflow")?,
+            crate::trust_validity::End::UntilWithdrawn,
         );
     }
     if args.refresh_host_boot {

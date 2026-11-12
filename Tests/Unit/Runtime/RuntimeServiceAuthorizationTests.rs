@@ -28,7 +28,7 @@ fn application_check_short_wait_and_clock_sample_preserve_fresh_challenge_geomet
     .unwrap();
     let clock = ApplicationClock {
         kernel_boot: "host".into(),
-        consent_deadline: 20000,
+        consent_deadline: Some(20000),
         observation_deadline: 11000,
     };
     let sample = ClockHealth::new(1000000, 10000, 11000, 1).unwrap().frozen();
@@ -68,7 +68,7 @@ fn application_check_short_wait_and_clock_sample_preserve_fresh_challenge_geomet
     // deadline, local consent lifetime, or original start+5000 challenge ceiling.
     let refreshed = ApplicationClock {
         kernel_boot: "host".into(),
-        consent_deadline: 14000,
+        consent_deadline: Some(14000),
         observation_deadline: 13000,
     };
     assert_eq!(refreshed.read_deadline(15000), 14000);
@@ -118,12 +118,24 @@ fn service_clock_recovery_retains_deadline_and_rejects_changed_consent() {
             7,
             wire::digest(&local),
             wire::digest(&host),
-            2000,
+            Some(2000),
             now,
         )
     };
     check(1999).unwrap();
     assert!(check(2000).is_err());
+    let persistent = || {
+        verify_local(
+            &directory.0,
+            operator,
+            7,
+            wire::digest(&local),
+            wire::digest(&host),
+            None,
+            31_536_000_000,
+        )
+    };
+    persistent().unwrap();
     for (name, original, replacement) in [
         ("Withdrawal.json", b"0".to_vec(), b"1".to_vec()),
         ("Generation.json", b"7".to_vec(), b"8".to_vec()),
@@ -141,6 +153,7 @@ fn service_clock_recovery_retains_deadline_and_rejects_changed_consent() {
         std::fs::write(directory.0.join(name), replacement).unwrap();
         let error = check(1999).unwrap_err();
         assert!(!error.is::<crate::consensus_clock::ObservationExpired>());
+        assert!(persistent().is_err());
         std::fs::write(directory.0.join(name), original).unwrap();
     }
     check(1999).unwrap();

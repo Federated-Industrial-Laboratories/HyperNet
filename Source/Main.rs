@@ -143,6 +143,8 @@ mod transport;
 mod trust_action_scope;
 #[path = "Protocol/TrustBootstrap.rs"]
 mod trust_bootstrap;
+#[path = "Protocol/TrustValidity.rs"]
+mod trust_validity;
 #[path = "Protocol/TrustWire.rs"]
 #[allow(dead_code)]
 mod trust_wire;
@@ -171,6 +173,8 @@ struct Arguments {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Machine-readable native protocol capabilities for compatible server setup.
+    ProtocolFeatures,
     /// Initialise or run one independently pinned authority replica.
     AuthorityReplica {
         #[command(subcommand)]
@@ -186,7 +190,7 @@ enum Command {
         #[arg(long, value_enum)]
         kind: runtime_guard::Kind,
         #[arg(long)]
-        expires: u64,
+        expires: crate::trust_validity::End,
         #[arg(last = true)]
         arguments: Vec<String>,
     },
@@ -277,6 +281,7 @@ fn run() -> Result<()> {
         .install_default()
         .map_err(|_| anyhow::anyhow!("The TLS provider was already configured"))?;
     match Arguments::parse().command {
+        Command::ProtocolFeatures => println!("{}", trust_validity::features()),
         Command::AuthorityReplica { command } => authority_replica::run(command)?,
         Command::AuthorityClock { command } => authority_clock_monitor::run(command)?,
         Command::RuntimeGuard {

@@ -995,12 +995,16 @@ impl<'a> Client<'a> {
         );
         let limits = intersect(own.limits, target.limits);
         let now = self.now()?;
-        let total_expires =
-            self.total_expiry(started, limits, admitted.expires.min(target.validity.1))?;
+        let total_expires = self.total_expiry(
+            started,
+            limits,
+            crate::trust_validity::End::At(target.validity.1.bound(admitted.expires)),
+        )?;
         let expires = total_expires.min(self.last_expiry);
         ensure!(now < expires, "route admission expired before forwarding");
         self.disk.consume(connection, now, total_expires)?;
         let renewal = Some(Renewal {
+            admitted: admitted.clone(),
             voucher,
             target: target.envelope.clone(),
             relay: own.envelope,
@@ -1018,7 +1022,7 @@ impl<'a> Client<'a> {
         &self,
         started: u64,
         limits: crate::route_profile::Limits,
-        expires: u64,
+        expires: crate::trust_validity::End,
     ) -> Result<u64> {
         let now = self.guard.health()?.observe()?;
         let remaining = started
@@ -1026,13 +1030,18 @@ impl<'a> Client<'a> {
             .and_then(|deadline| deadline.checked_sub(now.boot_ms))
             .filter(|remaining| *remaining > 0)
             .context("original route lifetime expired")?;
-        Ok(now.wall_ms.saturating_add(remaining).min(expires).min(
-            crate::authority_operational_consent::validity(
-                &self.config.manifest,
-                &self.config.profile.manifest,
-                self.config.profile.validity,
-            )?
-            .1,
+        Ok(crate::authority_operational_consent::validity(
+            &self.config.manifest,
+            &self.config.profile.manifest,
+            self.config.profile.validity,
+        )?
+        .1
+        .bound(
+            expires.bound(
+                now.wall_ms
+                    .checked_add(remaining)
+                    .context("route deadline overflow")?,
+            ),
         ))
     }
     pub fn refresh(&mut self, renewal: &Renewal, deadline: u64) -> Result<u64> {
@@ -1048,10 +1057,15 @@ impl<'a> Client<'a> {
             let (state, _) = client.disk.context();
             let record = state.record(166, renewal.voucher.id)?;
             ensure!(
-                record.reference == renewal.voucher,
+                record.reference == renewal.voucher
+                    || record.reference.generation > renewal.voucher.generation,
                 "live route voucher changed"
             );
             let voucher = routes::Voucher::parse(&record.payload)?;
+            ensure!(
+                voucher.continues(&renewal.admitted),
+                "live route authority or budget changed"
+            );
             let own = client.registered(voucher.relay.id)?;
             let target = client.registered(voucher.destination.id)?;
             ensure!(
@@ -1318,6 +1332,7 @@ pub struct Admission {
     pub renewal: Option<Renewal>,
 }
 pub struct Renewal {
+    admitted: routes::Voucher,
     voucher: VersionRef,
     target: Vec<u8>,
     relay: Vec<u8>,

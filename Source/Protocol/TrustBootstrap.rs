@@ -50,7 +50,7 @@ pub struct RouteSpec {
     pub admission_domain: String,
     pub assurance: Assurance,
     pub not_before_ms: u64,
-    pub expires_ms: u64,
+    pub expires_ms: crate::trust_validity::End,
 }
 
 #[derive(Clone, Serialize)]
@@ -200,11 +200,8 @@ fn scope_subset(child: &[(u64, [u8; 32])], parent: &[(u64, [u8; 32])], network: 
         .all(|v| parent.contains(v) || parent.contains(&(0, *network)))
 }
 fn validity(value: &V, time: u64) -> Result<()> {
-    let pair = value.array(2)?;
-    ensure!(
-        pair[0].uint()? <= time && time < pair[1].uint()?,
-        "bootstrap validity is not current"
-    );
+    let span = crate::trust_validity::Validity::parse(value)?;
+    ensure!(span.current(time, 0), "bootstrap validity is not current");
     Ok(())
 }
 fn version_ref(value: &V, kind: u64, lookup: &[u8; 32], bytes: &[u8]) -> Result<()> {
@@ -580,10 +577,12 @@ fn verify(bytes: &[u8], require_acceptance: bool, time: Option<u64>) -> Result<V
         "independent route declares shared control"
     );
     ensure!(
-        route[13].uint()? < route[14].uint()?
-            && time.is_none_or(
-                |time| route[13].uint().unwrap() <= time && time < route[14].uint().unwrap()
-            ),
+        route[13].uint()? < crate::trust_validity::End::parse(&route[14])?
+            && time.is_none_or(|time| crate::trust_validity::Validity(
+                route[13].uint().unwrap(),
+                crate::trust_validity::End::parse(&route[14]).unwrap()
+            )
+            .current(time, 0)),
         "bootstrap route is not current"
     );
     let draft = bundle[4] == V::Null;
@@ -659,7 +658,7 @@ fn verify(bytes: &[u8], require_acceptance: bool, time: Option<u64>) -> Result<V
                 admission_domain: hex::encode(admission_domain),
                 assurance,
                 not_before_ms: route[13].uint()?,
-                expires_ms: route[14].uint()?,
+                expires_ms: crate::trust_validity::End::parse(&route[14])?,
             },
             draft,
         },

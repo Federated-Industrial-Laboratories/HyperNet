@@ -22,7 +22,7 @@ fn owner_offer_never_substitutes_for_operator_acceptance() {
             duration_ms: 60000,
             idle_ms: 10000,
         },
-        validity: (1, 100000),
+        validity: (1, 100000).into(),
         envelope: vec![],
     };
     r.envelope = wire::sign_envelope(&r.payload([1; 32], [2; 32]).unwrap(), &owner).unwrap();

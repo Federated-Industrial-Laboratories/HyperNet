@@ -11,7 +11,7 @@ pub struct CurrentRoster {
 pub struct CurrentMember {
     pub key: Key,
     pub dependencies: Vec<VersionRef>,
-    pub expires_ms: u64,
+    pub expires_ms: crate::trust_validity::End,
 }
 fn governance_reference(governance: &Governance, kind: u64, lookup: Digest) -> Result<VersionRef> {
     governance
@@ -26,8 +26,7 @@ fn bootstrap_grant(
     member: Digest,
 ) -> Result<Option<VersionRef>> {
     let policy = wire::decode(governance.record_bytes(100, network)?)?;
-    for root in policy.array(17)?[15].list(16)? {
-        let lookup = id(root)?;
+    for (lookup, _) in crate::authority_governance::policy_roots(policy.array(17)?)? {
         let value = wire::decode(governance.record_bytes(102, lookup)?)?;
         let fields = value.array(17)?;
         if fields[8].fixed::<32>()? == member && fields[13] == V::Null {
@@ -70,7 +69,7 @@ pub fn current_member(
     if let Ok(bytes) = governance.record_bytes(125, member) {
         let value = wire::decode(bytes)?;
         let fields = value.array(12)?;
-        let lifetime = validity(&fields[8])?;
+        let lifetime = crate::trust_validity::Validity::parse(&fields[8])?;
         ensure!(
             !fields[9].boolean()? && current(at, lifetime),
             "recipient member is not active"
@@ -111,7 +110,7 @@ pub fn current_member(
     Ok(CurrentMember {
         key: member,
         dependencies: permission.dependencies,
-        expires_ms: permission.expires_ms,
+        expires_ms: governance.grant_validity(grant.id)?.1,
     })
 }
 
@@ -169,7 +168,7 @@ pub fn roster(
         let root = Root::parse(&payload(record)?, state.network, state.incarnation)?;
         let member = current_member(governance, state.network, root.member, at)?;
         dependencies.extend(member.dependencies);
-        expires_ms = expires_ms.min(member.expires_ms);
+        expires_ms = member.expires_ms.bound(expires_ms);
         let mut count = 0;
         for binding in state.records.values().filter(|r| r.reference.kind == 108) {
             let device = Binding::parse(&payload(binding)?, state.network, state.incarnation)?;

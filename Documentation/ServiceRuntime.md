@@ -267,10 +267,13 @@ Managed boot uses `runtime services managed preview` and `enable`, with the same
 `--clock-monitor` and reviewed digest as authorities, plus
 `--activation-request /Private/ActivationRequest.cbor`. It requires explicit Managed
 consent and user lingering. Each boot rechecks the exact signed request, current
-quorum, recipient floors, finite consent and actual pinned monitor boot. Managed
+quorum, recipient floors, current consent and actual pinned monitor boot. Managed
 startup grants no permission by itself. Use `managed status` and `managed disable`
 to inspect or stop automatic operation. A stale request or unavailable quorum
 leaves the service stopped; export a current request and explicitly enable it again.
+
+Persistent managed services require the dedicated activation workflow in
+[Persistent access](PersistentAccess.md). Finite services retain their original activation and lifetime rules.
 
 ### Inspect or repair a stopped private route cache
 

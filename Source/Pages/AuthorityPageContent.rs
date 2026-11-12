@@ -631,9 +631,12 @@ pub(crate) fn evaluate(
                     "content exceeds host object bound"
                 );
                 domains.insert(policy.failure_domain);
-                expiry = expiry
-                    .min(c.at.saturating_add(h.profile.retention_ms))
-                    .min(h.profile.manifest.validity.1);
+                expiry = h
+                    .profile
+                    .manifest
+                    .validity
+                    .1
+                    .bound(expiry.min(c.at.saturating_add(h.profile.retention_ms)));
                 let retained = next
                     .records
                     .values()

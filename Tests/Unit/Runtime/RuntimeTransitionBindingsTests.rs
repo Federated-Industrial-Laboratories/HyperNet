@@ -77,7 +77,7 @@ fn successor(old: &Manifest) -> Manifest {
     new.generation += 1;
     new.previous_profile = Some(wire::digest(&old.desired().unwrap()));
     new.previous_consent = Some(wire::digest(&old.unsigned_consent(0).unwrap()));
-    new.validity = (15000, 40000);
+    new.validity = (15000, 40000).into();
     new.successor_of(old).unwrap();
     new
 }
@@ -92,7 +92,7 @@ fn renewed(old: &RegisteredProfile) -> (RegisteredProfile, Manifest) {
             .unwrap();
     seal(&mut new);
     let mut host = successor(&new.manifest);
-    host.validity = (16000, 40000);
+    host.validity = (16000, 40000).into();
     (new, host)
 }
 fn configuration(route: &RegisteredProfile, generation: u64) -> Configuration {

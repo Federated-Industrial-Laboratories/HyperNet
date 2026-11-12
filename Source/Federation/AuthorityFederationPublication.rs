@@ -253,7 +253,7 @@ pub(super) fn import(
             hosts.push(r.reference);
         }
         ensure!(
-            t.media_profiles.contains(&manifest.profile) && t.copies >= manifest.copies.into(),
+            t.media_profiles.contains(&manifest.profile) && t.copies >= u64::from(manifest.copies),
             "foreign media placement does not meet signed source requirements"
         );
         let asset = page::Asset {

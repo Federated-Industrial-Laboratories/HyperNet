@@ -190,7 +190,7 @@ stale expected generation after compaction; compaction never resets lifecycle
 or signer generations. Already stopped or withdrawn deployments cannot allocate
 repeated emergency operations.
 
-The lifetime remains finite. Use the reviewed stopped successor workflow below
+Finite consent retains its expiry. Optional [persistent consent](PersistentAccess.md) lasts until withdrawn. Use the reviewed stopped successor workflow below
 to renew consent, recover a host boot or change the installed software. It never
 recreates a signer to bypass expiry or a restart refusal. Live replacement is
 not supported.
@@ -324,7 +324,7 @@ HyperNet runtime transition apply --directory /Private/AuthorityOne \
   --operation-id NEW_32_HEX_DIGITS
 ```
 
-Omit `--valid-until` to retain the existing finite interval. Omit
+Omit `--valid-until` to retain the existing interval. Omit
 `--refresh-host-boot` when its binding has not changed. Start the existing pinned
 clock monitor first after a host reboot. The successor requires a fresh signed
 observation for the actual host boot before it updates an initial or epoch-appointed
@@ -390,7 +390,7 @@ and publication approvals; they do not extend independently shorter domain lease
 
 Session mode remains the default. To permit managed boot explicitly, prepare and
 apply a stopped successor with `--session-policy managed`, or select that policy
-at initial setup. Its finite consent uses `CurrentHost`: every launch verifies a
+at initial setup. Its consent uses `CurrentHost`: every launch verifies a
 fresh signed observation from the pinned monitor against the actual kernel boot.
 It does not accept a foreign boot or shifted time namespace.
 

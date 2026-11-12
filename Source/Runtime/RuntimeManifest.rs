@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Canonical deployment resources shared by consent, admission and local activation.
+use crate::trust_validity::Validity;
 use crate::trust_wire::{self as wire, Value as V};
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -88,7 +89,7 @@ pub struct Manifest {
     pub operator: Key,
     pub bootstrap_digest: Key,
     pub software_digest: Key,
-    pub validity: (u64, u64),
+    pub validity: Validity,
     pub session_mode: u64,
     pub roles: Vec<Role>,
     pub volumes: Vec<Volume>,
@@ -221,8 +222,8 @@ impl Manifest {
                 && (self.clock.kernel_boot == "CurrentHost") == (self.session_mode == 1)
                 && self.validity.0 > 0
                 && self.validity.1 > self.validity.0
-                && self.validity.1 - self.validity.0 <= 604800000,
-            "Invalid finite session consent"
+                && self.validity.bounded_duration(604800000),
+            "Invalid session consent"
         );
         ensure!(
             (1..=9).contains(&self.roles.len())
@@ -486,7 +487,7 @@ impl Manifest {
         stable.generation = 1;
         stable.previous_profile = None;
         stable.previous_consent = None;
-        stable.validity = (1, 2);
+        stable.validity = (1, 2).into();
         stable.session_mode = 0;
         stable.clock.kernel_boot = "InitialHost".into();
         stable.software_digest = [1; 32];
@@ -603,7 +604,7 @@ impl Manifest {
             b(&self.operator),
             b(&self.bootstrap_digest),
             b(&self.software_digest),
-            a([V::Uint(self.validity.0), V::Uint(self.validity.1)]),
+            self.validity.value(),
             V::Uint(self.session_mode),
             roles,
             volumes,
@@ -631,7 +632,7 @@ impl Manifest {
             v[0].uint()? == 200 && v[1].uint()? == 1 && v[2].text()? == "HyperNetRuntimeManifest",
             "Invalid runtime manifest envelope"
         );
-        let validity = v[10].array(2)?;
+        let validity = Validity::parse(&v[10])?;
         let c = v[15].array(5)?;
         let p = v[16].array(4)?;
         let l = v[17].array(4)?;
@@ -717,7 +718,7 @@ impl Manifest {
             operator: key(&v[7])?,
             bootstrap_digest: key(&v[8])?,
             software_digest: key(&v[9])?,
-            validity: (validity[0].uint()?, validity[1].uint()?),
+            validity,
             session_mode: v[11].uint()?,
             roles,
             volumes,
@@ -791,7 +792,7 @@ impl Manifest {
             a(self.limits.map(V::Uint)),
             V::Bool(self.consent_policy.allow_opaque),
             ids(&self.consent_policy.reviewer_roots),
-            a([V::Uint(self.validity.0), V::Uint(self.validity.1)]),
+            self.validity.value(),
             b(&profile),
             V::Uint(withdrawal_generation),
         ]);

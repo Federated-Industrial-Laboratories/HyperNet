@@ -110,7 +110,10 @@ impl Context<'_> {
             self.selected.insert(r.reference.index(), r);
         }
         self.dependencies.extend(d.dependencies);
-        self.expires = self.expires.min(d.expires_ms).min(registration.validity.1);
+        self.expires = registration
+            .validity
+            .1
+            .bound(self.expires.min(d.expires_ms));
         Ok(p.clone())
     }
     fn service(&mut self, id: Digest) -> Result<(Record, Service, routes::RegisteredProfile)> {

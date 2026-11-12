@@ -17,7 +17,7 @@ impl Profile {
             b(&self.endpoint),
             V::Text(self.purpose.clone()),
             V::Uint(self.maximum_seconds),
-            a(vec![V::Uint(self.validity.0), V::Uint(self.validity.1)]),
+            a(vec![V::Uint(self.validity.0), self.validity.1.value()]),
             reference(&self.deployment_profile),
             reference(&self.consent),
             b(&self.manifest.encode()?),

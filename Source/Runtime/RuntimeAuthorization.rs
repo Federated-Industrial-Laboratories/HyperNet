@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Exact local operator consent for an appointed authority workload.
+use crate::trust_validity::{End, Validity};
 use crate::{
     authority_files as files,
     consensus::runtime::Config,
@@ -41,7 +42,7 @@ pub struct Manifest {
     pub software_digest: String,
     pub image: String,
     pub created: u64,
-    pub expires: u64,
+    pub expires: End,
     pub bind: Ipv4Addr,
     pub port: u16,
     pub subnet: Ipv4Addr,
@@ -107,9 +108,9 @@ impl Manifest {
         ensure!(
             self.created > 0
                 && self.expires > self.created
-                && self.expires - self.created <= 604800
-                && self.expires <= u64::MAX / 1000,
-            "Invalid finite consent interval"
+                && Validity(self.created, self.expires).bounded_duration(604800)
+                && self.expires.scaled(1000).is_ok(),
+            "Invalid consent interval"
         );
         let image = self
             .image
@@ -303,7 +304,7 @@ impl Manifest {
             operator: parse(&self.operator)?,
             bootstrap_digest: parse(&self.bootstrap_digest)?,
             software_digest: parse(&self.software_digest)?,
-            validity: (self.created * 1000, self.expires * 1000),
+            validity: Validity(self.created * 1000, self.expires.scaled(1000)?),
             session_mode: u64::from(self.session_policy == "Managed"),
             roles: vec![m::Role {
                 role: 0,
@@ -378,7 +379,7 @@ impl Manifest {
             manifest.roles.len() == 1
                 && manifest.roles[0].role == 0
                 && manifest.validity.0.is_multiple_of(1000)
-                && manifest.validity.1.is_multiple_of(1000),
+                && manifest.validity.1.divided(1000).is_ok(),
             "Installed authority requires one exact role and whole-second consent"
         );
         let role = &manifest.roles[0];
@@ -429,7 +430,7 @@ impl Manifest {
             software_digest: hex::encode(manifest.software_digest),
             image: format!("sha256:{}", hex::encode(role.image_digest)),
             created: manifest.validity.0 / 1000,
-            expires: manifest.validity.1 / 1000,
+            expires: manifest.validity.1.divided(1000)?,
             bind,
             port: own.port,
             subnet,

@@ -883,12 +883,16 @@ fn expired_voucher_renews_one_identifier_without_resetting_live_or_old_usage() {
         *expires = 19000;
     }
     let reader = f.reader.clone();
+    let early = execute(&mut f, issue.clone(), 5, Some(reader.clone()), 5000, false).2;
+    assert_eq!(early.code, 0);
+    let early = early.state.unwrap();
     assert_eq!(
-        execute(&mut f, issue.clone(), 5, Some(reader.clone()), 5000, false)
-            .2
-            .code,
-        3
+        Voucher::parse(&early.record(166, voucher.id).unwrap().payload)
+            .unwrap()
+            .baseline,
+        Some((0, 0))
     );
+
     execute(
         &mut f,
         Command::RenewContext {

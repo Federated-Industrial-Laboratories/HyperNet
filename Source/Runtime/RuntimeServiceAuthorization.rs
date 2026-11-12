@@ -24,18 +24,19 @@ pub struct Guard {
     local_consent: Digest,
     clock: Source,
     last_wall: Cell<u64>,
-    boot_deadline: u64,
+    boot_deadline: Option<u64>,
     artifacts: BTreeMap<String, Digest>,
 }
 pub struct ApplicationClock {
     pub kernel_boot: String,
-    consent_deadline: u64,
+    consent_deadline: Option<u64>,
     observation_deadline: u64,
 }
 impl ApplicationClock {
     /// A renewable clock observation does not shorten a bounded operation's wait.
     pub fn read_deadline(&self, original_deadline: u64) -> u64 {
-        original_deadline.min(self.consent_deadline)
+        self.consent_deadline
+            .map_or(original_deadline, |end| original_deadline.min(end))
     }
     /// A delivered assertion cannot outlive the observation verified at completion.
     pub fn receipt_deadline(&self, original_deadline: u64) -> u64 {
@@ -116,11 +117,11 @@ fn verify_local(
     generation: u64,
     local_consent: Digest,
     consent: Digest,
-    boot_deadline: u64,
+    boot_deadline: Option<u64>,
     boot_ms: u64,
 ) -> Result<()> {
     ensure!(
-        boot_ms < boot_deadline,
+        boot_deadline.is_none_or(|end| boot_ms < end),
         "original service consent lifetime expired"
     );
     let withdrawal: u64 =
@@ -223,12 +224,15 @@ impl Guard {
                     .is_some_and(|t| t < manifest.validity.1),
             "service consent is outside its validity interval"
         );
-        let boot_deadline = observation
-            .boot_ms
-            .checked_add(
-                manifest.validity.1 - observation.wall_ms - crate::authority_challenge::DELTA_MS,
-            )
-            .context("service lifetime overflow")?;
+        let boot_deadline = match manifest.validity.1 {
+            crate::trust_validity::End::At(end) => Some(
+                observation
+                    .boot_ms
+                    .checked_add(end - observation.wall_ms - crate::authority_challenge::DELTA_MS)
+                    .context("service lifetime overflow")?,
+            ),
+            crate::trust_validity::End::UntilWithdrawn => None,
+        };
         let out = Self {
             manifest,
             bootstrap,
@@ -291,7 +295,9 @@ impl Guard {
                     .wall_ms
                     .checked_add(crate::authority_challenge::DELTA_MS)
                     .is_some_and(|t| t < self.manifest.validity.1)
-                && observation.boot_ms < self.boot_deadline,
+                && self
+                    .boot_deadline
+                    .is_none_or(|end| observation.boot_ms < end),
             "service consent expired or clock regressed"
         );
         self.last_wall.set(observation.wall_ms);

@@ -474,7 +474,7 @@ impl Operation {
                 d.expires_ms = if *historical {
                     c.expires_ms
                 } else {
-                    c.expires_ms.min(offer.manifest.validity.1)
+                    offer.manifest.validity.1.bound(c.expires_ms)
                 };
                 if !all.contains(grant) {
                     d.refuse(12)

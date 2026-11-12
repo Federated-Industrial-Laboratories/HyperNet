@@ -41,6 +41,9 @@ impl Fixture {
         Self::with_administrators(now, actions, count)
     }
     fn with_administrators(now: u64, actions: Vec<u64>, extra: usize) -> Self {
+        Self::with_lifetime(now, actions, extra, false)
+    }
+    fn with_lifetime(now: u64, actions: Vec<u64>, extra: usize, persistent: bool) -> Self {
         let mut voters = (1..=4).map(public).collect::<Vec<_>>();
         voters.sort();
         let mut recovery = (6..=8).map(key).collect::<Vec<_>>();
@@ -88,7 +91,11 @@ impl Fixture {
                 admission_domain: "15".repeat(32),
                 assurance: Assurance::Independent,
                 not_before_ms: now.checked_sub(500).unwrap(),
-                expires_ms: now.checked_add(999000).unwrap(),
+                expires_ms: if persistent {
+                    crate::trust_validity::End::UntilWithdrawn
+                } else {
+                    now.checked_add(999000).unwrap().into()
+                },
             },
         };
         let draft = bootstrap::draft(spec, [[20; 32], [21; 32], [22; 32], [23; 32]], now).unwrap();
@@ -613,4 +620,54 @@ fn early_challenge_evaluation_caps_the_result_without_rewriting_the_request() {
         assert_eq!(fields[5].fixed::<32>().unwrap(), wire::digest(&original));
         assert_eq!(committed.command, original);
     }
+}
+
+#[test]
+fn all_persistent_authority_produces_only_finite_executed_permits() {
+    let f = Fixture::with_lifetime(1000, vec![25], 0, true);
+    let state = State::parse(&f.app.config, &f.initial).unwrap();
+    let grants = state
+        .records
+        .iter()
+        .filter_map(|bytes| {
+            let value = wire::decode(bytes).unwrap();
+            let fields = value.list(32).unwrap();
+            (fields[0] == V::Uint(102))
+                .then(|| crate::trust_validity::Validity::parse(&fields[12]).unwrap())
+        })
+        .collect::<Vec<_>>();
+    assert!(!grants.is_empty());
+    assert!(
+        grants
+            .iter()
+            .all(|v| v.1 == crate::trust_validity::End::UntilWithdrawn)
+    );
+    let intent = f.intent(1, &f.expected, 1);
+    let created = 31_536_000_000;
+    let request = f.committed(&intent, created, created + 1251, 1);
+    let executed = f
+        .app
+        .execute(
+            &f.initial,
+            &request,
+            &crate::authority_objects::Resolved::default(),
+        )
+        .unwrap();
+    assert_eq!(code(&executed), 0);
+    let permit =
+        crate::authority_proof::ExecutedResult::parse(attestation_bytes(&executed)).unwrap();
+    assert_eq!(permit.maximum_effect, 1);
+    assert_eq!(permit.expires_at_ms, created + 5000);
+    let late = f
+        .app
+        .execute(
+            &f.initial,
+            &f.committed(&intent, created, created + 6000, 1),
+            &crate::authority_objects::Resolved::default(),
+        )
+        .unwrap();
+    assert_eq!(code(&late), 7);
+    let refused = crate::authority_proof::ExecutedResult::parse(attestation_bytes(&late)).unwrap();
+    assert_eq!(refused.maximum_effect, 0);
+    assert!(refused.expires_at_ms <= created + 5000);
 }
