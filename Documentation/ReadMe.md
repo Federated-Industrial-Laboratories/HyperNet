@@ -116,3 +116,5 @@ prove that an operation failed: retain its exact identity and use its documented
 recovery path.
 
 [Persistent access and hosting](PersistentAccess.md) describes optional until-withdrawn permissions, managed service activation and finite route handover.
+
+[Scoped admission](ScopedAdmission.md) describes authority-enforced registrar limits, member retirement and finite connection proofs.

@@ -206,7 +206,9 @@ pub use request::{Intent, SignedRequest};
 #[path = "AuthorityStreamProof.rs"]
 mod stream_proof;
 
-pub use stream_proof::{CompletionMetadata, FenceOutcome, OwnStreamMetadata, StreamResponse};
+pub use stream_proof::{
+    AdmissionOrigin, CompletionMetadata, FenceOutcome, OwnStreamMetadata, StreamResponse,
+};
 pub(crate) fn validate_stream_response(
     request: &SignedRequest,
     result: &OperationResult,

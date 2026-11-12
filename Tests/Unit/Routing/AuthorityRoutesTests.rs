@@ -169,6 +169,13 @@ impl Fixture {
         Self::with_route_transport(separate, None)
     }
     fn with_route_transport(separate: bool, relay: Option<(u8, Vec<u8>)>) -> Self {
+        Self::with_route_validity(separate, relay, (1000, 20000).into())
+    }
+    fn with_route_validity(
+        separate: bool,
+        relay: Option<(u8, Vec<u8>)>,
+        validity: crate::trust_validity::Validity,
+    ) -> Self {
         let f = deployment::Fixture::with_actions(vec![0, 6, 10, 11, 12, 13, 26, 29, 30]);
         let governance = Governance::parse(N, I, &f.records).unwrap();
         let root = governance
@@ -196,13 +203,14 @@ impl Fixture {
             .find(|r| r.kind == 102 && r.id == [170; 32])
             .unwrap();
         let profiles = [0, 1].map(|index| {
-            Self::admit(
+            Self::admit_with_validity(
                 &mut records,
                 &f.reservations,
                 &root,
                 index,
                 separate,
                 relay.as_ref().filter(|_| index == 0),
+                validity,
             )
         });
         Self {
@@ -215,18 +223,20 @@ impl Fixture {
             profiles,
         }
     }
-    fn admit(
+    fn admit_with_validity(
         records: &mut Vec<Vec<u8>>,
         reserved: &Reservations,
         grant: &VersionRef,
         index: u8,
         separate: bool,
         reserved_transport: Option<&(u8, Vec<u8>)>,
+        validity: crate::trust_validity::Validity,
     ) -> RegisteredProfile {
         let service = 160 + index;
         let transport = reserved_transport.map_or(110 + index, |(seed, _)| *seed);
         let operator = 90 + index * 2 * u8::from(separate);
         let mut manifest = deployment::manifest();
+        manifest.validity = validity;
         manifest.deployment = [60 + index; 32];
         manifest.operator = public(operator);
         manifest.authority_config = None;
@@ -1305,4 +1315,71 @@ fn early_handover_preserves_existing_charge_and_current_context_without_reopenin
     let mut changed = replacement.clone();
     changed.possession = public(201);
     assert!(!changed.continues(&old_voucher));
+}
+
+#[test]
+fn scoped_voucher_issuance_checks_real_service_consent_and_member_capability() {
+    for expires in [20_000, 500_000] {
+        let validity = (1000, expires).into();
+        let mut f = Fixture::with_route_validity(true, None, validity);
+        f.register();
+        let authority = [173; 32];
+        let mut profile = Fixture::admit_with_validity(
+            &mut f.records,
+            &f.reserved,
+            &f.root,
+            2,
+            true,
+            None,
+            validity,
+        );
+        profile.identity.service = authority;
+        seal(&mut profile, 94);
+        f.apply(
+            Command::Register {
+                profile: Box::new(profile),
+            },
+            5,
+            Some(f.root.clone()),
+        );
+        let slot = crate::authority_admission::tests::append_route_slot(
+            &mut f.records,
+            &f.reserved,
+            RELAY,
+            authority,
+            DESTINATION,
+        );
+        let result = scoped_vouchers(&f.state, &f.records, &f.reserved, &slot, 5000, [199; 32]);
+        if expires == 20_000 {
+            assert_eq!(
+                result.err().unwrap().to_string(),
+                "scoped route consent has insufficient finite headroom"
+            );
+        } else {
+            let state = result.unwrap();
+            let vouchers = state
+                .records
+                .values()
+                .filter(|r| r.reference.kind == 166)
+                .map(|r| Voucher::parse(&r.payload).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(vouchers.len(), 4);
+            assert!(vouchers.iter().all(|v| v.expires == 125_000));
+            let already_expanded = Index::parse(&f.records, &f.reserved, N, I)
+                .unwrap()
+                .extend_reservations(&f.reserved);
+            assert!(
+                scoped_vouchers(
+                    &f.state,
+                    &f.records,
+                    &already_expanded,
+                    &slot,
+                    5000,
+                    [199; 32]
+                )
+                .is_err(),
+                "deployment-derived keys cannot be reclassified as bootstrap reservations"
+            );
+        }
+    }
 }

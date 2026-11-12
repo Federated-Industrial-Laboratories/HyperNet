@@ -245,6 +245,9 @@ impl Fixture {
             crate::trust_validity::End::UntilWithdrawn,
         )
     }
+    pub fn persistent_with_actions(actions: Vec<u64>) -> Self {
+        Self::with_end(actions, N, I, crate::trust_validity::End::UntilWithdrawn)
+    }
     pub fn with_network(administrator_actions: Vec<u64>, n: Key, i: Key) -> Self {
         Self::with_end(administrator_actions, n, i, 900000.into())
     }

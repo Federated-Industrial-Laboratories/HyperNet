@@ -106,7 +106,7 @@ fn version(value: &V) -> Result<VersionRef> {
     ensure!(
         matches!(
             v.kind,
-            100 | 101 | 102 | 105 | 114 | 117 | 125 | 126 | 127 | 128 | 129 | 130 | 131
+            100 | 101 | 102 | 105 | 114 | 117 | 125 | 126 | 127 | 128 | 129 | 130 | 131 | 180 | 181
         ),
         "unsupported governance version kind"
     );
@@ -169,6 +169,7 @@ fn creation_value(value: V, state: &State, created: &VersionRef, replay: bool) -
 }
 pub(super) enum Operation {
     PolicyContext,
+    Admission(crate::authority_admission::Operation),
     Policy(crate::authority_policies::Operation),
     GrantReview(crate::authority_grant_review::Operation),
     Tier(crate::authority_tiers::Operation),
@@ -202,6 +203,11 @@ impl Operation {
                 && intent.incarnation == config.scope.incarnation,
             "governance request context differs"
         );
+        if crate::authority_admission::Operation::handles(&intent.action) {
+            return Ok(Self::Admission(
+                crate::authority_admission::Operation::parse(intent)?,
+            ));
+        }
         if crate::authority_grant_review::Operation::handles(&intent.action) {
             let review = crate::authority_grant_review::Operation::parse(intent)?;
             Self::parse(&review.inner, config)?;
@@ -281,7 +287,20 @@ impl Operation {
                 ensure!(
                     matches!(
                         kind,
-                        100 | 101 | 102 | 105 | 114 | 117 | 125 | 126 | 127 | 128 | 129 | 130 | 131
+                        100 | 101
+                            | 102
+                            | 105
+                            | 114
+                            | 117
+                            | 125
+                            | 126
+                            | 127
+                            | 128
+                            | 129
+                            | 130
+                            | 131
+                            | 180
+                            | 181
                     ) && lookup != [0; 32]
                         && lookup == intent.resource,
                     "invalid exact inspection resource"
@@ -339,6 +358,7 @@ impl Operation {
             Self::PolicyContext => {
                 unreachable!("policy-only discovery uses authenticated stream identity")
             }
+            Self::Admission(_) => unreachable!("admission has restricted native authority"),
             Self::Policy(policy) => policy.grant,
             Self::GrantReview(_) => unreachable!("grant review uses its inner authority"),
             Self::Tier(tier) => tier.grant(),
@@ -429,6 +449,85 @@ pub(super) fn evaluate(
             admissions: vec![],
             created: None,
         });
+    }
+    if let Operation::Admission(admission) = operation {
+        let effective = state.effective_reservations()?;
+        let domain_reserved = state.domains.extend_reservations(&effective);
+        let reserved = state.deployments()?.extend_reservations(&domain_reserved);
+        let mut decision = Decision {
+            code: 3,
+            value: V::Null,
+            expires: request_expires,
+            records: None,
+            domains: None,
+            terminal: None,
+            restrictions: Default::default(),
+            admissions: vec![],
+            created: None,
+        };
+        if let Ok(selected) =
+            admission.authorise(&state.records, &reserved, intent, evaluated, replay)
+        {
+            if !within_floor(
+                (
+                    admission.snapshot.epoch,
+                    admission.snapshot.height,
+                    admission.snapshot.state,
+                ),
+                config,
+                state,
+                prior,
+            ) {
+                decision.code = 12;
+            } else {
+                decision.code = 0;
+                decision.value = value(
+                    "AuthorityAdmission",
+                    &selected.dependencies,
+                    b(&admission.next),
+                );
+                decision.created = Some(selected.created.clone());
+                let refs = admission.result_references(
+                    &selected.dependencies,
+                    intent.network,
+                    intent.incarnation,
+                )?;
+                if matches!(
+                    admission.transition,
+                    crate::authority_admission::Transition::Enrol
+                        | crate::authority_admission::Transition::Adopt
+                        | crate::authority_admission::Transition::Renew
+                ) && !replay
+                {
+                    let slot = crate::authority_admission::Slot::parse(
+                        &admission.next,
+                        intent.network,
+                        intent.incarnation,
+                    )?;
+                    match crate::authority_domains::routes::scoped_vouchers(
+                        &state.domains,
+                        &selected.records,
+                        // Route validation reconstructs deployment reservations itself.
+                        &effective,
+                        &slot,
+                        evaluated,
+                        intent.digest,
+                    ) {
+                        Ok(domains) => decision.domains = Some(domains),
+                        Err(_) => {
+                            decision.code = 3;
+                            decision.created = None;
+                            return Ok(decision);
+                        }
+                    }
+                }
+                decision.value = value("AuthorityAdmission", &refs, b(&admission.next));
+                if !replay {
+                    decision.records = Some(selected.records);
+                }
+            }
+        }
+        return Ok(decision);
     }
     if let Operation::GrantReview(review) = operation {
         return super::tier_evaluation::grant_evaluate(
@@ -908,6 +1007,7 @@ pub(super) fn evaluate(
     };
     match operation {
         Operation::PolicyContext => unreachable!("policy-only discovery is evaluated above"),
+        Operation::Admission(_) => unreachable!("admission operations are evaluated above"),
         Operation::Policy(_) => unreachable!("policy operations are evaluated above"),
         Operation::GrantReview(_) => unreachable!("grant reviews are evaluated above"),
         Operation::Tier(_) => unreachable!("tier operations are evaluated above"),
@@ -956,6 +1056,10 @@ pub(super) fn evaluate(
             snapshot,
             ..
         } => {
+            if governance.admission().owns_grant(target.id) {
+                decision.code = 3;
+                return Ok(decision);
+            }
             if !current.contains(target)
                 || (!replay
                     && !within_floor(

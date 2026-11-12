@@ -576,6 +576,7 @@ fn worst_case_fence_and_refusal_fit_reserved_slots_at_receipt_saturation() {
     streams.entries.insert(
         signer,
         Stream {
+            origin: None,
             generation: maximum - 1,
             generation_id: old.digest,
             retired: maximum - 2,
@@ -724,4 +725,56 @@ fn dedicated_activation_survives_restart_and_other_requester_activity() {
             .retired_through,
         0
     );
+}
+
+#[test]
+fn scoped_stream_reuse_rejects_old_same_key_requests_without_growing_slots() {
+    let mut streams = Streams::default();
+    let signer = key(203);
+    let mut old = None;
+    for ordinal in 1..=300 {
+        streams
+            .admit_scoped(
+                scope().network,
+                scope().incarnation,
+                signer,
+                AdmissionOrigin {
+                    policy: [204; 32],
+                    slot: 0,
+                    assignment: ordinal,
+                    ordinal,
+                },
+            )
+            .unwrap();
+        let metadata = streams.metadata(&signer).unwrap().unwrap();
+        let current = Request {
+            requester: signer,
+            generation: 1,
+            generation_id: metadata.generation_id,
+            sequence: 1,
+            acknowledged_through: 0,
+            intent: wire::digest(&ordinal.to_be_bytes()),
+        };
+        if let Some(old) = &old {
+            assert!(matches!(
+                streams.classify(old).unwrap(),
+                Classification::GenerationConflict
+            ));
+        }
+        assert!(matches!(
+            streams.classify(&current).unwrap(),
+            Classification::Fresh
+        ));
+        let bytes = streams.metadata_bytes(&scope(), &signer).unwrap();
+        let metadata = crate::authority_proof::OwnStreamMetadata::parse(&bytes).unwrap();
+        assert_eq!(
+            metadata.state().unwrap().origin.as_ref().unwrap().ordinal,
+            ordinal
+        );
+        streams = parsed(&streams.value()).unwrap();
+        assert_eq!(streams.keys(), [signer]);
+        streams.retire_owned(&signer);
+        assert!(streams.keys().is_empty());
+        old = Some(current);
+    }
 }

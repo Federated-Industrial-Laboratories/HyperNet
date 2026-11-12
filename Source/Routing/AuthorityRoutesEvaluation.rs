@@ -487,6 +487,19 @@ pub fn evaluate(
                 expires,
             } => {
                 let grant = grant(operation)?;
+                c.governance.admission().route_template(
+                    intent.requester,
+                    grant.id,
+                    *id,
+                    *relay,
+                    *destination,
+                    *action,
+                    *scope,
+                    *connections,
+                    *bytes,
+                    *expires,
+                    at,
+                )?;
                 c.capability(grant, intent.requester, *action, *scope)?;
                 let (rr, r) = c.service(*relay, true)?;
                 let (dr, d) = c.service(*destination, true)?;
@@ -870,7 +883,7 @@ pub fn evaluate(
     validate_versions(&versions, 64)?;
     let governance = versions
         .iter()
-        .filter(|r| r.kind < 132)
+        .filter(|r| r.kind < 132 || matches!(r.kind, 180 | 181))
         .map(|r| Ok(b(c.governance.record_bytes(r.kind, r.id)?)))
         .collect::<Result<Vec<_>>>()?;
     let value = a(vec![
@@ -958,7 +971,7 @@ pub(crate) fn evaluate_read(
     validate_versions(&versions, 64)?;
     let governance = versions
         .iter()
-        .filter(|r| r.kind < 132)
+        .filter(|r| r.kind < 132 || matches!(r.kind, 180 | 181))
         .map(|r| Ok(b(c.governance.record_bytes(r.kind, r.id)?)))
         .collect::<Result<Vec<_>>>()?;
     let value = a(vec![
@@ -981,4 +994,167 @@ pub(crate) fn evaluate_read(
         code: 0,
         expires_ms: c.expires,
     })
+}
+
+/// Only the native admission executor calls this after current policy and candidate consent checks.
+pub(crate) fn scoped_vouchers(
+    state: &State,
+    records: &[Vec<u8>],
+    reserved: &Reservations,
+    slot: &crate::authority_admission::Slot,
+    at: u64,
+    creation: Digest,
+) -> Result<State> {
+    let mut next = state.clone();
+    let governance = Governance::parse(state.network, state.incarnation, records)?;
+    let policy = governance
+        .admission()
+        .policies
+        .get(&slot.policy)
+        .context("scoped route policy absent")?
+        .clone();
+    ensure!(
+        slot.active()
+            && governance
+                .admission()
+                .slots
+                .get(&slot.reference.id)
+                .is_some_and(|s| s.reference == slot.reference),
+        "scoped route slot is not current"
+    );
+    for role in &slot.roles {
+        let template = policy.template(role.role)?;
+        for (purpose, destination) in [(4, policy.authority), (5, template.destination)] {
+            let id =
+                crate::authority_admission::identifier(slot.policy, slot.slot, role.role, purpose)?;
+            let grant_id =
+                crate::authority_admission::identifier(slot.policy, slot.slot, role.role, 2)?;
+            let grant = governance
+                .versions()
+                .into_iter()
+                .find(|r| r.kind == 102 && r.id == grant_id)
+                .context("scoped route grant absent")?;
+            let mut c = Context {
+                state: &next,
+                governance: Governance::parse(state.network, state.incarnation, records)?,
+                index: Index::parse(records, reserved, state.network, state.incarnation)?,
+                reserved,
+                at,
+                dependencies: vec![],
+                expires: u64::MAX,
+                selected: BTreeMap::new(),
+            };
+            c.capability(&grant, role.member, 0, (3, destination))?;
+            let (rr, relay) = c.service(policy.relay, true)?;
+            let (dr, target) = c.service(destination, true)?;
+            c.pair(&relay.profile, &target.profile)?;
+            ensure!(
+                relay.profile.mode == 1
+                    && target.profile.mode != 1
+                    && target.profile.relay.is_none_or(|r| r == policy.relay),
+                "scoped route destination or relay changed"
+            );
+            let expires = at.saturating_add(template.voucher_ms).min(c.expires);
+            ensure!(
+                expires > at.saturating_add(60_000),
+                "scoped route consent has insufficient finite headroom"
+            );
+            let old = next
+                .records
+                .get(&(166, id))
+                .map(|r| Voucher::parse(&r.payload))
+                .transpose()?;
+            let same = old.as_ref().is_some_and(|v| {
+                v.sponsor == role.member
+                    && v.possession == role.relay
+                    && v.grant == grant
+                    && v.relay == rr.reference
+                    && v.destination == dr.reference
+                    && v.connections == template.connections
+                    && v.bytes == template.bytes
+            });
+            if same
+                && old
+                    .as_ref()
+                    .is_some_and(|v| v.expires > at.saturating_add(60_000))
+            {
+                continue;
+            }
+            let usage = next
+                .records
+                .get(&(167, id))
+                .map(|r| Usage::parse(&r.payload))
+                .transpose()?;
+            let baseline = if same && old.as_ref().is_some_and(|v| v.expires > at) {
+                old.as_ref().and_then(|v| v.baseline).unwrap_or((0, 0))
+            } else {
+                usage.map_or((0, 0), |u| (u.connections, u.bytes))
+            };
+            let voucher = Voucher {
+                baseline: Some(baseline),
+                relay: rr.reference,
+                destination: dr.reference,
+                sponsor: role.member,
+                grant,
+                possession: role.relay,
+                action: 0,
+                scope: (3, destination),
+                connections: template.connections,
+                bytes: template.bytes,
+                expires,
+                creation,
+            };
+            Voucher::parse(&voucher.value())?;
+            next.put(Record::next(&next, 166, id, voucher.value())?)?;
+        }
+    }
+    Ok(next)
+}
+
+pub(crate) fn admission_routes(
+    state: &State,
+    records: &[Vec<u8>],
+    reserved: &Reservations,
+    slot: &crate::authority_admission::Slot,
+    at: u64,
+) -> Result<(Vec<VersionRef>, Vec<Vec<u8>>)> {
+    let mut c = Context {
+        state,
+        governance: Governance::parse(state.network, state.incarnation, records)?,
+        index: Index::parse(records, reserved, state.network, state.incarnation)?,
+        reserved,
+        at,
+        dependencies: vec![],
+        expires: u64::MAX,
+        selected: BTreeMap::new(),
+    };
+    let policy = c
+        .governance
+        .admission()
+        .policies
+        .get(&slot.policy)
+        .context("scoped route policy absent")?
+        .clone();
+    for role in &slot.roles {
+        for purpose in [4, 5] {
+            let id =
+                crate::authority_admission::identifier(slot.policy, slot.slot, role.role, purpose)?;
+            let r = c.select(166, id)?;
+            let voucher = Voucher::parse(&r.payload)?;
+            c.service(voucher.relay.id, true)?;
+            c.service(voucher.destination.id, true)?;
+            c.capability(&voucher.grant, role.member, voucher.action, voucher.scope)?;
+            ensure!(
+                voucher.possession == role.relay
+                    && voucher.relay.id == policy.relay
+                    && voucher.expires > at.saturating_add(1250),
+                "scoped route is expired or has another assignment"
+            );
+        }
+    }
+    sorted(&mut c.dependencies)?;
+    Ok((
+        c.dependencies,
+        c.selected.into_values().map(|r| r.bytes).collect(),
+    ))
 }

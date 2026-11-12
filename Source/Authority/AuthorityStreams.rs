@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Permanent signer generations retire receipts without making delayed requests executable.
 use crate::{
-    authority_proof::{Digest, Disposition, Key, OperationResult, Scope},
+    authority_proof::{AdmissionOrigin, Digest, Disposition, Key, OperationResult, Scope},
     trust_wire::{self as wire, Value as V},
 };
 use anyhow::{Context, Result, ensure};
@@ -20,6 +20,7 @@ struct Completion {
 }
 #[derive(Clone)]
 struct Stream {
+    origin: Option<AdmissionOrigin>,
     generation: u64,
     generation_id: Digest,
     retired: u64,
@@ -70,6 +71,7 @@ pub(super) struct LastFence {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Metadata {
+    pub origin: Option<AdmissionOrigin>,
     pub generation: u64,
     pub generation_id: Digest,
     pub retired_through: u64,
@@ -218,7 +220,7 @@ impl LastFence {
     }
 }
 fn entry(key: &Key, stream: &Stream) -> V {
-    V::Array(vec![
+    let mut fields = vec![
         V::Bytes(key.to_vec()),
         V::Uint(stream.generation),
         V::Bytes(stream.generation_id.to_vec()),
@@ -231,7 +233,11 @@ fn entry(key: &Key, stream: &Stream) -> V {
                 V::Bytes(c.result.clone()),
             ])
         }),
-    ])
+    ];
+    if let Some(origin) = &stream.origin {
+        fields.push(origin.value());
+    }
+    V::Array(fields)
 }
 fn charge(key: &Key, stream: &Stream) -> Result<usize> {
     Ok(wire::encode(&entry(key, stream))?
@@ -254,6 +260,38 @@ pub(super) fn initial_id(network: Digest, incarnation: Digest, requester: Key) -
     ]))?))
 }
 impl Streams {
+    pub fn origin(&self, key: &Key) -> Option<&AdmissionOrigin> {
+        self.entries.get(key).and_then(|s| s.origin.as_ref())
+    }
+    /// Removal is restricted by the caller to an exact retired native slot assignment.
+    pub fn retire_owned(&mut self, key: &Key) {
+        self.entries.remove(key);
+    }
+    pub fn admit_scoped(
+        &mut self,
+        network: Digest,
+        incarnation: Digest,
+        key: Key,
+        origin: AdmissionOrigin,
+    ) -> Result<()> {
+        ensure!(
+            !self.entries.contains_key(&key) && self.entries.len() < MAX_STREAMS,
+            "scoped requester already exists or capacity reached"
+        );
+        let generation_id = origin.initial(network, incarnation, key)?;
+        self.entries.insert(
+            key,
+            Stream {
+                origin: Some(origin),
+                generation: 1,
+                generation_id,
+                retired: 0,
+                last_fence: None,
+                completion: None,
+            },
+        );
+        self.validate_context(network, incarnation)
+    }
     pub fn keys(&self) -> Vec<Key> {
         self.entries.keys().copied().collect()
     }
@@ -261,7 +299,13 @@ impl Streams {
         let mut entries = BTreeMap::new();
         let mut previous = None;
         for item in value.list(MAX_STREAMS)? {
-            let f = item.array(6)?;
+            let f = item.list(7)?;
+            ensure!(matches!(f.len(), 6 | 7), "stream entry arity differs");
+            let origin = if f.len() == 7 {
+                Some(AdmissionOrigin::parse(&f[6])?)
+            } else {
+                None
+            };
             let key = f[0].fixed::<32>()?;
             wire::valid_key(&key)?;
             ensure!(
@@ -311,6 +355,7 @@ impl Streams {
             entries.insert(
                 key,
                 Stream {
+                    origin,
                     generation,
                     generation_id,
                     retired,
@@ -333,7 +378,10 @@ impl Streams {
             "empty stream context"
         );
         for (key, stream) in &self.entries {
-            let initial = initial_id(network, incarnation, *key)?;
+            let initial = stream.origin.as_ref().map_or_else(
+                || initial_id(network, incarnation, *key),
+                |o| o.initial(network, incarnation, *key),
+            )?;
             ensure!(
                 stream.generation != 1 || stream.generation_id == initial,
                 "initial stream identity differs from its context"
@@ -369,6 +417,7 @@ impl Streams {
         self.entries.insert(
             key,
             Stream {
+                origin: None,
                 generation: 1,
                 generation_id,
                 retired: 0,
@@ -508,6 +557,7 @@ impl Streams {
             return Ok(None);
         };
         Ok(Some(Metadata {
+            origin: stream.origin.clone(),
             generation: stream.generation,
             generation_id: stream.generation_id,
             retired_through: stream.retired,
@@ -523,9 +573,10 @@ impl Streams {
         self.validate_context(scope.network, scope.incarnation)?;
         wire::valid_key(requester)?;
         let metadata = self.metadata(requester)?;
-        let bytes = wire::encode(&V::Array(vec![
+        let origin = metadata.as_ref().and_then(|m| m.origin.as_ref());
+        let mut fields = vec![
             V::Uint(56),
-            V::Uint(1),
+            V::Uint(if origin.is_some() { 2 } else { 1 }),
             scope.value(),
             V::Bytes(requester.to_vec()),
             V::Bool(metadata.is_some()),
@@ -542,8 +593,12 @@ impl Streams {
                 .as_ref()
                 .and_then(|m| m.last_fence.as_ref())
                 .map_or(V::Null, LastFence::value),
-        ]))?;
-        ensure!(bytes.len() <= 486, "stream metadata exceeds its bound");
+        ];
+        if let Some(origin) = origin {
+            fields.push(origin.value());
+        }
+        let bytes = wire::encode(&V::Array(fields))?;
+        ensure!(bytes.len() <= 568, "stream metadata exceeds its bound");
         Ok(bytes)
     }
     /// The caller verifies canonical bytes, requester signature, context and fresh challenge first.
@@ -610,6 +665,7 @@ impl Streams {
                 .map(Completion::metadata)
                 .transpose()?;
             let next = Stream {
+                origin: previous.origin.clone(),
                 generation: next_generation.context("stream generation overflow")?,
                 generation_id: request.digest,
                 retired: 0,

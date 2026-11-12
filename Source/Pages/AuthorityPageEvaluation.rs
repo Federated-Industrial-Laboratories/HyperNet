@@ -48,7 +48,9 @@ fn result_view(
     sorted(&mut versions).map_err(|_| Capacity)?;
     let governance = dependencies
         .iter()
-        .filter(|r| r.kind < 132 && !c.selected.contains_key(&r.index()))
+        .filter(|r| {
+            (r.kind < 132 || matches!(r.kind, 180 | 181)) && !c.selected.contains_key(&r.index())
+        })
         .map(|r| Ok(b(c.governance.record_bytes(r.kind, r.id)?)))
         .collect::<Result<Vec<_>>>()?;
     let value = a(vec![

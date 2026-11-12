@@ -157,7 +157,7 @@ impl Record {
             105 => 19,
             117 => 16,
             130 => 11,
-            131 => 9,
+            131 | 180 | 181 => 9,
             _ => anyhow::bail!("unsupported governance record"),
         };
         let f = decoded.array(arity)?;
@@ -385,6 +385,9 @@ impl Record {
                 );
                 wire::valid_key(&f[8].fixed()?)?;
             }
+            180 | 181 => {
+                crate::authority_admission::validate_record(bytes, network, incarnation)?;
+            }
             131 => {
                 crate::runtime_bootstrap_keys::Keys::parse(bytes, network, incarnation)?;
             }
@@ -431,6 +434,7 @@ impl Record {
 pub struct Governance {
     network: Digest,
     records: BTreeMap<(u64, Digest), Record>,
+    admission: crate::authority_admission::Index,
 }
 pub struct Requirement<'a> {
     pub subject: Key,
@@ -488,6 +492,7 @@ impl Governance {
         let result = Self {
             network,
             records: parsed,
+            admission: crate::authority_admission::Index::parse(records, network, incarnation)?,
         };
         let policy = result.record(100, network)?;
         result.exact(&reference(&policy.fields[12])?)?;
@@ -504,6 +509,22 @@ impl Governance {
         );
         let mut admitted_keys = BTreeSet::new();
         for admission in result.records.values().filter(|r| r.reference.kind == 125) {
+            if admission.fields[9].boolean()? {
+                continue;
+            }
+            if result.admission.slots.values().any(|s| {
+                s.owned()
+                    .is_ok_and(|v| v.contains(&admission.reference.index()))
+            }) && !result
+                .admission
+                .active_member(admission.fields[7].fixed()?)
+                .is_some_and(|(_, s, r)| {
+                    crate::authority_admission::identifier(s.policy, s.slot, r.role, 0).ok()
+                        == Some(admission.reference.id)
+                })
+            {
+                continue;
+            }
             ensure!(
                 admitted_keys.insert(admission.fields[7].fixed::<32>()?),
                 "duplicate membership signing key"
@@ -570,6 +591,9 @@ impl Governance {
         );
         Ok(record)
     }
+    pub fn admission(&self) -> &crate::authority_admission::Index {
+        &self.admission
+    }
     pub fn record_bytes(&self, kind: u64, id: Digest) -> Result<&[u8]> {
         Ok(&self.record(kind, id)?.bytes)
     }
@@ -618,7 +642,41 @@ impl Governance {
             dependencies.insert(application.reference.index(), application.reference.clone());
             return Ok(span);
         }
+        if let Some((policy, slot, _)) = self.admission.active_member(subject) {
+            for dependency in policy.authorise(self, self.network, t)? {
+                dependencies.insert(dependency.index(), dependency);
+            }
+            dependencies.insert(policy.reference.index(), policy.reference.clone());
+            dependencies.insert(slot.reference.index(), slot.reference.clone());
+            for bytes in &slot.material {
+                let v = wire::decode(bytes)?;
+                let f = v.list(32)?;
+                let r = VersionRef {
+                    kind: f[0].uint()?,
+                    id: id(&f[6])?,
+                    generation: f[4].uint()?,
+                    digest: wire::digest(bytes),
+                };
+                dependencies.insert(r.index(), r);
+            }
+        }
         for record in self.records.values().filter(|r| r.reference.kind == 125) {
+            if record.fields[9].boolean()? {
+                continue;
+            }
+            if self.admission.slots.values().any(|s| {
+                s.owned()
+                    .is_ok_and(|v| v.contains(&record.reference.index()))
+            }) && !self
+                .admission
+                .active_member(subject)
+                .is_some_and(|(_, s, r)| {
+                    crate::authority_admission::identifier(s.policy, s.slot, r.role, 0).ok()
+                        == Some(record.reference.id)
+                })
+            {
+                continue;
+            }
             let f = &record.fields;
             if f[7].fixed::<32>()? != subject {
                 continue;
@@ -724,13 +782,20 @@ impl Governance {
             "invalid capability requirement"
         );
         crate::authority_proof::validate_versions(request.expected, 64)?;
+        if let Some((_, slot, role)) = self.admission.active_member(request.subject) {
+            ensure!(
+                role.grants(slot.policy, slot.slot).contains(&grant),
+                "scoped member cannot exercise an unrelated grant"
+            );
+        }
         // Other dimensions are checked by the complete action executor. This
         // capability decision cannot certify their absence or validity.
-        for expected in request
-            .expected
-            .iter()
-            .filter(|r| matches!(r.kind, 100 | 101 | 102 | 114 | 125 | 126 | 127 | 128))
-        {
+        for expected in request.expected.iter().filter(|r| {
+            matches!(
+                r.kind,
+                100 | 101 | 102 | 114 | 125 | 126 | 127 | 128 | 180 | 181
+            )
+        }) {
             self.exact(expected)?;
         }
         let policy = self.record(100, self.network)?;
