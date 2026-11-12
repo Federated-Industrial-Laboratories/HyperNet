@@ -242,6 +242,18 @@ pub struct Voucher {
     pub baseline: Option<(u64, u64)>,
 }
 impl Voucher {
+    /// Admission charges are cumulative; an early handover never refills their allowance.
+    pub fn permits_next(&self, usage: Option<&Usage>, charge: u64) -> bool {
+        let (connections, bytes) = usage.map_or((0, 0), |u| (u.connections, u.bytes));
+        connections
+            .checked_sub(self.baseline.map_or(0, |b| b.0))
+            .and_then(|n| n.checked_add(1))
+            .is_some_and(|n| n <= self.connections)
+            && bytes
+                .checked_sub(self.baseline.map_or(0, |b| b.1))
+                .and_then(|n| n.checked_add(charge))
+                .is_some_and(|n| n <= self.bytes)
+    }
     /// A live session can follow an early credential replacement without receiving a new budget.
     pub fn continues(&self, previous: &Self) -> bool {
         self.sponsor == previous.sponsor
@@ -451,6 +463,10 @@ pub enum Command {
         bytes: u64,
         expires: u64,
     },
+    Handover {
+        voucher: VersionRef,
+        expires: u64,
+    },
     Permit {
         voucher: VersionRef,
         connection: Digest,
@@ -536,6 +552,18 @@ impl Command {
                     expires: f[8].uint()?,
                 }
             }
+            "RouteHandover" => {
+                let f = value.array(4)?;
+                let voucher = version(&f[2])?;
+                ensure!(
+                    f[1].uint()? == 1 && voucher.kind == 166,
+                    "unsupported route handover"
+                );
+                Self::Handover {
+                    voucher,
+                    expires: f[3].uint()?,
+                }
+            }
             "RouteReaderPermit" => {
                 let f = value.array(2)?;
                 crate::authority_route_reader::Reader::parse(f[1].bytes()?, n, i)?;
@@ -600,6 +628,7 @@ impl Command {
             Self::Lookup { .. } => "RouteLookup",
             Self::Withdraw { .. } => "RouteWithdraw",
             Self::Issue { .. } => "RouteIssue",
+            Self::Handover { .. } => "RouteHandover",
             Self::Permit { .. } => "RoutePermit",
             Self::Reader { .. } => "RouteReaderPermit",
             Self::VoucherContext { .. } => "RouteVoucherContext",
@@ -627,7 +656,8 @@ impl Command {
             Self::Register { profile } => profile.identity.service,
             Self::Lookup { service } | Self::Withdraw { service, .. } => *service,
             Self::Issue { id, .. } => *id,
-            Self::Permit { voucher, .. }
+            Self::Handover { voucher, .. }
+            | Self::Permit { voucher, .. }
             | Self::VoucherContext { voucher }
             | Self::RenewContext { voucher } => voucher.id,
             Self::Reader { envelope } => {
@@ -655,7 +685,7 @@ impl Command {
     pub fn mutation_kind(&self) -> Option<u64> {
         match self {
             Self::Register { .. } | Self::Withdraw { .. } => Some(165),
-            Self::Issue { .. } => Some(166),
+            Self::Issue { .. } | Self::Handover { .. } => Some(166),
             Self::Permit { .. } => Some(167),
             Self::Invite { .. } => Some(168),
             _ => None,
@@ -693,6 +723,9 @@ impl Command {
                 a(vec![V::Uint(*connections), V::Uint(*bytes)]),
                 V::Uint(*expires),
             ]),
+            Self::Handover { voucher, expires } => {
+                f.extend([V::Uint(1), reference(voucher), V::Uint(*expires)])
+            }
             Self::Reader { envelope } => f.push(b(envelope)),
             Self::VoucherContext { voucher } | Self::RenewContext { voucher } => {
                 f.push(reference(voucher))

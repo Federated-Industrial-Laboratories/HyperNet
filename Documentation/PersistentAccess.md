@@ -205,3 +205,10 @@ window, but every read rechecks current publication, permissions and hosting.
 Content withdrawal, grant revocation, member removal and local host withdrawal
 still deny access. Reconciliation is required before a retained copy serves after
 restart, even when its explicit storage lifetime is permanent.
+
+
+`RouteHandover/2` adds an exact live-voucher handover command. It binds the current
+voucher reference and a new finite expiry. A delayed commit after the previous
+expiry is refused instead of becoming a post-expiry quota renewal. All pinned
+identities, capability references, allowances and cumulative usage baselines are
+preserved. Ordinary explicit `RouteIssue` renewal retains its finite semantics.
