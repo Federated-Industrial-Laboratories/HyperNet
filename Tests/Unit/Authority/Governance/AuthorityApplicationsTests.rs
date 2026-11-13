@@ -1091,3 +1091,80 @@ fn renewable_admission_preserves_identity_rights_and_bounded_provenance_after_ex
         0
     ));
 }
+
+#[test]
+fn mixed_minimum_context_executes_without_adding_authority_or_losing_governance_floors() {
+    let (f, owner, prior) = setup();
+    let parent = record(&f, &prior, 102, [70; 32]);
+    let tier = f.expected.iter().find(|v| v.kind == 101).unwrap();
+    let floor = |minimum: &[VersionRef]| {
+        array(vec![
+            V::Uint(200),
+            V::Uint(1),
+            V::Text("AuthorityDelegationContext".into()),
+            b(&parent.id),
+            b(&tier.id),
+            V::Null,
+            m::snapshot(&f, &prior, &[]).array(2).unwrap()[0].clone(),
+            array(minimum.iter().map(reference).collect()),
+        ])
+    };
+    let mixed = vec![
+        parent.clone(),
+        VersionRef {
+            kind: 147,
+            id: [6; 32],
+            generation: 1,
+            digest: [6; 32],
+        },
+        VersionRef {
+            kind: 165,
+            id: [8; 32],
+            generation: 1,
+            digest: [8; 32],
+        },
+    ];
+    let execute = |minimum: &[VersionRef]| {
+        let request = signed(
+            &f,
+            &prior,
+            &owner,
+            "AuthorityDelegationContext",
+            parent.id,
+            floor(minimum),
+            vec![],
+            false,
+        );
+        m::execute(&f, &prior, &request, &owner, 5000)
+    };
+    let output = execute(&mixed);
+    assert_eq!(m::code(&output), 0);
+    let selected = body(&output).array(5).unwrap()[4]
+        .list(64)
+        .unwrap()
+        .iter()
+        .map(|v| applications::record_reference(v.bytes().unwrap()).unwrap())
+        .collect::<Vec<_>>();
+    assert!(!selected.iter().any(|v| matches!(v.kind, 147 | 165)));
+    for mutation in 0..3 {
+        let mut minimum = mixed.clone();
+        match mutation {
+            0 => minimum[0].generation += 1,
+            1 => minimum[0].digest = [9; 32],
+            _ => minimum.insert(
+                1,
+                VersionRef {
+                    kind: 126,
+                    id: parent.id,
+                    generation: 1,
+                    digest: [9; 32],
+                },
+            ),
+        }
+        assert_eq!(
+            m::code(&execute(&minimum)),
+            12,
+            "minimum mutation {mutation}"
+        );
+    }
+}
