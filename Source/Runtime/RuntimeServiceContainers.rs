@@ -284,6 +284,13 @@ pub(super) fn mount(
         &format!("{}:{target}:{mode}", source.display()),
     ]));
 }
+fn receipt_command(command: &[String]) -> bool {
+    match command {
+        [command] => command == "runtime-service-receipt",
+        [command, option] => command == "runtime-service-receipt" && option == "--if-present",
+        _ => false,
+    }
+}
 pub(super) fn create(
     p: &Profile,
     s: &mut State,
@@ -316,7 +323,7 @@ pub(super) fn create(
     let now = files::now()?
         .checked_mul(1000)
         .context("wall time overflow")?;
-    let reporting = helper && command == files::strings(&["runtime-service-receipt"]);
+    let reporting = helper && receipt_command(command);
     let remaining = if reporting {
         Some(60)
     } else {

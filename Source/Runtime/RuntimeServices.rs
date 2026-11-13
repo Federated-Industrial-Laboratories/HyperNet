@@ -109,6 +109,9 @@ pub enum Command {
         location: Location,
         #[arg(long)]
         output: PathBuf,
+        /// Report an explicitly absent receipt without treating export failures as absence.
+        #[arg(long)]
+        if_present: bool,
     },
     WithdrawalReceipt {
         #[command(flatten)]
@@ -635,9 +638,9 @@ pub fn run(command: Command) -> Result<Value> {
                     Ok(json!({"status":"Stopped"}))
                 }
                 Command::Withdraw(_) => control::withdraw(&p, &mut s),
-                Command::ActivationReceipt { output, .. } => {
-                    control::activation_receipt(&p, &mut s, &output)
-                }
+                Command::ActivationReceipt {
+                    output, if_present, ..
+                } => control::activation_receipt(&p, &mut s, &output, if_present),
                 Command::WithdrawalReceipt { output, .. } => {
                     control::withdrawal_receipt(&p, &s, &output)
                 }

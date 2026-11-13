@@ -28,11 +28,9 @@ fn open_at(parent: &File, value: &OsStr, flags: i32, mode: u32) -> Result<File> 
             mode,
         )
     };
-    ensure!(
-        fd >= 0,
-        "cannot open path safely: {}",
-        std::io::Error::last_os_error()
-    );
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error()).context("cannot open path safely");
+    }
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 fn directory_handle(path: &Path) -> Result<File> {
@@ -89,6 +87,21 @@ fn parent(path: &Path, readable: bool) -> Result<(File, &OsStr)> {
 pub fn read(path: &Path, maximum: usize, private: bool) -> Result<Vec<u8>> {
     let (parent, value) = parent(path, false)?;
     read_at(&parent, value, maximum, private)
+}
+/// Absence applies only to the final entry; invalid or missing ancestors still fail.
+pub(crate) fn read_optional(path: &Path, maximum: usize, private: bool) -> Result<Option<Vec<u8>>> {
+    let (parent, value) = parent(path, false)?;
+    match read_file(&parent, value, maximum, private, private) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 pub fn read_single(path: &Path, maximum: usize, private: bool) -> Result<Vec<u8>> {
     let (parent, value) = parent(path, false)?;

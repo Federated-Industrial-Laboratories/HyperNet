@@ -220,7 +220,10 @@ enum Command {
     #[command(hide = true)]
     PrivateRouteEgress,
     #[command(hide = true)]
-    RuntimeServiceReceipt,
+    RuntimeServiceReceipt {
+        #[arg(long)]
+        if_present: bool,
+    },
     #[command(hide = true)]
     RuntimeServiceRequesterStatus,
     #[command(hide = true)]
@@ -299,7 +302,9 @@ fn run() -> Result<()> {
             runtime_service_entry::initialise()?;
         }
         Command::RuntimeServiceVerify => runtime_service_entry::verify_existing()?,
-        Command::RuntimeServiceReceipt => runtime_service_entry::receipt()?,
+        Command::RuntimeServiceReceipt { if_present } => {
+            runtime_service_entry::receipt(if_present)?
+        }
         Command::RuntimeServiceRouteCache { repair } => runtime_service_entry::route_cache(repair)?,
         Command::RuntimeServiceRequesterStatus => runtime_service_entry::bridge_requester(false)?,
         Command::RuntimeServiceRequesterFence => runtime_service_entry::bridge_requester(true)?,

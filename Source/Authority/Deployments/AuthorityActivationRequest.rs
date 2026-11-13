@@ -71,10 +71,10 @@ impl Request {
     /// Reserve a dedicated manager stream for one exact revocable deployment activation.
     pub fn until_withdrawn(mut self) -> Result<Self> {
         ensure!(
-            self.intent.generation == 1
-                && self.intent.sequence == 1
-                && self.intent.acknowledged_through == 0,
-            "Persistent activation requires the first intent of a dedicated manager profile"
+            self.intent.generation >= 1
+                && self.intent.sequence >= 1
+                && self.intent.acknowledged_through.checked_add(1) == Some(self.intent.sequence),
+            "Persistent activation requires one unacknowledged request in a dedicated manager profile"
         );
         let governance =
             Governance::parse(self.intent.network, self.intent.incarnation, &self.records)?;
