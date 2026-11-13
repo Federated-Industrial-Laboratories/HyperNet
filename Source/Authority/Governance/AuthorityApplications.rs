@@ -31,11 +31,33 @@ fn finite_span(value: &V) -> Result<(u64, u64)> {
     let span = Validity::parse(value)?;
     Ok((span.0, span.1.finite()?))
 }
+#[cfg(test)]
 fn refs(value: &V, maximum: usize) -> Result<Vec<VersionRef>> {
     let result = value
         .list(maximum)?
         .iter()
         .map(version)
+        .collect::<Result<Vec<_>>>()?;
+    validate_versions(&result, maximum)?;
+    Ok(result)
+}
+// Read minima describe the requester's mixed retained floor, not authority to use
+// another record kind. Only relevant authorised closure entries are compared later.
+fn minimum_refs(value: &V, maximum: usize) -> Result<Vec<VersionRef>> {
+    let result = value
+        .list(maximum)?
+        .iter()
+        .map(|value| {
+            let f = value.array(4)?;
+            let reference = VersionRef {
+                kind: f[0].uint()?,
+                id: id(&f[1])?,
+                generation: f[2].uint()?,
+                digest: id(&f[3])?,
+            };
+            ensure!(reference.kind > 0, "zero minimum record kind");
+            Ok(reference)
+        })
         .collect::<Result<Vec<_>>>()?;
     validate_versions(&result, maximum)?;
     Ok(result)
@@ -342,7 +364,7 @@ impl Operation {
                         Some(id(&f[5])?)
                     },
                     minimum_point,
-                    minimum: refs(&f[7], 512)?,
+                    minimum: minimum_refs(&f[7], 512)?,
                 }
             }
             "AuthorityApplicationRegister" => {
@@ -390,7 +412,7 @@ impl Operation {
                 ensure!(application == intent.resource, "application lookup differs");
                 Self::Get {
                     application,
-                    minimum: refs(&f[4], 512)?,
+                    minimum: minimum_refs(&f[4], 512)?,
                 }
             }
             "AuthorityApplicationList" => {
@@ -402,7 +424,7 @@ impl Operation {
                 );
                 Self::List {
                     owner,
-                    minimum: refs(&f[4], 512)?,
+                    minimum: minimum_refs(&f[4], 512)?,
                 }
             }
             "AuthorityApplicationWithdraw" => {
@@ -1089,3 +1111,7 @@ mod renewal_vectors;
 
 #[cfg(test)]
 include!("../../../Tests/Support/Authority/Governance/AuthorityApplications.rs");
+
+#[cfg(test)]
+#[path = "../../../Tests/Unit/Authority/Governance/AuthorityApplicationsMinimumTests.rs"]
+mod minimum_tests;

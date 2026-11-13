@@ -53,6 +53,8 @@ pub struct Manifest {
     pub tls_digests: BTreeMap<String, String>,
     pub endpoint_leaves: BTreeMap<String, String>,
     pub session_policy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_certificates: Option<crate::runtime_manifest::transport::Certificates>,
 }
 fn is_false(value: &bool) -> bool {
     !*value
@@ -366,6 +368,7 @@ impl Manifest {
                 allow_opaque: false,
                 reviewer_roots: vec![],
             },
+            transport_certificates: self.transport_certificates.clone(),
             authority_config: Some(m::AuthorityConfig {
                 listen_address: self.config.listen.ip(),
                 listen_port: self.config.listen.port(),
@@ -432,6 +435,7 @@ impl Manifest {
             previous_profile: manifest.previous_profile,
             previous_consent: manifest.previous_consent,
             version: 1,
+            transport_certificates: manifest.transport_certificates.clone(),
             deployment: hex::encode(manifest.deployment),
             network: hex::encode(manifest.network),
             incarnation: hex::encode(manifest.incarnation),
@@ -649,6 +653,9 @@ pub fn verify(
         "Hosting consent signature or exact profile differs"
     );
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    manifest
+        .canonical()?
+        .current_transport(now.checked_mul(1000).context("Certificate time overflow")?)?;
     ensure!(
         now >= manifest.created && now < manifest.expires,
         "Hosting consent is outside its validity interval"

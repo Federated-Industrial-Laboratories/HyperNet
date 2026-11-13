@@ -32,6 +32,19 @@ pub enum Command {
         #[arg(long, default_value_t = 365, value_parser = clap::value_parser!(u32).range(1..=3650))]
         days: u32,
     },
+    /// Renew the retained issuer certificate with the same key, identity and extensions.
+    RenewIssuer {
+        #[command(flatten)]
+        location: Location,
+        #[arg(long)]
+        issuer_certificate: Option<PathBuf>,
+        #[arg(long)]
+        issuer_digest: String,
+        #[arg(long, default_value_t = 365, value_parser = clap::value_parser!(u32).range(1..=3650))]
+        days: u32,
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Create a local role identity and a separately keyed transport request.
     Identity {
         #[command(flatten)]
@@ -45,6 +58,9 @@ pub enum Command {
     Issue {
         #[command(flatten)]
         location: Location,
+        /// Exact current same-key issuer; omission uses the original Authority.pem.
+        #[arg(long)]
+        issuer_certificate: Option<PathBuf>,
         #[arg(long)]
         issuer_digest: String,
         #[arg(long)]
@@ -267,6 +283,48 @@ fn issuer(directory: &Path, days: u32) -> Result<serde_json::Value> {
         "issuerDigest":files::hex_digest(&pem),"networkUsed":false}),
     )
 }
+fn selected_issuer(root: &Path, selected: Option<&Path>, pin: &str) -> Result<Vec<u8>> {
+    let original = files::public_read(&root.join("Authority.pem"), 8192)?;
+    let original_der = tls::certificate(&original)?;
+    let selected = tls::read_pinned(selected.unwrap_or(&root.join("Authority.pem")), pin)?;
+    let selected_der = tls::certificate(&selected)?;
+    crate::runtime_manifest::certificates::issuer_successor(&original_der, &selected_der)?;
+    Ok(selected)
+}
+fn renew_issuer(
+    root: &Path,
+    selected: Option<&Path>,
+    pin: &str,
+    days: u32,
+    output: &Path,
+) -> Result<serde_json::Value> {
+    let root = files::root(root)?;
+    let _lock = files::lock(&root)?;
+    let current = selected_issuer(&root, selected, pin)?;
+    let serial = format!("0x{}", hex::encode(rand::random::<[u8; 16]>()));
+    let renewed = tls::command(
+        &files::strings(&[
+            "x509",
+            "-signkey",
+            &tls::text(&root.join("Transport.key"))?,
+            "-days",
+            &days.to_string(),
+            "-set_serial",
+            &serial,
+        ]),
+        Some(&current),
+    )?;
+    let current_der = tls::certificate(&current)?;
+    let renewed_der = tls::certificate(&renewed)?;
+    crate::runtime_manifest::certificates::issuer_successor(&current_der, &renewed_der)?;
+    let renewed = crate::runtime_manifest::certificates::pem(&renewed_der)?;
+    files::root(output.parent().context("Issuer output parent absent")?)?;
+    files::create(output, renewed.as_bytes())?;
+    Ok(
+        json!({"status":"IssuerRenewed","certificate":output,"issuerDigest":files::hex_digest(renewed.as_bytes()),
+        "transportKey":hex::encode(crate::runtime_manifest::leaf_key(&renewed_der)?),"networkUsed":false}),
+    )
+}
 fn prepare_identity(directory: &Path, address: Ipv4Addr, port: u16) -> Result<serde_json::Value> {
     ensure!(
         !address.is_unspecified() && !address.is_multicast() && !address.is_broadcast(),
@@ -324,15 +382,36 @@ fn issue(
     days: u32,
     output: &Path,
 ) -> Result<serde_json::Value> {
+    issue_selected(
+        root,
+        issuer_pin,
+        None,
+        request_path,
+        request_pin,
+        days,
+        output,
+    )
+}
+fn issue_selected(
+    root: &Path,
+    issuer_pin: &str,
+    selected: Option<&Path>,
+    request_path: &Path,
+    request_pin: &str,
+    days: u32,
+    output: &Path,
+) -> Result<serde_json::Value> {
     let root = files::root(root)?;
     let _lock = files::lock(&root)?;
-    let authority = tls::read_pinned(&root.join("Authority.pem"), issuer_pin)?;
+    let authority = selected_issuer(&root, selected, issuer_pin)?;
     let request: Request = serde_json::from_slice(&tls::read_pinned(request_path, request_pin)?)?;
     request.validate()?;
     let extensions = format!(
         "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth,clientAuth\nsubjectAltName=IP:{}\n",
         request.address
     );
+    let issuer_path = root.join(format!("Issuer{}.pem", files::random_id()));
+    files::create(&issuer_path, &authority)?;
     let extension_path = root.join(format!("Extensions{}.cnf", files::random_id()));
     files::create(&extension_path, extensions.as_bytes())?;
     let serial = format!("0x{}", hex::encode(rand::random::<[u8; 16]>()));
@@ -341,7 +420,7 @@ fn issue(
             "x509",
             "-req",
             "-CA",
-            &tls::text(&root.join("Authority.pem"))?,
+            &tls::text(&issuer_path)?,
             "-CAkey",
             &tls::text(&root.join("Transport.key"))?,
             "-set_serial",
@@ -354,6 +433,7 @@ fn issue(
         Some(request.request_pem.as_bytes()),
     );
     fs::remove_file(extension_path)?;
+    fs::remove_file(issuer_path)?;
     let peer = Peer {
         request,
         certificate_pem: String::from_utf8(result?)?,
@@ -486,6 +566,19 @@ fn replica(
 pub fn run(command: Command) -> Result<()> {
     let result = match command {
         Command::Issuer { location, days } => issuer(&location.directory, days)?,
+        Command::RenewIssuer {
+            location,
+            issuer_certificate,
+            issuer_digest,
+            days,
+            output,
+        } => renew_issuer(
+            &location.directory,
+            issuer_certificate.as_deref(),
+            &issuer_digest,
+            days,
+            &output,
+        )?,
         Command::Identity {
             location,
             address,
@@ -493,19 +586,34 @@ pub fn run(command: Command) -> Result<()> {
         } => prepare_identity(&location.directory, address, port)?,
         Command::Issue {
             location,
+            issuer_certificate,
             issuer_digest,
             request,
             request_digest,
             days,
             output,
-        } => issue(
-            &location.directory,
-            &issuer_digest,
-            &request,
-            &request_digest,
-            days,
-            &output,
-        )?,
+        } => {
+            if let Some(selected) = issuer_certificate {
+                issue_selected(
+                    &location.directory,
+                    &issuer_digest,
+                    Some(&selected),
+                    &request,
+                    &request_digest,
+                    days,
+                    &output,
+                )?
+            } else {
+                issue(
+                    &location.directory,
+                    &issuer_digest,
+                    &request,
+                    &request_digest,
+                    days,
+                    &output,
+                )?
+            }
+        }
         Command::Replica {
             location,
             identity_directory,

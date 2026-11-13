@@ -182,6 +182,7 @@ pub(crate) fn manifest() -> Manifest {
             allow_opaque: false,
             reviewer_roots: vec![],
         },
+        transport_certificates: None,
         authority_config: Some(AuthorityConfig {
             listen_address: Ipv4Addr::UNSPECIFIED.into(),
             listen_port: 24000,
@@ -1168,4 +1169,148 @@ fn registrar_read_refuses_policy_replacement_after_context_but_operator_read_rem
             expected,
         );
     }
+}
+
+#[test]
+fn expired_certificate_successor_is_history_only_and_activation_keeps_finite_deadline() {
+    let f = Fixture::persistent();
+    let (before, after) = crate::authority_domains::routes::tests::certificate_profiles_until(
+        b"700101000004Z",
+        b"700101000005Z",
+    );
+    let make = |manifest: &Manifest, initial: bool| {
+        let consent =
+            wire::sign_envelope(&manifest.unsigned_consent(0).unwrap(), &key(90)).unwrap();
+        let possessions = if initial {
+            [(0, 160), (1, 110), (2, 91)]
+                .into_iter()
+                .map(|(class, seed)| {
+                    b(&wire::sign_envelope(
+                        &Offer::possession(
+                            manifest,
+                            class,
+                            public(seed),
+                            [199; 32],
+                            manifest.validity,
+                        )
+                        .unwrap(),
+                        &key(seed),
+                    )
+                    .unwrap())
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+        Offer::parse(&manifest.encode().unwrap(), &consent, &a(possessions)).unwrap()
+    };
+    let initial = make(&before.manifest, true);
+    let (_, intent, operation) = f.register(&initial);
+    let admitted = operation
+        .authorise(&f.records, &f.reservations, &intent, 5000, false, None)
+        .unwrap();
+    assert_eq!(admitted.code, 0);
+    let mut entries = f.records.clone();
+    entries.extend(admitted.records.clone());
+    members::sort_records(&mut entries).unwrap();
+    let next = make(&after.manifest, false);
+    assert!(!next.historical(4000).unwrap());
+    assert!(next.historical(5000).unwrap());
+    assert!(!next.current(5000).unwrap());
+    let decide = |at: u64, historical: bool| {
+        let mut parameters = f
+            .parameters(&next, &admitted.dependencies)
+            .array(9)
+            .unwrap()
+            .to_vec();
+        parameters[8] = V::Bool(historical);
+        let intent = Intent::from_signed(&signed(
+            &key(5),
+            "AuthorityDeploymentRegister",
+            DEPLOYMENT,
+            1,
+            a(parameters),
+            admitted.dependencies.clone(),
+        ))
+        .unwrap();
+        Operation::parse(&intent)
+            .unwrap()
+            .authorise(
+                &entries,
+                &f.reservations,
+                &intent,
+                at,
+                false,
+                Some((&initial.manifest_bytes, &initial.consent)),
+            )
+            .unwrap()
+    };
+    let current = decide(4000, false);
+    assert_eq!(current.code, 0);
+    assert_eq!(current.expires_ms, 5000);
+    assert_eq!(decide(4000, true).code, 7);
+    assert_eq!(decide(5000, false).code, 7);
+    let historical = decide(5000, true);
+    assert_eq!(historical.code, 0);
+    entries.retain(|bytes| {
+        records::reference(bytes).map_or(true, |r| !matches!(r.kind, 105 | 117 | 129))
+    });
+    entries.extend(historical.records);
+    members::sort_records(&mut entries).unwrap();
+    let registration = Index::parse(&entries, &f.reservations, N, I)
+        .unwrap()
+        .deployments[&DEPLOYMENT]
+        .clone();
+    use crate::authority_runtime_activation as activation;
+    let manager = Governance::parse(N, I, &entries)
+        .unwrap()
+        .versions()
+        .into_iter()
+        .find(|r| r.kind == 102 && r.id == [23; 32])
+        .unwrap();
+    let activation = activation::Operation {
+        grant: manager,
+        admission: registration.reference,
+        role: 5,
+        recipient: public(160),
+        local_generation: 2,
+        snapshot: members::Snapshot::parse(&snapshot(&[])).unwrap(),
+    };
+    let mut activate = intent.clone();
+    activate.action = activation::ACTION.into();
+    activate.profile_generation = 2;
+    activate.revision = 2;
+    let current = activation
+        .prepare(
+            &entries,
+            &f.reservations,
+            &activate,
+            public(160),
+            4000,
+            false,
+        )
+        .unwrap();
+    assert_eq!(current.code, 0);
+    assert_eq!(current.expires_ms, 5000);
+    assert_eq!(
+        activation
+            .prepare(
+                &entries,
+                &f.reservations,
+                &activate,
+                public(160),
+                5000,
+                false
+            )
+            .unwrap()
+            .code,
+        7
+    );
+    assert_eq!(
+        next.manifest.validity.1,
+        crate::trust_validity::End::UntilWithdrawn
+    );
+    let mut future = after.manifest;
+    future.validity.0 = 6000;
+    assert!(!make(&future, false).historical(5000).unwrap());
 }

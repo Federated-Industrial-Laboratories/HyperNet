@@ -450,12 +450,20 @@ impl Fixture {
     }
     fn consent_successor(&mut self, index: usize) -> RegisteredProfile {
         let old = &self.profiles[index];
-        let operator = 90 + index as u8 * 2;
         let mut manifest = old.manifest.clone();
         manifest.generation += 1;
         manifest.previous_profile = Some(wire::digest(&old.manifest.desired().unwrap()));
         manifest.previous_consent = Some(wire::digest(&old.manifest.unsigned_consent(0).unwrap()));
         manifest.validity.1 = (manifest.validity.1.finite().unwrap() + 10000).into();
+        self.admit_successor(index, manifest)
+    }
+    fn admit_successor(
+        &mut self,
+        index: usize,
+        manifest: crate::runtime_manifest::Manifest,
+    ) -> RegisteredProfile {
+        let old = &self.profiles[index];
+        let operator = 90 + index as u8 * 2;
         let consent = wire::sign_envelope(
             &manifest.unsigned_consent(0).unwrap(),
             &deployment::key(operator),
@@ -526,6 +534,17 @@ impl Fixture {
         members::sort_records(&mut self.records).unwrap();
         let mut profile = old.clone();
         profile.manifest = manifest;
+        if let Some(transport) = &profile.manifest.transport_certificates {
+            profile.identity.certificate_authority_pem = transport.issuer_pem.clone();
+            profile.identity.leaf_der = profile
+                .manifest
+                .endpoints
+                .iter()
+                .find(|e| e.endpoint_id == profile.endpoint)
+                .unwrap()
+                .leaf_der
+                .clone();
+        }
         profile.validity = profile.manifest.validity;
         profile.deployment_profile =
             crate::authority_deployment_records::reference(&profile.manifest.desired().unwrap())
@@ -1365,6 +1384,61 @@ fn scoped_voucher_issuance_checks_real_service_consent_and_member_capability() {
                 .collect::<Vec<_>>();
             assert_eq!(vouchers.len(), 4);
             assert!(vouchers.iter().all(|v| v.expires == 125_000));
+            let mut depleted = state.clone();
+            let exhausted = depleted
+                .records
+                .values()
+                .find(|r| r.reference.kind == 166)
+                .unwrap()
+                .clone();
+            let allowance = Voucher::parse(&exhausted.payload).unwrap();
+            let usage = Usage {
+                connections: 1,
+                bytes: allowance.bytes,
+                connection: [222; 32],
+                transcript: [223; 32],
+                creation: [224; 32],
+            };
+            depleted
+                .put(Record::next(&depleted, 167, exhausted.reference.id, usage.value()).unwrap())
+                .unwrap();
+            let refreshed = scoped_vouchers(
+                &depleted,
+                &f.records,
+                &f.reserved,
+                &slot,
+                100_000,
+                [200; 32],
+            )
+            .unwrap();
+            assert_eq!(
+                refreshed.record(166, exhausted.reference.id).unwrap().bytes,
+                exhausted.bytes,
+                "refreshing another role must not postpone exhausted route recovery"
+            );
+            assert!(refreshed.records.values().any(|r| r.reference.kind == 166
+                && Voucher::parse(&r.payload).unwrap().expires > 125_000));
+            let recovered = scoped_vouchers(
+                &refreshed,
+                &f.records,
+                &f.reserved,
+                &slot,
+                125_000,
+                [201; 32],
+            )
+            .unwrap();
+            let renewed = Voucher::parse(
+                &recovered
+                    .record(166, exhausted.reference.id)
+                    .unwrap()
+                    .payload,
+            )
+            .unwrap();
+            assert_eq!(renewed.baseline, Some((usage.connections, usage.bytes)));
+            assert_eq!(renewed.connections, allowance.connections);
+            assert_eq!(renewed.bytes, allowance.bytes);
+            assert!(renewed.expires > 125_000);
+            assert_eq!(recovered.records.len(), refreshed.records.len());
             let already_expanded = Index::parse(&f.records, &f.reserved, N, I)
                 .unwrap()
                 .extend_reservations(&f.reserved);
@@ -1501,4 +1575,154 @@ fn depleted_handover_preserves_expiry_until_normal_post_expiry_renewal() {
     assert_eq!(voucher.baseline, Some((1, CHARGE)));
     assert_eq!(voucher.connections, 1);
     assert_eq!(voucher.bytes, CHARGE);
+}
+
+// Real certificates exercise the independent route decoder without synthetic TLS pins.
+pub(crate) fn certificate_profiles() -> (RegisteredProfile, RegisteredProfile) {
+    certificate_profiles_until(b"700102000000Z", b"700103000000Z")
+}
+pub(crate) fn certificate_profiles_until(
+    before_end: &[u8],
+    after_end: &[u8],
+) -> (RegisteredProfile, RegisteredProfile) {
+    let (issuer, next_issuer, leaf, next_leaf) =
+        crate::runtime_manifest::certificates::tests::route_certificates_until(
+            before_end, after_end,
+        );
+    let mut before = Fixture::with_route_transport(true, Some((110, leaf))).profiles[0].clone();
+    before.manifest.validity =
+        crate::trust_validity::Validity(1000, crate::trust_validity::End::UntilWithdrawn);
+    before.validity = before.manifest.validity;
+    before.identity.service = RELAY;
+    before.identity.certificate_authority_pem = issuer.clone();
+    before.identity.server_name = "192.0.2.10".into();
+    let bind = |profile: &mut RegisteredProfile| {
+        profile.deployment_profile =
+            crate::authority_deployment_records::reference(&profile.manifest.desired().unwrap())
+                .unwrap();
+        profile.consent = crate::authority_deployment_records::reference(
+            &profile.manifest.unsigned_consent(0).unwrap(),
+        )
+        .unwrap();
+        seal(profile, 90);
+    };
+    bind(&mut before);
+    let mut after = before.clone();
+    after.manifest.generation += 1;
+    after.manifest.previous_profile = Some(wire::digest(&before.manifest.desired().unwrap()));
+    after.manifest.previous_consent =
+        Some(wire::digest(&before.manifest.unsigned_consent(0).unwrap()));
+    after
+        .manifest
+        .adopt_certificates(
+            &before.manifest,
+            next_issuer.clone(),
+            &[(before.endpoint, next_leaf.clone())].into_iter().collect(),
+            issuer,
+        )
+        .unwrap();
+    after.identity.leaf_der = next_leaf;
+    after.identity.certificate_authority_pem = next_issuer;
+    bind(&mut after);
+    (before, after)
+}
+
+#[test]
+fn permanent_route_accepts_only_actual_same_key_certificate_successor() {
+    let (before, after) = certificate_profiles();
+    after.successor_of(&before).unwrap();
+    assert_eq!(after.validity, before.validity);
+    assert_eq!(
+        after.manifest.operational_digest().unwrap(),
+        before.manifest.operational_digest().unwrap()
+    );
+    let mut no_change = before.clone();
+    no_change.manifest.generation += 1;
+    assert!(no_change.successor_of(&before).is_err());
+    for change in 0..5 {
+        let mut changed = after.clone();
+        match change {
+            0 => changed.identity.transport_key = [222; 32],
+            1 => changed.identity.server_name = "unrelated.invalid".into(),
+            2 => changed.limits.bytes += 1,
+            3 => changed.identity.certificate_authority_pem = String::new(),
+            _ => changed.validity.0 += 1,
+        }
+        assert!(
+            changed.successor_of(&before).is_err(),
+            "certificate route change {change}"
+        );
+    }
+}
+
+#[test]
+fn certified_certificate_refresh_preserves_live_voucher_usage_and_exact_handover_fence() {
+    let (issuer, new_issuer, leaf, new_leaf) =
+        crate::runtime_manifest::certificates::tests::route_certificates();
+    let mut f = Fixture::with_route_transport(true, Some((110, leaf)));
+    f.profiles[0].identity.service = RELAY;
+    f.profiles[0].identity.server_name = "192.0.2.10".into();
+    f.profiles[0].identity.certificate_authority_pem = issuer.clone();
+    seal(&mut f.profiles[0], 90);
+    f.register();
+    let previous = f.issue(2, 2 * CHARGE);
+    f.apply(Fixture::permit(&previous, 210), 160, None);
+    let usage = f.state.record(167, previous.id).unwrap().clone();
+    let old = Voucher::parse(&f.state.record(166, previous.id).unwrap().payload).unwrap();
+    let mut manifest = f.profiles[0].manifest.clone();
+    manifest.generation += 1;
+    manifest.previous_profile = Some(wire::digest(&f.profiles[0].manifest.desired().unwrap()));
+    manifest.previous_consent = Some(wire::digest(
+        &f.profiles[0].manifest.unsigned_consent(0).unwrap(),
+    ));
+    manifest
+        .adopt_certificates(
+            &f.profiles[0].manifest,
+            new_issuer,
+            &[(f.profiles[0].endpoint, new_leaf)].into_iter().collect(),
+            issuer,
+        )
+        .unwrap();
+    let profile = f.admit_successor(0, manifest);
+    f.apply(
+        Command::Register {
+            profile: Box::new(profile),
+        },
+        5,
+        Some(f.root.clone()),
+    );
+    assert_ne!(
+        f.request(
+            Command::Handover {
+                voucher: previous.clone(),
+                expires: 19000
+            },
+            5,
+            Some(f.reader.clone())
+        )
+        .2
+        .code,
+        0,
+        "exact live handover cannot silently switch its service certificate reference"
+    );
+    let mut command = f.issue_command(2, 2 * CHARGE);
+    if let Command::Issue { expires, .. } = &mut command {
+        *expires = old.expires;
+    }
+    f.apply(command, 5, Some(f.reader.clone()));
+    let record = f.state.record(166, previous.id).unwrap();
+    let refreshed = Voucher::parse(&record.payload).unwrap();
+    assert!(refreshed.relay.generation > old.relay.generation);
+    assert_eq!(refreshed.destination, old.destination);
+    assert_eq!(refreshed.baseline, Some(old.baseline.unwrap_or((0, 0))));
+    assert_eq!(f.state.record(167, previous.id).unwrap().bytes, usage.bytes);
+    let reference = record.reference.clone();
+    f.apply(Fixture::permit(&reference, 211), 160, None);
+    assert_ne!(
+        f.request(Fixture::permit(&reference, 212), 160, None)
+            .2
+            .code,
+        0,
+        "certificate refresh cannot refill the live allowance"
+    );
 }

@@ -32,23 +32,34 @@ fn boottime() -> Result<u64> {
 fn expired(previous: u64, wall: u64, expires: End, boot: u64, deadline: Option<u64>) -> bool {
     wall < previous || !expires.contains(wall) || deadline.is_some_and(|end| boot >= end)
 }
-pub fn run(kind: Kind, expires: End, arguments: Vec<String>) -> Result<()> {
-    crate::confinement::preflight()?;
-    let now = crate::store::now()?;
-    let deadline = match expires {
+fn serving_lifetime(
+    consent: End,
+    certificate_end: Option<u64>,
+    wall: u64,
+    boot: u64,
+) -> Result<(End, Option<u64>)> {
+    let end = certificate_end.map_or(consent, |end| consent.min(End::At(end)));
+    let deadline = match end {
         End::At(end) => {
-            ensure!(
-                end > now && end - now <= 604800,
-                "Runtime consent deadline is expired or invalid"
-            );
+            ensure!(end > wall, "Serving certificate or consent expired");
             Some(
-                boottime()?
-                    .checked_add(end - now)
-                    .context("Deadline overflow")?,
+                boot.checked_add(end - wall)
+                    .context("Serving deadline overflow")?,
             )
         }
         End::UntilWithdrawn => None,
     };
+    Ok((end, deadline))
+}
+pub fn run(kind: Kind, expires: End, arguments: Vec<String>) -> Result<()> {
+    crate::confinement::preflight()?;
+    let now = crate::store::now()?;
+    if let End::At(end) = expires {
+        ensure!(
+            end > now && end - now <= 604800,
+            "Runtime consent deadline is expired or invalid"
+        );
+    }
     let authorization = std::path::Path::new("/Authorization");
     let manifest = crate::runtime_authorization::Manifest::read(authorization)?;
     crate::runtime_authorization::verify(
@@ -61,6 +72,15 @@ pub fn run(kind: Kind, expires: End, arguments: Vec<String>) -> Result<()> {
         expires == manifest.expires,
         "Guard deadline differs from consent"
     );
+    let (serving_end, deadline) = serving_lifetime(
+        expires,
+        manifest
+            .canonical()?
+            .transport_expiry()?
+            .map(|end| end / 1000),
+        now,
+        boottime()?,
+    )?;
     let floor = match kind {
         Kind::Authority => {
             ensure!(
@@ -119,7 +139,7 @@ pub fn run(kind: Kind, expires: End, arguments: Vec<String>) -> Result<()> {
             .unwrap_or(false);
             if STOP.load(Ordering::Relaxed)
                 || !consent_current
-                || expired(previous, wall, expires, boottime()?, deadline)
+                || expired(previous, wall, serving_end, boottime()?, deadline)
             {
                 return Ok(());
             }

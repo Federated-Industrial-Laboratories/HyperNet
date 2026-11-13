@@ -99,8 +99,16 @@ impl Offer {
             possessions: outputs,
         })
     }
+    /// Expired signed successors may advance retained history, never current serving authority.
+    pub fn historical(&self, at: u64) -> Result<bool> {
+        let transport = self.manifest.transport_interval()?;
+        Ok(self.manifest.generation > 1
+            && at >= self.manifest.validity.0
+            && transport.is_none_or(|(start, _)| at >= start)
+            && (at >= self.manifest.validity.1 || transport.is_some_and(|(_, end)| at >= end)))
+    }
     pub fn current(&self, at: u64) -> Result<bool> {
-        if !current(at, self.manifest.validity) {
+        if !current(at, self.manifest.validity) || self.manifest.current_transport(at).is_err() {
             return Ok(false);
         }
         for bytes in &self.possessions {
@@ -474,13 +482,18 @@ impl Operation {
                 d.expires_ms = if *historical {
                     c.expires_ms
                 } else {
-                    offer.manifest.validity.1.bound(c.expires_ms)
+                    offer
+                        .manifest
+                        .validity
+                        .1
+                        .bound(c.expires_ms)
+                        .min(offer.manifest.transport_expiry()?.unwrap_or(c.expires_ms))
                 };
                 if !all.contains(grant) {
                     d.refuse(12)
                 }
                 if if *historical {
-                    offer.manifest.generation <= 1 || at < offer.manifest.validity.1
+                    !offer.historical(at)?
                 } else {
                     !current(at, offer.manifest.validity) || (!replay && !offer.current(at)?)
                 } {

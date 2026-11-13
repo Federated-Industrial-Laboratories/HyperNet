@@ -171,11 +171,17 @@ impl Operation {
         let value = wire::decode(g.record_bytes(105, intent.resource)?)?;
         let consent = value.array(19)?;
         let span = crate::trust_validity::Validity::parse(&consent[16])?;
-        if !members::current(at, span) || consent[18].uint()? != 0 {
+        if !members::current(at, span)
+            || consent[18].uint()? != 0
+            || registration.manifest.current_transport(at).is_err()
+        {
             d.refuse(7);
             return Ok(d);
         }
         d.expires_ms = span.1.bound(manager.expires_ms.min(registrar.expires_ms));
+        if let Some(end) = registration.manifest.transport_expiry()? {
+            d.expires_ms = d.expires_ms.min(end);
+        }
         d.versions = manager.dependencies;
         d.versions.extend(registrar.dependencies);
         d.versions.extend([
