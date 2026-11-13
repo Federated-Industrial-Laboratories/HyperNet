@@ -1250,6 +1250,8 @@ pub(crate) fn admission_routes(
         .get(&slot.policy)
         .context("scoped route policy absent")?
         .clone();
+    let mut superseded = false;
+    let mut inconsistent = false;
     for role in &slot.roles {
         if let Some(host) = policy.template(role.role)?.page {
             let (dependencies, selected, expiry) =
@@ -1266,8 +1268,12 @@ pub(crate) fn admission_routes(
                 crate::authority_admission::identifier(slot.policy, slot.slot, role.role, purpose)?;
             let r = c.select(166, id)?;
             let voucher = Voucher::parse(&r.payload)?;
-            c.service(voucher.relay.id, true)?;
-            c.service(voucher.destination.id, true)?;
+            for expected in [&voucher.relay, &voucher.destination] {
+                let (current, _) = c.service(expected.id, true)?;
+                superseded |= expected.generation < current.reference.generation;
+                inconsistent |= expected.generation >= current.reference.generation
+                    && *expected != current.reference;
+            }
             c.capability(&voucher.grant, role.member, voucher.action, voucher.scope)?;
             ensure!(
                 voucher.possession == role.relay
@@ -1277,6 +1283,13 @@ pub(crate) fn admission_routes(
             );
         }
     }
+    // A certified service successor requires fresh vouchers before routes are usable.
+    // Keep inconsistent references in the closure for the strict disclosure verifier;
+    // a stale reference must not conceal a conflicting or future reference elsewhere.
+    ensure!(
+        !superseded || inconsistent,
+        "scoped routes require renewal after service succession"
+    );
     sorted(&mut c.dependencies)?;
     Ok((
         c.dependencies,

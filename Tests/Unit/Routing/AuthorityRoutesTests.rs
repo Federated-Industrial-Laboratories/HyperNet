@@ -1848,6 +1848,150 @@ fn permanent_route_accepts_only_actual_same_key_certificate_successor() {
 }
 
 #[test]
+fn scoped_admission_renews_unexpired_routes_after_certificate_succession() {
+    let (issuer, new_issuer, leaf, new_leaf) =
+        crate::runtime_manifest::certificates::tests::route_certificates();
+    let validity = (1000, 500_000).into();
+    let mut f = Fixture::with_route_validity(true, Some((110, leaf)), validity);
+    f.profiles[0].identity.service = RELAY;
+    f.profiles[0].identity.server_name = "192.0.2.10".into();
+    f.profiles[0].identity.certificate_authority_pem = issuer.clone();
+    f.profiles[0].limits.bytes = 16_384;
+    seal(&mut f.profiles[0], 90);
+    f.register();
+    let authority = [173; 32];
+    let mut profile = Fixture::admit_with_validity(
+        &mut f.records,
+        &f.reserved,
+        &f.root,
+        2,
+        true,
+        None,
+        validity,
+    );
+    profile.identity.service = authority;
+    seal(&mut profile, 94);
+    f.apply(
+        Command::Register {
+            profile: Box::new(profile),
+        },
+        5,
+        Some(f.root.clone()),
+    );
+    let slot = crate::authority_admission::tests::append_route_slot(
+        &mut f.records,
+        &f.reserved,
+        RELAY,
+        authority,
+        DESTINATION,
+    );
+    f.state = scoped_vouchers(&f.state, &f.records, &f.reserved, &slot, 5000, [199; 32]).unwrap();
+    let previous = f
+        .state
+        .records
+        .values()
+        .find(|r| r.reference.kind == 166)
+        .unwrap()
+        .clone();
+    let old = Voucher::parse(&previous.payload).unwrap();
+    let usage = Usage {
+        connections: 1,
+        bytes: 16_384,
+        connection: [222; 32],
+        transcript: [223; 32],
+        creation: [224; 32],
+    };
+    f.state
+        .put(Record::next(&f.state, 167, previous.reference.id, usage.value()).unwrap())
+        .unwrap();
+    let usage_record = f.state.record(167, previous.reference.id).unwrap().clone();
+    let mut manifest = f.profiles[0].manifest.clone();
+    manifest.generation += 1;
+    manifest.previous_profile = Some(wire::digest(&f.profiles[0].manifest.desired().unwrap()));
+    manifest.previous_consent = Some(wire::digest(
+        &f.profiles[0].manifest.unsigned_consent(0).unwrap(),
+    ));
+    manifest
+        .adopt_certificates(
+            &f.profiles[0].manifest,
+            new_issuer,
+            &[(f.profiles[0].endpoint, new_leaf)].into_iter().collect(),
+            issuer,
+        )
+        .unwrap();
+    let profile = f.admit_successor(0, manifest);
+    f.apply(
+        Command::Register {
+            profile: Box::new(profile),
+        },
+        5,
+        Some(f.root.clone()),
+    );
+    let disclose = |state: &State| {
+        crate::authority_admission::disclose(
+            &f.records,
+            state,
+            &f.reserved,
+            slot.roles[0].member,
+            slot.policy,
+            Some(slot.claim),
+            N,
+            I,
+            6000,
+        )
+    };
+    assert!(old.expires > 6000 + 60_000);
+    assert!(old.relay.generation < f.state.record(165, RELAY).unwrap().reference.generation);
+    let pending = disclose(&f.state).unwrap();
+    assert_eq!(pending.selected.unwrap().reference, slot.reference);
+    assert!(pending.domains.is_empty());
+    assert!(pending.versions.iter().all(|r| r.kind != 166));
+    assert_eq!(
+        f.state.record(166, previous.reference.id).unwrap().bytes,
+        previous.bytes,
+        "the read cannot refresh a voucher"
+    );
+
+    // A stale relay cannot conceal a conflicting or future destination reference.
+    for future in [false, true] {
+        let mut malformed = f.state.clone();
+        let mut voucher = old.clone();
+        voucher.destination.generation += u64::from(future);
+        voucher.destination.digest[0] ^= 1;
+        malformed
+            .put(Record::next(&malformed, 166, previous.reference.id, voucher.value()).unwrap())
+            .unwrap();
+        assert!(disclose(&malformed).is_err(), "future reference: {future}");
+    }
+
+    let renewed =
+        scoped_vouchers(&f.state, &f.records, &f.reserved, &slot, 6000, [200; 32]).unwrap();
+    let ready = disclose(&renewed).unwrap();
+    assert_eq!(ready.selected.unwrap().reference, slot.reference);
+    assert!(!ready.domains.is_empty());
+    let current = renewed.record(166, previous.reference.id).unwrap();
+    let voucher = Voucher::parse(&current.payload).unwrap();
+    assert_eq!(
+        current.reference.generation,
+        previous.reference.generation + 1
+    );
+    assert_eq!(voucher.relay, renewed.record(165, RELAY).unwrap().reference);
+    assert_eq!(voucher.destination, old.destination);
+    assert_eq!(voucher.baseline, old.baseline);
+    assert_eq!(
+        (voucher.connections, voucher.bytes),
+        (old.connections, old.bytes)
+    );
+    assert_eq!(
+        renewed.record(167, previous.reference.id).unwrap().bytes,
+        usage_record.bytes
+    );
+    assert!(voucher.permits_next(Some(&usage), 16_384));
+    assert!(!voucher.permits_next(Some(&usage), voucher.bytes));
+    assert_eq!(renewed.records.len(), f.state.records.len());
+}
+
+#[test]
 fn certified_certificate_refresh_preserves_live_voucher_usage_and_exact_handover_fence() {
     let (issuer, new_issuer, leaf, new_leaf) =
         crate::runtime_manifest::certificates::tests::route_certificates();
