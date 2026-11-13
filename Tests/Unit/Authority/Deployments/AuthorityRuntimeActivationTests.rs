@@ -165,57 +165,8 @@ fn exact_manager_and_recipient_are_separate_and_withdrawal_is_terminal() {
 
 #[test]
 fn persistent_activation_keeps_dedicated_authority_and_exact_consent_after_years() {
-    use crate::trust_validity::{End, Validity};
-    let f = fixture::Fixture::persistent();
+    let (f, mut records, registration, manager) = fixture::persistent_activation_manager();
     assert!(crate::trust_bootstrap::check(&f.bootstrap, true, 31_536_000_000).is_ok());
-    let mut manifest = fixture::manifest();
-    manifest.validity.1 = End::UntilWithdrawn;
-    let offer = fixture::offer(manifest);
-    let (mut records, registration, _, _) = fixture::admitted(&f, &offer);
-    let governance = Governance::parse([20; 32], [21; 32], &records).unwrap();
-    let root = governance
-        .versions()
-        .into_iter()
-        .find(|r| r.kind == 102 && r.id == [23; 32])
-        .unwrap();
-    let mut grant = wire::decode(governance.record_bytes(102, root.id).unwrap())
-        .unwrap()
-        .array(17)
-        .unwrap()
-        .to_vec();
-    grant[6] = b(&[179; 32]);
-    grant[8] = b(&public(80));
-    grant[10] = a(vec![V::Uint(26)]);
-    grant[11] = a(vec![a(vec![V::Uint(5), b(&[60; 32])])]);
-    grant[12] = Validity(1000, End::UntilWithdrawn).value();
-    grant[13] = reference(&root);
-    grant[14] = V::Uint(0);
-    grant[16] = fixture::snapshot(&[]);
-    let grant_bytes = wire::encode(&a(grant)).unwrap();
-    let manager = VersionRef {
-        kind: 102,
-        id: [179; 32],
-        generation: 1,
-        digest: wire::digest(&grant_bytes),
-    };
-    records.push(grant_bytes);
-    records.push(
-        wire::encode(&a(vec![
-            V::Uint(127),
-            V::Uint(1),
-            b(&[20; 32]),
-            b(&[21; 32]),
-            V::Uint(1),
-            V::Null,
-            b(&public(80)),
-            b(&public(5)),
-            reference(&manager),
-            Validity(1000, End::UntilWithdrawn).value(),
-            fixture::snapshot(&[]),
-        ]))
-        .unwrap(),
-    );
-    members::sort_records(&mut records).unwrap();
     let (intent, operation) = prepare(
         &records,
         &f.reservations,
@@ -265,15 +216,62 @@ fn persistent_activation_keeps_dedicated_authority_and_exact_consent_after_years
             Some(registration.consent.digest)
         );
     }
-    fields[6] = V::Uint(2);
-    let advanced =
-        wire::sign_envelope(&wire::encode(&a(fields)).unwrap(), &fixture::key(80)).unwrap();
-    assert!(
-        Request::new(advanced, records.clone())
+    for (generation, sequence) in [(1, 2), (1, 10), (2, 1), (3, 2)] {
+        fields[4] = V::Uint(generation);
+        fields[6] = V::Uint(sequence);
+        fields[7] = V::Uint(sequence - 1);
+        let signed = wire::sign_envelope(
+            &wire::encode(&a(fields.clone())).unwrap(),
+            &fixture::key(80),
+        )
+        .unwrap();
+        let continued = Request::new(signed, records.clone())
             .unwrap()
             .until_withdrawn()
-            .is_err()
-    );
+            .unwrap();
+        let reopened = Request::parse(&continued.encode().unwrap()).unwrap();
+        assert!(reopened.persistent());
+        assert_eq!(reopened.intent().generation, generation);
+        assert_eq!(reopened.intent().sequence, sequence);
+        assert_eq!(reopened.intent().acknowledged_through, sequence - 1);
+        assert_eq!(
+            operation
+                .authorise(
+                    &records,
+                    &f.reservations,
+                    reopened.intent(),
+                    public(107),
+                    31_536_000_000,
+                    true,
+                )
+                .unwrap()
+                .code,
+            0
+        );
+    }
+    for (generation, sequence, acknowledged) in [
+        (1, 0, 0),
+        (1, 2, 0),
+        (1, 3, 1),
+        (1, 2, 2),
+        (1, u64::MAX, u64::MAX),
+        (0, 2, 1),
+    ] {
+        fields[4] = V::Uint(generation);
+        fields[6] = V::Uint(sequence);
+        fields[7] = V::Uint(acknowledged);
+        let signed = wire::sign_envelope(
+            &wire::encode(&a(fields.clone())).unwrap(),
+            &fixture::key(80),
+        )
+        .unwrap();
+        assert!(
+            Request::new(signed, records.clone())
+                .and_then(Request::until_withdrawn)
+                .is_err(),
+            "generation {generation}, sequence {sequence}, acknowledged {acknowledged}"
+        );
+    }
     let refs = vec![registration.reference.clone()];
     let withdrawal = Intent::from_signed(&fixture::signed(
         &fixture::key(90),

@@ -50,6 +50,55 @@ impl std::fmt::Display for ReadPending {
     }
 }
 impl std::error::Error for ReadPending {}
+
+// A disclosure refusal alone cannot release the exact ordinary request.
+#[derive(Debug)]
+struct StaleRoutePermit {
+    request: Intent,
+}
+impl std::fmt::Display for StaleRoutePermit {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output.write_str("Route maintenance refused with code 12")
+    }
+}
+impl std::error::Error for StaleRoutePermit {}
+impl StaleRoutePermit {
+    fn completed(&self, store: &Store, command: &routes::Command) -> Result<()> {
+        let operation = Operation::parse(&self.request)?;
+        ensure!(
+            operation.grant.is_none()
+                && matches!(command, routes::Command::Permit { .. })
+                && operation.command.value() == DomainCommand::Route(command.clone()).value(),
+            "stale route recovery differs from the exact permit"
+        );
+        let metadata = store
+            .stream_metadata()?
+            .context("stale route recovery requires certified stream status")?;
+        let state = metadata
+            .state()
+            .context("stale route recovery has no certified stream")?;
+        ensure!(
+            metadata.scope() == store.descriptor().scope()
+                && metadata.scope().network == self.request.network
+                && metadata.scope().incarnation == self.request.incarnation
+                && metadata.scope().epoch == self.request.minimum_policy_epoch
+                && metadata.requester() == self.request.requester
+                && state.generation == self.request.generation
+                && state.generation_id == self.request.generation_id
+                && state.completion.as_ref().is_some_and(|completion| {
+                    completion.sequence == self.request.sequence
+                        && completion.intent == self.request.digest
+                        && completion.disposition == Disposition::Refuse
+                        && completion.reason == 12
+                })
+                && store.resume_ordinary()?.is_none()
+                && store.resume_fence()?.is_none(),
+            "stale route permit has no exact certified terminal refusal"
+        );
+        Ok(())
+    }
+}
+
 fn require_read_idle(store: &Store, stage: ReadPendingStage) -> Result<()> {
     if store.resume_ordinary()?.is_some() {
         return Err(ReadPending {
@@ -748,6 +797,14 @@ impl<'a> Client<'a> {
             if verified.disposition() != Disposition::Permit {
                 let code = verified.code();
                 self.store.observe(verified)?;
+                if code == 12
+                    && matches!(
+                        operation.command,
+                        DomainCommand::Route(routes::Command::Permit { .. })
+                    )
+                {
+                    return Err(StaleRoutePermit { request: intent }.into());
+                }
                 anyhow::bail!("Route maintenance refused with code {code}");
             }
             self.last_expiry = verified
@@ -971,11 +1028,24 @@ impl<'a> Client<'a> {
         }
         let admitted = cached.context("retained route voucher absent")?;
         timing.mark(Phase::PermitStart);
-        self.action(routes::Command::Permit {
+        let permit = routes::Command::Permit {
             voucher: voucher.clone(),
             connection,
             transcript,
-        })?;
+        };
+        if let Err(error) = self.action(permit.clone()) {
+            let Some(refusal) = error.downcast_ref::<StaleRoutePermit>() else {
+                return Err(error);
+            };
+            self.status()?;
+            refusal.completed(&self.store, &permit)?;
+            // Refresh changed dependencies only after proving that no permit was issued.
+            // One retry keeps the same voucher, connection, transcript and original deadline.
+            self.action(routes::Command::VoucherContext {
+                voucher: voucher.clone(),
+            })?;
+            self.action(permit)?;
+        }
         timing.mark(Phase::PermitComplete);
         let own = self.registered(open.relay)?;
         ensure!(

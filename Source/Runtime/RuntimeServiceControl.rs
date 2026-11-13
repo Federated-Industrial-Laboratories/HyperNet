@@ -220,32 +220,47 @@ pub(super) fn withdrawal_receipt(p: &Profile, s: &State, output: &Path) -> Resul
         json!({"withdrawalReceipt":output,"withdrawalGeneration":1,"cleanupComplete":cleanup,"networkPublished":false}),
     )
 }
-pub(super) fn activation_receipt(p: &Profile, s: &mut State, output: &Path) -> Result<Value> {
+pub(super) fn activation_receipt(
+    p: &Profile,
+    s: &mut State,
+    output: &Path,
+    if_present: bool,
+) -> Result<Value> {
     ensure!(s.initialised, "service has no retained activation state");
     workload::recover(p, s, false)?;
+    let mut command = files::strings(&["runtime-service-receipt"]);
+    if if_present {
+        command.push("--if-present".into());
+    }
     let bytes = if let Some(r) = &s.container {
         let v = workload::verify(p, r)?;
         ensure!(
             v["State"]["Running"] == true,
             "stop the exited service resource before exporting its retained report"
         );
+        let mut arguments = files::strings(&[
+            "exec",
+            "--user=1000:1000",
+            r.id.as_deref().unwrap(),
+            "/HyperNet",
+        ]);
+        arguments.extend(command);
         files::capture(
             Path::new("/usr/bin/podman"),
-            &files::strings(&[
-                "exec",
-                "--user=1000:1000",
-                r.id.as_deref().unwrap(),
-                "/HyperNet",
-                "runtime-service-receipt",
-            ]),
+            &arguments,
             30,
             crate::authority_runtime_activation::RECEIPT_LIMIT,
             16384,
         )?
         .0
     } else {
-        workload::finite(p, s, &files::strings(&["runtime-service-receipt"]), None)?
+        workload::finite(p, s, &command, None)?
     };
+    if if_present && bytes.is_empty() {
+        return Ok(
+            json!({"status":"ActivationReceiptAbsent","currentPermission":false,"serviceReadiness":"NotProbed"}),
+        );
+    }
     let receipt = crate::authority_runtime_activation::Receipt::parse(&bytes)?;
     files::create(output, receipt.canonical())?;
     Ok(json!({"activationReceipt":output,"currentPermission":false,"serviceReadiness":"NotProbed"}))

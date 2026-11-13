@@ -266,7 +266,28 @@ pub fn mail() -> Result<()> {
     let mut active = activation::activate(&guard)?;
     crate::runtime()?.block_on(mail_store::run(config, &guard, &mut active))
 }
-pub fn receipt() -> Result<()> {
+fn receipt_bytes(path: &Path, if_present: bool) -> Result<Option<Vec<u8>>> {
+    let bytes = if if_present {
+        crate::authority_files::read_optional(
+            path,
+            crate::authority_runtime_activation::RECEIPT_LIMIT,
+            true,
+        )?
+    } else {
+        Some(crate::authority_files::read(
+            path,
+            crate::authority_runtime_activation::RECEIPT_LIMIT,
+            true,
+        )?)
+    };
+    bytes
+        .map(|bytes| {
+            crate::authority_runtime_activation::Receipt::parse(&bytes)?;
+            Ok(bytes)
+        })
+        .transpose()
+}
+pub fn receipt(if_present: bool) -> Result<()> {
     // Export is historical reporting and remains available after consent expiry or withdrawal.
     // The private service files are never selected by an input path.
     if role()? == 8 {
@@ -274,13 +295,13 @@ pub fn receipt() -> Result<()> {
     } else {
         store_confinement()?;
     }
-    let bytes = crate::authority_files::read(
+    // Empty success is reserved for a missing final entry in the explicit optional mode.
+    if let Some(bytes) = receipt_bytes(
         Path::new("/State/Recipient/ActivationReceipt.cbor"),
-        4 * crate::trust_wire::MAXIMUM,
-        true,
-    )?;
-    let receipt = crate::authority_runtime_activation::Receipt::parse(&bytes)?;
-    std::io::stdout().lock().write_all(receipt.canonical())?;
+        if_present,
+    )? {
+        std::io::stdout().lock().write_all(&bytes)?;
+    }
     Ok(())
 }
 
@@ -296,3 +317,7 @@ pub fn routes() -> Result<()> {
     let active = activation::activate(&guard)?;
     crate::runtime()?.block_on(crate::route_runtime::run(config, &guard, &active))
 }
+
+#[cfg(test)]
+#[path = "../../Tests/Unit/Runtime/RuntimeActivationExportTests.rs"]
+mod receipt_tests;

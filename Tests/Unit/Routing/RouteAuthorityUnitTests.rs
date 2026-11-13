@@ -3,6 +3,144 @@
 use super::*;
 
 #[test]
+fn stale_route_retry_requires_exact_certified_terminal_refusal_after_reopen() {
+    use crate::authority_floor::tests::{certified, metadata, prepare_domain, setup, status};
+    for original in [None, Some((0, 0)), Some((1, 3)), Some((1, 12))] {
+        let (directory, sample, mut session, mut store) = setup();
+        let command = routes::Command::Permit {
+            voucher: VersionRef {
+                kind: 166,
+                id: [7; 32],
+                generation: 1,
+                digest: [8; 32],
+            },
+            connection: [9; 32],
+            transcript: [10; 32],
+        };
+        let slot = store.ordinary_slot().unwrap();
+        let scope = store.descriptor().scope();
+        let operation = Operation {
+            grant: None,
+            command: DomainCommand::Route(command.clone()),
+            snapshot: domains::snapshot(&a(vec![
+                a(vec![
+                    V::Uint(slot.minimum_policy_epoch()),
+                    V::Uint(slot.minimum_policy_height()),
+                    b(store.prefix().policy_state()),
+                ]),
+                a(vec![]),
+            ]))
+            .unwrap(),
+        };
+        let signed = wire::sign_envelope(
+            &wire::encode(&a(vec![
+                V::Uint(20),
+                V::Uint(1),
+                b(&scope.network),
+                b(&scope.incarnation),
+                V::Uint(slot.generation()),
+                b(&slot.generation_id()),
+                V::Uint(slot.sequence()),
+                V::Uint(slot.acknowledged_through()),
+                b(&store.requester()),
+                V::Text("AuthorityDomain".into()),
+                b(&operation.command.resource()),
+                V::Uint(1),
+                V::Uint(0),
+                V::Uint(slot.minimum_policy_epoch()),
+                V::Uint(slot.minimum_policy_height()),
+                a(vec![]),
+                b(&operation.parameters().unwrap()),
+            ]))
+            .unwrap(),
+            &ed25519_dalek::SigningKey::from_bytes(&[1; 32]),
+        )
+        .unwrap();
+        let pending = store.prepare_ordinary(slot, &signed).unwrap();
+        let refusal = StaleRoutePermit {
+            request: Intent::from_signed(&signed).unwrap(),
+        };
+        let result = |disposition, code| {
+            wire::encode(&a(vec![
+                V::Uint(24),
+                V::Uint(1),
+                V::Text("AuthorityDomain".into()),
+                V::Uint(disposition),
+                V::Uint(code),
+                b(&wire::encode(&a(vec![
+                    V::Uint(201),
+                    V::Uint(1),
+                    V::Text("AuthorityDomain".into()),
+                    a(vec![]),
+                ]))
+                .unwrap()),
+            ]))
+            .unwrap()
+        };
+        let observed = certified(
+            &store,
+            &mut session,
+            sample,
+            pending.signed(),
+            &result(1, 12),
+            None,
+        );
+        store.observe(observed).unwrap();
+        assert!(refusal.completed(&store, &command).is_err());
+        let descriptor = store.descriptor().clone();
+        drop(store);
+        let mut store = Store::open(&directory.0, descriptor).unwrap();
+        assert_eq!(store.resume_ordinary().unwrap().unwrap().signed(), signed);
+        let completion = original.map_or(V::Null, |(disposition, code)| {
+            a(vec![
+                V::Uint(1),
+                b(&pending.digest()),
+                V::Uint(disposition),
+                V::Uint(code),
+                b(&wire::digest(&result(disposition, code))),
+            ])
+        });
+        let current = metadata(&store, completion);
+        status(&mut store, &mut session, sample, &current);
+        assert!(store.resume_fence().unwrap().is_none());
+        if original == Some((1, 12)) {
+            refusal.completed(&store, &command).unwrap();
+            let mut changed = command.clone();
+            let routes::Command::Permit { transcript, .. } = &mut changed else {
+                unreachable!()
+            };
+            *transcript = [11; 32];
+            assert!(refusal.completed(&store, &changed).is_err());
+            let mut wrong_request = refusal.request.clone();
+            wrong_request.digest = [12; 32];
+            assert!(
+                StaleRoutePermit {
+                    request: wrong_request
+                }
+                .completed(&store, &command)
+                .is_err()
+            );
+            let slot = store.ordinary_slot().unwrap();
+            assert_eq!(slot.generation(), 1);
+            assert_eq!(slot.sequence(), 2);
+            assert_eq!(slot.acknowledged_through(), 1);
+            let next = prepare_domain(&mut store, sample);
+            assert!(refusal.completed(&store, &command).is_err());
+            assert_eq!(
+                store.resume_ordinary().unwrap().unwrap().signed(),
+                next.signed()
+            );
+        } else {
+            assert!(refusal.completed(&store, &command).is_err());
+            if matches!(original, None | Some((0, 0))) {
+                assert!(store.ordinary_slot().is_err());
+                assert_eq!(store.resume_ordinary().unwrap().unwrap().signed(), signed);
+            }
+        }
+    }
+}
+
+#[test]
 fn only_typed_control_closure_enters_fresh_authority_recovery() {
     use crate::{authority_local_transport::ControlClosed, route_runtime::ReadRetry};
     for error in [

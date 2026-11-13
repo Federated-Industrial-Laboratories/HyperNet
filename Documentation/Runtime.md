@@ -430,6 +430,15 @@ other certificate extensions cannot change. Fresh acceptance checks the current
 chain and finite dates; expired original certificates serve only as signed
 identity history.
 
+Replica trust stores may repeat the same issuer once per peer. Certificate
+succession accepts up to 16 byte-identical DER certificates in a 64 KiB store.
+The exact original PEM bytes remain bound to the original consent digest;
+exported templates and new issuers contain one canonical certificate. Origins
+above 1024 bytes use certificate metadata version2 with bounded UTF-8 bytes;
+short origins retain their exact version1 encoding. Coordinated Core and Suite
+0.11 validators support both forms; older readers refuse version2. Stores
+with distinct issuers are refused, without removing or replacing trust roots.
+
 Export the existing public template:
 
 ```sh

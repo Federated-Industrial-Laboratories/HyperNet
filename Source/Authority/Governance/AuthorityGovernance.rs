@@ -649,6 +649,19 @@ impl Governance {
             }
             dependencies.insert(policy.reference.index(), policy.reference.clone());
             dependencies.insert(slot.reference.index(), slot.reference.clone());
+            // A retained manual membership must be replaced by its exact current
+            // record before the same-key scoped material can enter a cached context.
+            // Unrelated roster entries need not be present in a minimal context.
+            for legacy in &policy.legacy {
+                if let Some(record) = self.records.get(&(125, legacy.id))
+                    && slot
+                        .roles
+                        .iter()
+                        .any(|role| record.fields[7].fixed::<32>().ok() == Some(role.member))
+                {
+                    dependencies.insert(record.reference.index(), record.reference.clone());
+                }
+            }
             for bytes in &slot.material {
                 let v = wire::decode(bytes)?;
                 let f = v.list(32)?;

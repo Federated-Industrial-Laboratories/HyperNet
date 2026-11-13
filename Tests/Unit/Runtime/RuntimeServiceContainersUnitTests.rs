@@ -16,3 +16,20 @@ fn private_route_descriptor_budget_covers_all_pools_and_destinations() {
     assert!(route_descriptors(4097).is_err());
     assert!(route_descriptors(u64::MAX).is_err());
 }
+
+#[test]
+fn optional_receipt_keeps_read_only_historical_reporting_mode() {
+    for arguments in [
+        vec!["runtime-service-receipt"],
+        vec!["runtime-service-receipt", "--if-present"],
+    ] {
+        assert!(receipt_command(&files::strings(&arguments)));
+    }
+    for arguments in [
+        vec!["runtime-service-initialise"],
+        vec!["runtime-service-receipt", "--other"],
+        vec!["runtime-service-receipt", "--if-present", "--other"],
+    ] {
+        assert!(!receipt_command(&files::strings(&arguments)));
+    }
+}

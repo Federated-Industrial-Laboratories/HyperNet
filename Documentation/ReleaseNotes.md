@@ -2,6 +2,42 @@
 
 [Documentation](ReadMe.md) | [Project](../ReadMe.md)
 
+## Linux 0.11.0
+
+Version 0.11.0 supports explicitly selected access until removed and hosting
+until withdrawn. Each ancestor grant, membership, application and deployment
+must permit that lifetime. Existing finite records keep their original meaning.
+Connection vouchers, clock observations, action proofs and certificate dates
+remain finite. Withdrawal and revocation still apply to active services.
+
+Scoped native admission lets an isolated registrar admit only the reviewed
+reader, chat and Agent presets within the configured capacity. Suite 0.11.0
+provides address, link, QR and password entry. Relay Chat 0.3.0 adds live chat
+enrolment and separately keyed external Agents. Ordinary membership does not
+grant moderation, publishing, hosting or administration.
+
+Route handover preserves identity and cumulative usage before the original
+voucher expires. Certificate successors preserve transport keys and exact
+operator consent; expired predecessors can be retained as non-serving history
+before a fresh reviewed successor. The runtime enforces certificate deadlines
+independently of persistent hosting consent. See [runtime transitions](Runtime.md)
+and [provisioning](RuntimeProvisioning.md).
+
+Replay-cache capacity matches its encoded state bounds. Certified forward
+recovery repairs interrupted cache publication without discarding unexpired
+replay identifiers or lowering retained floors. Scoped application discovery
+accepts retained Page and route version minima while preserving governance
+rollback checks and exact unfinished requests.
+
+Upgrade the entire authority committee and participating Suite clients before
+enabling the new protocol features. Require their advertised feature identifiers,
+as described in [persistent access](PersistentAccess.md). Do not convert finite
+consent implicitly or reset keys, requester state or history. Follow
+[upgrade and recovery](UpgradeRecovery.md) for signed software replacement.
+The state contract remains `HyperNet080Authority2`; this does not make older
+binaries able to interpret persistent or certificate-successor records.
+
+
 ## Linux 0.10.4
 
 Version 0.10.4 corrects renewed relay admission and ordinary Page replacement.

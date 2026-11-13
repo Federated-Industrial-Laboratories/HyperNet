@@ -252,7 +252,15 @@ impl State {
                 config.scope.incarnation,
             )?
         };
-        member_keys.extend(domains.requesters());
+        // Historical invitations remain as evidence after explicit adoption. Their
+        // requester streams then follow native assignment retirement and reuse.
+        let transferred = evidence.transferred_manual_streams()?;
+        member_keys.extend(
+            domains
+                .requesters()
+                .into_iter()
+                .filter(|key| !transferred.contains(key) || domains.keys.contains_key(key)),
+        );
         member_keys.extend(governance.admission().requester_keys());
         let streams =
             if let Some(value) = stream_value {
@@ -825,7 +833,14 @@ impl Application for PolicyApplication {
                         )?,
                         expires,
                     )),
-                    Err(_) => Ok((refusal("AuthorityAdmissionContext", 3)?, expires)),
+                    Err(_) => Ok((
+                        result(
+                            "AuthorityAdmissionContext",
+                            3,
+                            &wire::encode(&array(vec![]))?,
+                        )?,
+                        expires,
+                    )),
                 }
             }
             crate::authority_read::Query::PolicyContext => {
@@ -1157,6 +1172,10 @@ mod stream_tests;
 #[cfg(test)]
 #[path = "../../../Tests/Unit/Authority/Governance/AuthorityApplicationStateTests.rs"]
 mod state_tests;
+
+#[cfg(test)]
+#[path = "../../../Tests/Unit/Authority/Governance/AuthorityAdmissionStreamTests.rs"]
+mod admission_stream_tests;
 
 #[cfg(test)]
 #[path = "../../../Tests/Unit/Authority/Governance/AuthorityMembershipTests.rs"]
