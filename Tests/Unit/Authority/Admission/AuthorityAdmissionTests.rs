@@ -538,50 +538,53 @@ fn full_participant_capacity_is_bounded_and_all_role_keys_require_consent() {
 fn explicit_manual_adoption_preserves_only_the_first_stream_origin() {
     let (mut records, reserved, mut p) = fixture();
     records.retain(|bytes| record_reference(bytes, N, I).is_err());
-    let key = signer(800);
-    let relay = signer(801);
-    let member = key.verifying_key().to_bytes();
+    let keys = [(signer(800), signer(801)), (signer(802), signer(803))];
+    let unrelated = (signer(804), signer(805));
     let g = Governance::parse(N, I, &records).unwrap();
     let root = g.record_bytes(102, p.parent.id).unwrap();
-    let mut fields = wire::decode(root).unwrap().array(17).unwrap().to_vec();
-    fields[6] = b(&[230; 32]);
-    fields[8] = b(&member);
-    fields[10] = a(vec![V::Uint(0)]);
-    fields[13] = reference(&p.parent);
-    fields[14] = V::Uint(0);
-    fields[16] = snapshot(&records, None).value;
-    let reader = wire::encode(&a(fields)).unwrap();
-    let reference_reader = Governance::record_versions(N, I, std::slice::from_ref(&reader))
-        .unwrap()
-        .remove(0);
     let snap = snapshot(&records, None);
-    let manual = wire::encode(&a(vec![
-        V::Uint(125),
-        V::Uint(1),
-        b(&N),
-        b(&I),
-        V::Uint(1),
-        V::Null,
-        b(&[231; 32]),
-        b(&member),
-        p.validity.value(),
-        V::Bool(false),
-        reference(&reference_reader),
-        snap.value.clone(),
-    ]))
-    .unwrap();
-    let legacy = Governance::record_versions(N, I, std::slice::from_ref(&manual))
-        .unwrap()
-        .remove(0);
-    records.extend([reader, manual.clone()]);
-    p.legacy = vec![legacy.clone()];
+    let mut manual = vec![];
+    for (index, (key, _)) in keys.iter().chain(std::iter::once(&unrelated)).enumerate() {
+        let member = key.verifying_key().to_bytes();
+        let mut fields = wire::decode(root).unwrap().array(17).unwrap().to_vec();
+        fields[6] = b(&[230 + index as u8; 32]);
+        fields[8] = b(&member);
+        fields[10] = a(vec![V::Uint(0)]);
+        fields[13] = reference(&p.parent);
+        fields[14] = V::Uint(0);
+        fields[16] = snap.value.clone();
+        let reader = wire::encode(&a(fields)).unwrap();
+        let reader_ref = Governance::record_versions(N, I, std::slice::from_ref(&reader))
+            .unwrap()
+            .remove(0);
+        manual.push(
+            wire::encode(&a(vec![
+                V::Uint(125),
+                V::Uint(1),
+                b(&N),
+                b(&I),
+                V::Uint(1),
+                V::Null,
+                b(&[232 + index as u8; 32]),
+                b(&member),
+                p.validity.value(),
+                V::Bool(false),
+                reference(&reader_ref),
+                snap.value.clone(),
+            ]))
+            .unwrap(),
+        );
+        records.push(reader);
+    }
+    p.legacy = Governance::record_versions(N, I, &manual).unwrap();
+    records.extend(manual.clone());
     p.bytes = record(POLICY, P, p.payload(), &snap, None);
     p = Policy::parse(&p.bytes, N, I).unwrap();
     records.push(p.bytes.clone());
     records.sort_by_key(|bytes| {
         Governance::record_versions(N, I, std::slice::from_ref(bytes)).unwrap()[0].index()
     });
-    let keys = [(key, relay)];
+    let cached_manual = records.clone();
     let op = reserve(&records, &p, 0, 1, None, &keys);
     let pending = apply(&mut records, &reserved, &op);
     let mut op = enrol(&records, &p, &pending, &keys);
@@ -590,8 +593,8 @@ fn explicit_manual_adoption_preserves_only_the_first_stream_origin() {
             .is_err()
     );
     op.transition = Transition::Adopt;
-    op.legacy = vec![manual];
-    op.snapshot.references.push(legacy);
+    op.legacy = manual[..keys.len()].to_vec();
+    op.snapshot.references.extend(p.legacy.clone());
     op.snapshot.references.sort_by_key(VersionRef::index);
     let mut value = op.snapshot.value.array(2).unwrap().to_vec();
     value[1] = a(op.snapshot.references.iter().map(reference).collect());
@@ -600,7 +603,12 @@ fn explicit_manual_adoption_preserves_only_the_first_stream_origin() {
     let parent = wire::decode(g.record_bytes(102, p.parent.id).unwrap()).unwrap();
     let tier = crate::authority_membership::version(&parent.array(17).unwrap()[9]).unwrap();
     let mut active = Slot::parse(&op.next, N, I).unwrap();
-    active.legacy_streams = vec![member];
+    let mut legacy_streams = keys
+        .iter()
+        .map(|(key, _)| key.verifying_key().to_bytes())
+        .collect::<Vec<_>>();
+    legacy_streams.sort();
+    active.legacy_streams = legacy_streams.clone();
     active.material = enrol_material(&p, &pending, &tier, &op.snapshot, N, I).unwrap();
     op.next = record(
         SLOT,
@@ -610,16 +618,8 @@ fn explicit_manual_adoption_preserves_only_the_first_stream_origin() {
         Some(&pending.bytes),
     );
     let active = apply(&mut records, &reserved, &op);
-    assert_eq!(active.legacy_streams, vec![member]);
-    let g = Governance::parse(N, I, &records).unwrap();
-    assert!(
-        wire::decode(g.record_bytes(125, [231; 32]).unwrap())
-            .unwrap()
-            .array(12)
-            .unwrap()[9]
-            .boolean()
-            .unwrap()
-    );
+    assert_eq!(active.legacy_streams, legacy_streams);
+    assert_legacy_capability_closure(&records, &cached_manual, &p, &active);
     let op = retire(&records, &p, &active);
     let retired = apply(&mut records, &reserved, &op);
     let op = reserve(&records, &p, 0, 2, Some(&retired), &keys);
@@ -627,6 +627,93 @@ fn explicit_manual_adoption_preserves_only_the_first_stream_origin() {
     let op = enrol(&records, &p, &pending, &keys);
     let active = apply(&mut records, &reserved, &op);
     assert!(active.legacy_streams.is_empty());
+    assert_legacy_capability_closure(&records, &cached_manual, &p, &active);
+}
+
+fn assert_legacy_capability_closure(
+    records: &[Vec<u8>],
+    prior: &[Vec<u8>],
+    policy: &Policy,
+    slot: &Slot,
+) {
+    let governance = Governance::parse(N, I, records).unwrap();
+    for role in &slot.roles {
+        let request = Requirement {
+            subject: role.member,
+            actions: &[0],
+            scope: (0, N),
+            namespace: None,
+            usage: [0; 4],
+            evaluated_at_ms: AT,
+            expected: &[],
+        };
+        let grant = identifier(policy.reference.id, slot.slot, role.role, 1).unwrap();
+        let decision = governance.current_capability(grant, &request).unwrap();
+        let returned = decision
+            .dependencies
+            .iter()
+            .map(|r| governance.record_bytes(r.kind, r.id).unwrap().to_vec())
+            .collect::<Vec<_>>();
+        let minimal = Governance::parse(N, I, &returned)
+            .unwrap()
+            .current_capability(grant, &request)
+            .unwrap();
+        assert_eq!(minimal.dependencies, decision.dependencies);
+        for old in &policy.legacy {
+            let value = wire::decode(governance.record_bytes(125, old.id).unwrap()).unwrap();
+            let fields = value.array(12).unwrap();
+            if !slot
+                .roles
+                .iter()
+                .any(|r| fields[7].fixed::<32>().unwrap() == r.member)
+            {
+                assert!(!fields[9].boolean().unwrap());
+                assert!(
+                    !decision
+                        .dependencies
+                        .iter()
+                        .any(|r| r.index() == old.index())
+                );
+                continue;
+            }
+            let retired = decision
+                .dependencies
+                .iter()
+                .find(|r| r.index() == old.index())
+                .unwrap();
+            assert_eq!(retired.generation, 2);
+            assert!(fields[9].boolean().unwrap());
+            let incomplete = returned
+                .iter()
+                .zip(&decision.dependencies)
+                .filter(|(_, r)| *r != retired)
+                .map(|(bytes, _)| bytes.clone())
+                .collect::<Vec<_>>();
+            let refs = Governance::record_versions(N, I, &incomplete).unwrap();
+            let merged = crate::authority_domains::result::replace_governance(
+                N,
+                I,
+                prior,
+                &incomplete,
+                &refs,
+            )
+            .unwrap();
+            assert!(Governance::parse(N, I, &merged).is_err());
+        }
+        let merged = crate::authority_domains::result::replace_governance(
+            N,
+            I,
+            prior,
+            &returned,
+            &decision.dependencies,
+        )
+        .unwrap();
+        let independent = Governance::parse(N, I, &merged)
+            .unwrap()
+            .current_capability(grant, &request)
+            .unwrap();
+        assert_eq!(independent.dependencies, decision.dependencies);
+    }
 }
 
 #[test]
