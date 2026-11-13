@@ -126,10 +126,8 @@ pub fn setup(args: Setup) -> Result<serde_json::Value> {
         "Runtime setup requires an ordinary local user"
     );
     ensure!(
-        args.directory.is_absolute()
-            && args.directory.to_string_lossy().len() <= 88
-            && !args.directory.exists(),
-        "A new absolute runtime directory with space for its private socket is required"
+        args.directory.is_absolute() && !args.directory.exists(),
+        "A new absolute runtime directory is required"
     );
     let parent = args.directory.parent().context("Runtime parent required")?;
     super::files::root(parent)?;
