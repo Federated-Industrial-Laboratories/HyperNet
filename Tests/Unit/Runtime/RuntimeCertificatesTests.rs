@@ -390,3 +390,127 @@ pub(crate) fn route_certificates_until(
     fs::remove_dir_all(root).unwrap();
     (before_issuer, after_issuer, before_leaf, after_leaf)
 }
+
+#[test]
+fn repeated_issuer_store_accepts_only_bounded_identical_certificates() {
+    let f = fixture();
+    let expected = der(&f.issuer).unwrap();
+    for count in [1, 4, 16] {
+        let raw = format!("{}\n", f.issuer).repeat(count);
+        assert_eq!(repeated_issuer_der(&raw).unwrap(), expected);
+    }
+    assert!(der(&format!("{}\n{}", f.issuer, f.issuer)).is_err());
+    for invalid in [
+        String::new(),
+        format!("{}\n", f.issuer).repeat(17),
+        format!("{}\n{}", f.issuer, f.next_issuer),
+        format!("{}\nnot a certificate", f.issuer),
+        format!("{}\n-----BEGIN PRIVATE KEY-----\n", f.issuer),
+        " ".repeat(65537),
+    ] {
+        assert!(repeated_issuer_der(&invalid).is_err());
+    }
+}
+
+#[test]
+fn repeated_issuer_origin_preserves_exact_legacy_consent_and_future_successors() {
+    use sha2::{Digest, Sha256};
+    let f = fixture();
+    let raw = format!("{}\n", f.issuer).repeat(4);
+    let mut original = f.original.clone();
+    original.authority_config.as_mut().unwrap().tls_file_digests[0] =
+        Sha256::digest(raw.as_bytes()).into();
+    let original_digest = original.operational_digest().unwrap();
+    let mut successor = original.clone();
+    successor.generation += 1;
+    successor.previous_profile = Some(crate::trust_wire::digest(&original.desired().unwrap()));
+    successor.previous_consent = Some(crate::trust_wire::digest(
+        &original.unsigned_consent(0).unwrap(),
+    ));
+    let leaves = f
+        .renewed
+        .endpoints
+        .iter()
+        .map(|e| (e.endpoint_id, e.leaf_der.clone()))
+        .collect();
+    successor
+        .adopt_certificates(&original, f.next_issuer.clone(), &leaves, raw.clone())
+        .unwrap();
+    assert_eq!(successor.operational_digest().unwrap(), original_digest);
+    assert_eq!(
+        successor
+            .transport_certificates
+            .as_ref()
+            .unwrap()
+            .origin
+            .issuer_pem,
+        raw
+    );
+    assert_eq!(
+        successor
+            .authority_config
+            .as_ref()
+            .unwrap()
+            .tls_file_digests[2],
+        original.authority_config.as_ref().unwrap().tls_file_digests[2]
+    );
+    assert_eq!(
+        super::super::Manifest::parse(&successor.encode().unwrap()).unwrap(),
+        successor
+    );
+    let at = successor.transport_interval().unwrap().unwrap().0;
+    successor.current_transport(at).unwrap();
+    let original_encoding = f.renewed.transport_certificates.as_ref().unwrap().value();
+    assert_eq!(
+        original_encoding.array(5).unwrap()[0],
+        super::super::V::Uint(1)
+    );
+    let metadata = successor.transport_certificates.as_ref().unwrap().value();
+    assert_eq!(metadata.array(5).unwrap()[0], super::super::V::Uint(2));
+    for case in 0..5 {
+        let mut fields = metadata.array(5).unwrap().to_vec();
+        match case {
+            0 => fields[0] = super::super::V::Uint(1),
+            1 => fields[3] = super::super::V::Bytes(f.issuer.as_bytes().to_vec()),
+            2 => fields[3] = super::super::V::Text(raw.clone()),
+            3 => fields[3] = super::super::V::Bytes(vec![255; 1025]),
+            _ => fields[3] = super::super::V::Bytes(vec![b' '; 65537]),
+        }
+        assert!(
+            super::super::transport::Certificates::parse(&super::super::V::Array(fields)).is_err(),
+            "origin form {case}"
+        );
+    }
+    let mut changed_origin = successor.clone();
+    changed_origin
+        .transport_certificates
+        .as_mut()
+        .unwrap()
+        .origin
+        .issuer_pem = f.issuer.clone();
+    assert!(changed_origin.validate().is_err());
+    let mut future = successor.clone();
+    future.generation += 1;
+    future.previous_profile = Some(crate::trust_wire::digest(&successor.desired().unwrap()));
+    future.previous_consent = Some(crate::trust_wire::digest(
+        &successor.unsigned_consent(0).unwrap(),
+    ));
+    future
+        .adopt_certificates(
+            &successor,
+            f.next_issuer.clone(),
+            &leaves,
+            f.next_issuer.clone(),
+        )
+        .unwrap();
+    assert_eq!(future.operational_digest().unwrap(), original_digest);
+    assert_eq!(
+        future
+            .transport_certificates
+            .as_ref()
+            .unwrap()
+            .origin
+            .issuer_pem,
+        raw
+    );
+}

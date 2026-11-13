@@ -30,7 +30,11 @@ impl Certificates {
                 && self.origin.endpoints.len() == manifest.endpoints.len(),
             "Certificate origin endpoint count differs"
         );
-        let original_issuer = certificates::der(&self.origin.issuer_pem)?;
+        let original_issuer = if self.origin.authority_tls_digests.is_some() {
+            certificates::repeated_issuer_der(&self.origin.issuer_pem)?
+        } else {
+            certificates::der(&self.origin.issuer_pem)?
+        };
         let current_issuer = certificates::der(&self.issuer_pem)?;
         certificates::issuer_successor(&original_issuer, &current_issuer)?;
         for (original, current) in self.origin.endpoints.iter().zip(&manifest.endpoints) {
@@ -98,8 +102,9 @@ impl Certificates {
         manifest.transport_certificates = None;
     }
     pub fn value(&self) -> V {
+        let long_origin = self.origin.issuer_pem.len() > 1024;
         a([
-            V::Uint(1),
+            V::Uint(if long_origin { 2 } else { 1 }),
             a(self
                 .origin
                 .endpoints
@@ -109,16 +114,35 @@ impl Certificates {
                 .authority_tls_digests
                 .as_ref()
                 .map_or(V::Null, |digests| ids(digests)),
-            V::Text(self.origin.issuer_pem.clone()),
+            if long_origin {
+                V::Bytes(self.origin.issuer_pem.as_bytes().to_vec())
+            } else {
+                V::Text(self.origin.issuer_pem.clone())
+            },
             V::Text(self.issuer_pem.clone()),
         ])
     }
     pub fn parse(value: &V) -> Result<Self> {
         let v = value.array(5)?;
-        ensure!(
-            v[0].uint()? == 1,
-            "Unsupported certificate successor schema"
-        );
+        let issuer_pem = match v[0].uint()? {
+            1 => {
+                let text = v[3].text()?;
+                ensure!(
+                    text.len() <= 1024,
+                    "Short certificate origin exceeds its bound"
+                );
+                text.to_owned()
+            }
+            2 => {
+                let bytes = v[3].bytes()?;
+                ensure!(
+                    (1025..=65536).contains(&bytes.len()),
+                    "Long certificate origin has a noncanonical length"
+                );
+                String::from_utf8(bytes.to_vec())?
+            }
+            _ => anyhow::bail!("Unsupported certificate successor schema"),
+        };
         Ok(Self {
             origin: Origin {
                 endpoints: v[1]
@@ -141,7 +165,7 @@ impl Certificates {
                             .map_err(|_| anyhow::anyhow!("Three origin TLS pins required"))?,
                     )
                 },
-                issuer_pem: v[3].text()?.into(),
+                issuer_pem,
             },
             issuer_pem: v[4].text()?.into(),
         })

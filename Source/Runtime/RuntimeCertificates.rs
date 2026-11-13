@@ -232,6 +232,42 @@ pub fn der(pem: &str) -> Result<Vec<u8>> {
     Certificate::parse(&bytes)?;
     Ok(bytes)
 }
+/// Legacy replica trust stores repeat each peer's issuer without changing its trust identity.
+/// Retain the original PEM bytes for consent hashes; extract only the shared certificate.
+pub fn repeated_issuer_der(pem: &str) -> Result<Vec<u8>> {
+    ensure!(pem.len() <= 65536, "Runtime issuer store exceeds its bound");
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+    const END: &str = "-----END CERTIFICATE-----";
+    let mut remaining = pem;
+    let mut issuer: Option<Vec<u8>> = None;
+    let mut count = 0;
+    loop {
+        remaining = remaining.trim_start_matches([' ', '\t', '\r', '\n']);
+        if remaining.is_empty() {
+            break;
+        }
+        ensure!(
+            count < 16 && remaining.starts_with(BEGIN),
+            "Runtime issuer store requires at most 16 certificates and no other material"
+        );
+        let end = remaining
+            .find(END)
+            .context("Incomplete runtime issuer certificate")?
+            + END.len();
+        let bytes = der(&remaining[..end])?;
+        if let Some(original) = &issuer {
+            ensure!(
+                *original == bytes,
+                "Runtime issuer store contains distinct certificates; certificate succession requires one issuer"
+            );
+        } else {
+            issuer = Some(bytes);
+        }
+        remaining = &remaining[end..];
+        count += 1;
+    }
+    issuer.context("Runtime issuer store is empty")
+}
 pub fn pem(bytes: &[u8]) -> Result<String> {
     Certificate::parse(bytes)?;
     let encoded = STANDARD.encode(bytes);

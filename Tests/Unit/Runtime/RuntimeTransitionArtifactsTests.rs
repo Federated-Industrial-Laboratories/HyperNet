@@ -298,3 +298,187 @@ fn certificate_bundle_stages_only_exact_public_tls_files_and_rejects_mixed_ident
     .unwrap();
     assert!(read(root, selected).is_err());
 }
+
+#[test]
+fn repeated_issuer_replica_status_template_and_staging_preserve_original_bytes() {
+    use crate::runtime_manifest::certificates as tls;
+    use sha2::{Digest, Sha256};
+    let crypto = tls::tests::fixture();
+    let directory = Directory::new();
+    let root = &directory.0;
+    for relative in [
+        "TransitionFiles",
+        "Work",
+        "Work/Config",
+        "Work/Config/Tls",
+        "Authorization",
+    ] {
+        files::directory(&root.join(relative)).unwrap();
+    }
+    // Normal replica provisioning writes every peer's issuer followed by a newline.
+    let raw = format!("{}\n", crypto.issuer).repeat(4);
+    let issuer_path = root.join("Work/Config/Tls/Authority.pem");
+    files::create(&issuer_path, raw.as_bytes()).unwrap();
+    let mut previous = crypto.original.clone();
+    // Installed authority endpoint and volume IDs use their normal canonical derivations.
+    let endpoint_ids: BTreeMap<_, _> = previous
+        .endpoints
+        .iter()
+        .map(|endpoint| {
+            (
+                endpoint.endpoint_id,
+                wire::digest(
+                    &wire::encode(&wire::Value::Array(vec![
+                        wire::Value::Text("AuthorityEndpoint".into()),
+                        wire::Value::Bytes(endpoint.service_key.to_vec()),
+                    ]))
+                    .unwrap(),
+                ),
+            )
+        })
+        .collect();
+    for endpoint in &mut previous.endpoints {
+        endpoint.endpoint_id = endpoint_ids[&endpoint.endpoint_id];
+    }
+    previous
+        .endpoints
+        .sort_by_key(|endpoint| endpoint.endpoint_id);
+    for id in &mut previous
+        .authority_config
+        .as_mut()
+        .unwrap()
+        .ordered_peer_endpoint_ids
+    {
+        *id = endpoint_ids[id];
+    }
+    for id in &mut previous.roles[0].bind_endpoint_ids {
+        *id = endpoint_ids[id];
+    }
+    for id in &mut previous.roles[0].outbound_endpoint_ids {
+        *id = endpoint_ids[id];
+    }
+    previous.roles[0].outbound_endpoint_ids.sort();
+    let volume =
+        wire::digest(format!("{}/ReplicaState", hex::encode(previous.deployment)).as_bytes());
+    previous.roles[0].volume_ids = vec![volume];
+    previous.volumes[0].volume_id = volume;
+    previous.placement.volumes = vec![volume];
+    previous.limits = [
+        crate::consensus::storage::MAX_BYTES,
+        crate::consensus::storage::MAX_OBJECTS as u64,
+        16,
+        crate::consensus::runtime::MAX_PENDING as u64,
+    ];
+    previous.authority_config.as_mut().unwrap().tls_file_digests[0] =
+        Sha256::digest(raw.as_bytes()).into();
+    let profile = model::Profile {
+        version: 1,
+        purpose: model::AuthorityPurpose::Appointed,
+        manifest: crate::runtime_authorization::Manifest::from_canonical(previous.clone()).unwrap(),
+        selinux_relabel: false,
+        root: root.clone(),
+        clock_directory: root.join("Clock"),
+        artifacts: [
+            "Keys/Operator.key",
+            "Seccomp.json",
+            "Work/Config/Bootstrap.cbor",
+            "Work/Config/Identity.json",
+            "Work/Config/ReplicaConfig.json",
+            "Work/Config/Tls/Authority.pem",
+            "Work/Config/Tls/Certificate.pem",
+            "Work/Config/Tls/PrivateKey.pem",
+        ]
+        .into_iter()
+        .map(|name| (name.into(), files::hex_digest(name.as_bytes())))
+        .collect(),
+    };
+    files::save(&root.join("Profile.json"), &profile).unwrap();
+    files::save(
+        &root.join("State.json"),
+        &model::State::new(&profile).unwrap(),
+    )
+    .unwrap();
+    files::save(&root.join("Generation.json"), &1u64).unwrap();
+    files::create(&root.join("Authorization/Withdrawal.json"), b"0").unwrap();
+    let status = certificates::status(root, false).unwrap();
+    assert_eq!(status["valid"], true);
+    let template = certificates::template(root, false).unwrap();
+    assert_eq!(
+        tls::der(template["issuerPem"].as_str().unwrap()).unwrap(),
+        tls::der(&crypto.issuer).unwrap()
+    );
+    assert_eq!(std::fs::read(&issuer_path).unwrap(), raw.as_bytes());
+    let bundle = json!({"format":"HyperNetTransportCertificates/1", "issuerPem":crypto.next_issuer,
+        "certificates":crypto.renewed.endpoints.iter().map(|e| json!({"endpoint":hex::encode(endpoint_ids[&e.endpoint_id]), "certificatePem":tls::pem(&e.leaf_der).unwrap()})).collect::<Vec<_>>()});
+    let bundle_path = root.join("Bundle.json");
+    files::save(&bundle_path, &bundle).unwrap();
+    let mut successor = previous.clone();
+    successor.generation += 1;
+    successor.previous_profile = Some(wire::digest(&previous.desired().unwrap()));
+    successor.previous_consent = Some(wire::digest(&previous.unsigned_consent(0).unwrap()));
+    let selection =
+        certificates::prepare(root, false, &previous, &mut successor, Some(&bundle_path))
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        successor.operational_digest().unwrap(),
+        previous.operational_digest().unwrap()
+    );
+    let proposal = Proposal {
+        root: root.clone(),
+        service: false,
+        predecessor: profile.configuration_digest().unwrap(),
+        previous,
+        successor,
+        executable: root.join("HyperNet"),
+        package: None,
+        bindings: None,
+        transport: Some(selection),
+    };
+    let mut replacements = BTreeMap::new();
+    certificates::stage_files(root, &proposal, &mut replacements, true).unwrap();
+    assert_eq!(
+        read(root, &replacements["Work/Config/Tls/Authority.pem"]).unwrap(),
+        crypto.next_issuer.as_bytes()
+    );
+    assert_eq!(std::fs::read(&issuer_path).unwrap(), raw.as_bytes());
+    let retained = serde_json::to_vec(&proposal).unwrap();
+    let restored: Proposal = serde_json::from_slice(&retained).unwrap();
+    certificates::validate(
+        &restored.previous,
+        &restored.successor,
+        restored.transport.as_ref().unwrap(),
+        false,
+    )
+    .unwrap();
+    let mut changed = serde_json::to_value(&proposal).unwrap();
+    changed["transport"]["previousIssuerPem"] = json!(crypto.issuer);
+    let changed: Proposal = serde_json::from_value(changed).unwrap();
+    assert!(
+        certificates::validate(
+            &changed.previous,
+            &changed.successor,
+            changed.transport.as_ref().unwrap(),
+            false
+        )
+        .is_err()
+    );
+    std::fs::write(
+        &issuer_path,
+        format!("{}\n{}", crypto.issuer, crypto.next_issuer),
+    )
+    .unwrap();
+    assert!(certificates::status(root, false).is_err());
+    assert!(certificates::template(root, false).is_err());
+    let mut changed = proposal.successor.clone();
+    assert!(
+        certificates::prepare(
+            root,
+            false,
+            &proposal.previous,
+            &mut changed,
+            Some(&bundle_path)
+        )
+        .is_err()
+    );
+}

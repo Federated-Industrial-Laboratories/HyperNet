@@ -54,10 +54,7 @@ pub(super) fn status(root: &Path, service: bool) -> Result<Value> {
         !manifest.endpoints.is_empty(),
         "Deployment has no TLS certificates"
     );
-    let issuer = certificates::der(&String::from_utf8(files::public_read(
-        &issuer_path(root, service),
-        8192,
-    )?)?)?;
+    let (_, issuer) = installed_issuer(root, service)?;
     let issuer_interval = certificates::interval(&issuer)?;
     let mut expiry = issuer_interval.1;
     let mut start = issuer_interval.0;
@@ -87,7 +84,8 @@ pub(super) fn template(root: &Path, service: bool) -> Result<Value> {
         !manifest.endpoints.is_empty() && (!service || manifest.roles[0].role == 5),
         "Certificate template requires an authority or route service"
     );
-    let issuer_pem = String::from_utf8(files::public_read(&issuer_path(root, service), 8192)?)?;
+    let (_, issuer) = installed_issuer(root, service)?;
+    let issuer_pem = certificates::pem(&issuer)?;
     let bundle = Bundle {
         format: "HyperNetTransportCertificates/1".into(),
         issuer_pem,
@@ -105,6 +103,18 @@ pub(super) fn template(root: &Path, service: bool) -> Result<Value> {
             .collect::<Result<_>>()?,
     };
     Ok(serde_json::to_value(bundle)?)
+}
+fn installed_issuer(root: &Path, service: bool) -> Result<(String, Vec<u8>)> {
+    let raw = String::from_utf8(files::public_read(
+        &issuer_path(root, service),
+        if service { 8192 } else { 65536 },
+    )?)?;
+    let issuer = if service {
+        certificates::der(&raw)?
+    } else {
+        certificates::repeated_issuer_der(&raw)?
+    };
+    Ok((raw, issuer))
 }
 fn issuer_path(root: &Path, service: bool) -> PathBuf {
     root.join(if service {
@@ -132,8 +142,7 @@ pub(super) fn prepare(
         endpoint.certificate_pem =
             certificates::pem(&certificates::der(&endpoint.certificate_pem)?)?;
     }
-    let previous_issuer_pem =
-        String::from_utf8(files::public_read(&issuer_path(root, service), 8192)?)?;
+    let (previous_issuer_pem, _) = installed_issuer(root, service)?;
     let selection = Selection {
         previous_issuer_pem,
         bundle,
@@ -160,7 +169,11 @@ pub(super) fn validate(
     fresh: bool,
 ) -> Result<()> {
     certificates::issuer_successor(
-        &certificates::der(&selection.previous_issuer_pem)?,
+        &if previous.authority_config.is_some() {
+            certificates::repeated_issuer_der(&selection.previous_issuer_pem)?
+        } else {
+            certificates::der(&selection.previous_issuer_pem)?
+        },
         &certificates::der(&selection.bundle.issuer_pem)?,
     )?;
     let leaves = selection.leaves()?;
