@@ -92,8 +92,8 @@ The state contract is fixed by this product; an arbitrary operator-supplied labe
 cannot mark incompatible state as compatible. The current authority contract uses
 immutable references for signer-state bodies. Incompatible inline-state packages
 and retained package trust are refused; they cannot activate this layout in place.
-Suite uses a different contract and trust directory. The published Linux release
-is version 0.10.4. Signed update sequences identify exact builds and cannot move backwards. Earlier development packages do not become
+Suite uses a different contract and trust directory. The Linux package version
+is 0.11.0. Signed update sequences identify exact builds and cannot move backwards. Earlier development packages do not become
 release packages when a version label changes. Use independently accepted release
 trust and the signed target for the new package; retain existing state and floors.
 
