@@ -215,6 +215,21 @@ impl Operation {
                 dependencies.push(old.reference);
             }
         }
+        // Reusing a slot also advances its retained grants and memberships. Every
+        // such predecessor must be in the signed request, not only inside the slot.
+        for (old, _) in self.updates(n, i)? {
+            ensure!(
+                self.snapshot.references.contains(&old) && intent.expected.contains(&old),
+                "admission mutation omits an exact signed predecessor"
+            );
+            if !replay {
+                ensure!(
+                    g.versions().contains(&old),
+                    "admission mutation predecessor is not current"
+                );
+                dependencies.push(old);
+            }
+        }
         dependencies.sort_by_key(VersionRef::index);
         dependencies.dedup();
         if !replay {

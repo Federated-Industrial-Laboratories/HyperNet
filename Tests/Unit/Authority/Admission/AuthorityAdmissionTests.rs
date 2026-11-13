@@ -40,6 +40,7 @@ fn snapshot(records: &[Vec<u8>], old: Option<&Slot>) -> Snapshot {
     }
     if let Some(s) = old {
         refs.push(s.reference.clone());
+        refs.extend(Governance::record_versions(N, I, &s.material).unwrap());
     }
     refs.sort_by_key(VersionRef::index);
     refs.dedup();
@@ -64,6 +65,9 @@ fn record(kind: u64, id: Digest, payload: V, snapshot: &Snapshot, old: Option<&[
     .unwrap()
 }
 fn intent(op: &Operation, key: &SigningKey) -> Intent {
+    intent_with_expected(op, key, op.snapshot.references.clone())
+}
+fn intent_with_expected(op: &Operation, key: &SigningKey, expected: Vec<VersionRef>) -> Intent {
     let r = record_reference(&op.next, N, I).unwrap();
     let signed = support::signed(
         key,
@@ -71,7 +75,7 @@ fn intent(op: &Operation, key: &SigningKey) -> Intent {
         r.id,
         r.generation,
         wire::decode(&op.parameters().unwrap()).unwrap(),
-        op.snapshot.references.clone(),
+        expected,
     );
     let intent = Intent::from_signed(&signed).unwrap();
     Operation::parse(&intent).unwrap();
@@ -244,6 +248,15 @@ fn enrol(
     keys: &[(SigningKey, SigningKey)],
 ) -> Operation {
     let snap = snapshot(records, Some(old));
+    enrol_with_snapshot(records, p, old, keys, snap)
+}
+fn enrol_with_snapshot(
+    records: &[Vec<u8>],
+    p: &Policy,
+    old: &Slot,
+    keys: &[(SigningKey, SigningKey)],
+    snap: Snapshot,
+) -> Operation {
     let g = Governance::parse(N, I, records).unwrap();
     let parent = wire::decode(g.record_bytes(102, p.parent.id).unwrap()).unwrap();
     let tier = crate::authority_membership::version(&parent.array(17).unwrap()[9]).unwrap();
@@ -294,6 +307,97 @@ fn retire(records: &[Vec<u8>], p: &Policy, old: &Slot) -> Operation {
         legacy: vec![],
         snapshot: snap,
     }
+}
+#[test]
+fn reused_slot_enrolment_requires_each_exact_signed_material_predecessor() {
+    let (mut records, reserved, p) = fixture();
+    let keys = [(signer(200), signer(201)), (signer(202), signer(203))];
+    let operation = reserve(&records, &p, 0, 1, None, &keys);
+    let pending = apply(&mut records, &reserved, &operation);
+    let operation = enrol(&records, &p, &pending, &keys);
+    let active = apply(&mut records, &reserved, &operation);
+    let operation = retire(&records, &p, &active);
+    let retired = apply(&mut records, &reserved, &operation);
+    let operation = reserve(&records, &p, 0, 2, Some(&retired), &keys);
+    let pending = apply(&mut records, &reserved, &operation);
+    let operation = enrol(&records, &p, &pending, &keys);
+    let predecessors = operation
+        .updates(N, I)
+        .unwrap()
+        .into_iter()
+        .map(|(old, _)| old)
+        .filter(|old| old.kind != SLOT)
+        .collect::<Vec<_>>();
+    assert_eq!(predecessors.iter().filter(|r| r.kind == 102).count(), 5);
+    assert_eq!(predecessors.iter().filter(|r| r.kind == 125).count(), 2);
+    for old in &predecessors {
+        let mut missing = operation.snapshot.references.clone();
+        missing.retain(|r| r != old);
+        let request = intent_with_expected(&operation, &signer(100), missing);
+        assert!(
+            operation
+                .authorise(&records, &reserved, &request, AT, false)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("exact signed predecessor")
+        );
+        let mut changed = operation.snapshot.references.clone();
+        let reference = changed
+            .iter_mut()
+            .find(|r| r.index() == old.index())
+            .unwrap();
+        reference.digest = [255; 32];
+        let request = intent_with_expected(&operation, &signer(100), changed);
+        assert!(
+            operation
+                .authorise(&records, &reserved, &request, AT, false)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("exact signed predecessor")
+        );
+    }
+    // A fully signed list cannot repair a snapshot that omitted the material.
+    let mut omitted = operation.snapshot.value.array(2).unwrap().to_vec();
+    omitted[1] = a(operation
+        .snapshot
+        .references
+        .iter()
+        .filter(|r| !predecessors.contains(r))
+        .map(reference)
+        .collect());
+    let omitted = Snapshot::parse(&a(omitted)).unwrap();
+    let missing = enrol_with_snapshot(&records, &p, &pending, &keys, omitted);
+    for request in [
+        intent(&missing, &signer(100)),
+        intent_with_expected(
+            &missing,
+            &signer(100),
+            operation.snapshot.references.clone(),
+        ),
+    ] {
+        assert!(
+            missing
+                .authorise(&records, &reserved, &request, AT, false)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("exact signed predecessor")
+        );
+    }
+    let request = intent(&operation, &signer(100));
+    let outcome = operation
+        .authorise(&records, &reserved, &request, AT, false)
+        .unwrap();
+    assert!(
+        predecessors
+            .iter()
+            .all(|old| outcome.dependencies.contains(old))
+    );
+    operation
+        .authorise(&outcome.records, &reserved, &request, AT, true)
+        .unwrap();
 }
 #[test]
 fn restricted_slots_reuse_capacity_without_reviving_old_claims_or_keys() {
