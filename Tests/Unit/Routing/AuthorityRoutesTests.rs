@@ -708,6 +708,83 @@ fn certified_routes_reserve_before_use_and_replay_without_charging_again() {
 }
 
 #[test]
+fn unchanged_voucher_refreshes_current_target_dependencies_after_software_transition() {
+    let mut f = Fixture::new();
+    f.register();
+    let voucher = f.issue(2, 2 * CHARGE);
+    let command = Fixture::permit(&voucher, 210);
+    let (old_intent, old_operation, old_decision) = f.request(command.clone(), 160, None);
+    assert_eq!(old_decision.code, 0);
+    let target = &f.profiles[1];
+    let deployment = target.deployment;
+    let mut manifest = target.manifest.clone();
+    manifest.generation += 1;
+    manifest.previous_profile = Some(wire::digest(&target.manifest.desired().unwrap()));
+    manifest.previous_consent = Some(wire::digest(&target.manifest.unsigned_consent(0).unwrap()));
+    manifest.software_digest = [240; 32];
+    for role in &mut manifest.roles {
+        role.image_digest = [241; 32];
+    }
+    f.admit_successor(1, manifest);
+    let before = f.state.value();
+    let stale = old_operation
+        .prepare(
+            &f.state,
+            &f.records,
+            &f.reserved,
+            &old_intent,
+            5000,
+            false,
+            true,
+        )
+        .unwrap();
+    assert_eq!(stale.code, 12);
+    assert!(stale.state.is_none());
+    assert_eq!(f.state.value(), before);
+    let context = f
+        .request(
+            Command::VoucherContext {
+                voucher: voucher.clone(),
+            },
+            160,
+            None,
+        )
+        .2;
+    assert_eq!(context.code, 0);
+    assert!(context.versions.contains(&voucher));
+    for kind in [105, 117, 129] {
+        assert!(
+            old_intent
+                .expected
+                .iter()
+                .any(|r| { r.kind == kind && r.id == deployment && r.generation == 1 })
+        );
+        assert!(
+            context
+                .versions
+                .iter()
+                .any(|r| { r.kind == kind && r.id == deployment && r.generation == 2 })
+        );
+    }
+    assert_eq!(f.state.value(), before);
+    let (intent, operation, admitted) = f.apply(command, 160, None);
+    assert_eq!(operation.command.value(), old_operation.command.value());
+    assert_ne!(intent.expected, old_intent.expected);
+    assert_ne!(intent.digest, old_intent.digest);
+    assert_eq!(admitted.expires_ms, old_decision.expires_ms);
+    assert_eq!(f.state.record(166, voucher.id).unwrap().reference, voucher);
+    let charged = f.state.record(167, voucher.id).unwrap();
+    let usage = Usage::parse(&charged.payload).unwrap();
+    assert_eq!((usage.connections, usage.bytes), (1, CHARGE));
+    let replay = operation
+        .prepare(&f.state, &f.records, &f.reserved, &intent, 5000, true, true)
+        .unwrap();
+    assert_eq!(replay.code, 0);
+    assert!(replay.state.is_none());
+    assert!(replay.versions.contains(&charged.reference));
+}
+
+#[test]
 fn certified_route_connection_and_byte_budgets_are_independent() {
     for (connections, bytes) in [(2, 3 * CHARGE), (3, 2 * CHARGE)] {
         let mut f = Fixture::new();

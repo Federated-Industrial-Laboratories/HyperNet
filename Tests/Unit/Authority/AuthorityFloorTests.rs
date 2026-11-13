@@ -629,6 +629,19 @@ pub(crate) fn certified(
         |intent, result, _| {
             if intent.action == "AuthorityDomain" {
                 crate::authority_domains::Operation::parse(intent)?;
+                if result.disposition == Disposition::Refuse {
+                    ensure!(
+                        result.value
+                            == encoded(vec![
+                                V::Uint(201),
+                                V::Uint(1),
+                                V::Text("AuthorityDomain".into()),
+                                V::Array(vec![]),
+                            ]),
+                        "test ordinary domain refusal differs"
+                    );
+                    return proof::ActionValidation::new(Vec::new());
+                }
                 return proof::ActionValidation::new(crate::authority_read::result_versions(
                     result,
                 )?);
@@ -642,7 +655,7 @@ pub(crate) fn certified(
     )
     .unwrap()
 }
-fn metadata(store: &Store, completion: V) -> Vec<u8> {
+pub(crate) fn metadata(store: &Store, completion: V) -> Vec<u8> {
     let s = store.prefix().scope();
     let key = store.requester();
     encoded(vec![
@@ -658,7 +671,12 @@ fn metadata(store: &Store, completion: V) -> Vec<u8> {
         V::Null,
     ])
 }
-fn status(store: &mut Store, session: &mut Session, sample: ClockHealth, metadata: &[u8]) {
+pub(crate) fn status(
+    store: &mut Store,
+    session: &mut Session,
+    sample: ClockHealth,
+    metadata: &[u8],
+) {
     let s = store.prefix().scope();
     let signed = wire::sign_envelope(
         &encoded(vec![
