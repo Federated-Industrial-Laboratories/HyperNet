@@ -133,7 +133,7 @@ pub struct Object {
     pub placement: Digest,
     pub digest: Digest,
     pub bytes: u64,
-    pub expires_ms: u64,
+    pub expires_ms: crate::trust_validity::End,
     pub opaque: bool,
 }
 impl Object {
@@ -142,7 +142,7 @@ impl Object {
             b(&self.placement),
             b(&self.digest),
             V::Uint(self.bytes),
-            V::Uint(self.expires_ms),
+            self.expires_ms.value(),
             V::Bool(self.opaque),
         ])
     }
@@ -152,14 +152,16 @@ impl Object {
             placement: id(&f[0])?,
             digest: id(&f[1])?,
             bytes: f[2].uint()?,
-            expires_ms: f[3].uint()?,
+            expires_ms: crate::trust_validity::End::parse(&f[3])?,
             opaque: f[4].boolean()?,
         };
         ensure!(
             o.bytes > 0
                 && o.bytes <= limits.maximum_object_bytes
                 && o.expires_ms > 0
-                && (!o.opaque || limits.opaque),
+                && (!o.opaque
+                    || (limits.opaque
+                        && o.expires_ms != crate::trust_validity::End::UntilWithdrawn)),
             "content object exceeds consent"
         );
         Ok(o)

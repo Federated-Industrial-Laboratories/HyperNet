@@ -114,7 +114,19 @@ impl State {
                     !genesis
                         && matches!(
                             version.kind,
-                            100 | 101 | 102 | 105 | 114 | 117 | 125 | 126 | 127 | 128 | 129 | 130
+                            100 | 101
+                                | 102
+                                | 105
+                                | 114
+                                | 117
+                                | 125
+                                | 126
+                                | 127
+                                | 128
+                                | 129
+                                | 130
+                                | 180
+                                | 181
                         ),
                     "unsupported post-genesis governance record"
                 );
@@ -141,10 +153,28 @@ impl State {
                 if version.kind == 125 {
                     let key = fields[7].fixed()?;
                     ensure!(
-                        !reservations.contains(&key) && !fields[9].boolean()?,
+                        !reservations.contains(&key),
                         "reserved or unsupported membership identity"
                     );
-                    member_keys.insert(key);
+                    let owned = governance
+                        .admission()
+                        .slots
+                        .values()
+                        .any(|s| s.owned().is_ok_and(|v| v.contains(&version.index())));
+                    if !fields[9].boolean()?
+                        && (!owned
+                            || governance.admission().active_member(key).is_some_and(
+                                |(_, s, r)| {
+                                    crate::authority_admission::identifier(
+                                        s.policy, s.slot, r.role, 0,
+                                    )
+                                    .ok()
+                                        == Some(version.id)
+                                },
+                            ))
+                    {
+                        member_keys.insert(key);
+                    }
                 } else if version.kind == 127 {
                     let key = fields[6].fixed()?;
                     ensure!(
@@ -223,21 +253,44 @@ impl State {
             )?
         };
         member_keys.extend(domains.requesters());
-        let streams = if let Some(value) = stream_value {
-            let streams =
-                streams::Streams::parse(config.scope.network, config.scope.incarnation, value)?;
-            ensure!(
-                streams.keys() == member_keys.iter().copied().collect::<Vec<_>>(),
-                "stream admissions differ from permanent identity classes"
-            );
-            streams
-        } else {
-            let mut streams = streams::Streams::default();
-            for key in member_keys {
-                streams.admit(config.scope.network, config.scope.incarnation, key)?;
-            }
-            streams
-        };
+        member_keys.extend(governance.admission().requester_keys());
+        let streams =
+            if let Some(value) = stream_value {
+                let streams =
+                    streams::Streams::parse(config.scope.network, config.scope.incarnation, value)?;
+                for slot in governance.admission().slots.values().filter(|s| s.active()) {
+                    for role in &slot.roles {
+                        ensure!(
+                            (slot.legacy_streams.contains(&role.member)
+                                && streams.origin(&role.member).is_none()
+                                && records.iter().any(|bytes| wire::decode(bytes).is_ok_and(
+                                    |v| v.list(32).is_ok_and(|f| f[0].uint().ok() == Some(125)
+                                        && f[7].fixed::<32>().ok() == Some(role.member)
+                                        && f[9].boolean().ok() == Some(true))
+                                )))
+                                || streams.origin(&role.member)
+                                    == Some(&crate::authority_proof::AdmissionOrigin {
+                                        policy: slot.policy,
+                                        slot: slot.slot,
+                                        assignment: slot.assignment,
+                                        ordinal: slot.ordinal
+                                    }),
+                            "scoped stream origin differs from certified assignment"
+                        );
+                    }
+                }
+                ensure!(
+                    streams.keys() == member_keys.iter().copied().collect::<Vec<_>>(),
+                    "stream admissions differ from permanent identity classes"
+                );
+                streams
+            } else {
+                let mut streams = streams::Streams::default();
+                for key in member_keys {
+                    streams.admit(config.scope.network, config.scope.incarnation, key)?;
+                }
+                streams
+            };
         let scope = crate::authority_proof::Scope {
             network: config.scope.network,
             incarnation: config.scope.incarnation,
@@ -268,7 +321,21 @@ impl State {
         Ok(state)
     }
     pub(super) fn effective_reservations(&self) -> Result<Reservations> {
-        self.evidence.recovery_reservations(&self.reservations)
+        let mut reserved = self.evidence.recovery_reservations(&self.reservations)?;
+        for bytes in &self.records {
+            let v = wire::decode(bytes)?;
+            let f = v.list(32)?;
+            if f[0].uint()? == 180 {
+                let p =
+                    crate::authority_admission::Policy::parse(bytes, f[2].fixed()?, f[3].fixed()?)?;
+                for key in [p.registrar, p.descriptor] {
+                    if !reserved.contains(&key) {
+                        reserved.0.push((7, key));
+                    }
+                }
+            }
+        }
+        Ok(reserved)
     }
     fn deployments(&self) -> Result<crate::authority_deployment_records::Index> {
         let value = wire::decode(&self.records[0])?;
@@ -285,12 +352,31 @@ impl State {
         let index = self.deployments()?;
         let count = index.open_count();
         let evidence = self.evidence.charge()?;
+        // Retirement repeats its predecessor material. Reserve that growth while
+        // a slot is live so normal capacity pressure cannot block withdrawal.
+        let context = wire::decode(&self.records[0])?;
+        let context = context.list(32)?;
+        let native = crate::authority_admission::Index::parse(
+            &self.records,
+            context[2].fixed()?,
+            context[3].fixed()?,
+        )?;
+        let retirement = native
+            .slots
+            .values()
+            .filter(|slot| slot.state != 3)
+            .map(|slot| {
+                slot.material.iter().map(Vec::len).sum::<usize>()
+                    + crate::authority_capacity::MAX_OTHER_EVIDENCE
+            })
+            .sum::<usize>();
         ensure!(
             self.records.len() + count <= crate::authority_capacity::MAX_RECORDS
-                && evidence + count * crate::authority_capacity::MAX_OTHER_EVIDENCE
+                && evidence + retirement + count * crate::authority_capacity::MAX_OTHER_EVIDENCE
                     <= crate::authority_capacity::MAX_EVIDENCE_BYTES
                 && self.records.iter().map(Vec::len).sum::<usize>()
                     + evidence
+                    + retirement
                     + count
                         * (crate::authority_capacity::MAX_OTHER_EVIDENCE
                             + crate::authority_capacity::WITHDRAWAL_RECORD_RESERVE)
@@ -538,7 +624,72 @@ impl PolicyApplication {
                         committed.height,
                         at,
                     )?;
+                    if matches!(operation, transactions::Operation::Admission(_)) {
+                        let old = crate::authority_admission::Index::parse(
+                            &state.records,
+                            self.config.scope.network,
+                            self.config.scope.incarnation,
+                        )?;
+                        let next = crate::authority_admission::Index::parse(
+                            &candidate.records,
+                            self.config.scope.network,
+                            self.config.scope.incarnation,
+                        )?;
+                        for slot in old.slots.values().filter(|s| s.active()) {
+                            for role in &slot.roles {
+                                if !next.active_member(role.member).is_some_and(|(_, s, _)| {
+                                    s.policy == slot.policy
+                                        && s.slot == slot.slot
+                                        && s.assignment == slot.assignment
+                                }) {
+                                    ensure!(
+                                        role.member != intent.requester,
+                                        "registrar cannot retire its own stream"
+                                    );
+                                    candidate.streams.retire_owned(&role.member);
+                                }
+                            }
+                        }
+                        for policy in next.policies.values() {
+                            if !candidate.streams.keys().contains(&policy.registrar) {
+                                candidate.streams.admit(
+                                    self.config.scope.network,
+                                    self.config.scope.incarnation,
+                                    policy.registrar,
+                                )?;
+                            }
+                        }
+                        for slot in next.slots.values().filter(|s| s.active()) {
+                            for role in &slot.roles {
+                                if !candidate.streams.keys().contains(&role.member) {
+                                    candidate.streams.admit_scoped(
+                                        self.config.scope.network,
+                                        self.config.scope.incarnation,
+                                        role.member,
+                                        crate::authority_proof::AdmissionOrigin {
+                                            policy: slot.policy,
+                                            slot: slot.slot,
+                                            assignment: slot.assignment,
+                                            ordinal: slot.ordinal,
+                                        },
+                                    )?;
+                                }
+                            }
+                        }
+                    }
                     for member in &decision.admissions {
+                        ensure!(
+                            !state
+                                .records
+                                .iter()
+                                .any(|bytes| wire::decode(bytes).is_ok_and(|v| v
+                                    .list(32)
+                                    .is_ok_and(|f| f[0].uint().ok() == Some(125)
+                                        && f[4].uint().is_ok_and(|g| g > 1)
+                                        && f[7].fixed::<32>().ok() == Some(*member)
+                                        && f[9].boolean().ok() == Some(true)))),
+                            "retired manual identity requires a new scoped assignment"
+                        );
                         ensure!(
                             !candidate.streams.keys().contains(member),
                             "new membership already has a stream"
@@ -564,6 +715,18 @@ impl PolicyApplication {
                 candidate.domains = domains;
                 let prepared = (|| -> Result<()> {
                     for member in &decision.admissions {
+                        ensure!(
+                            !state
+                                .records
+                                .iter()
+                                .any(|bytes| wire::decode(bytes).is_ok_and(|v| v
+                                    .list(32)
+                                    .is_ok_and(|f| f[0].uint().ok() == Some(125)
+                                        && f[4].uint().is_ok_and(|g| g > 1)
+                                        && f[7].fixed::<32>().ok() == Some(*member)
+                                        && f[9].boolean().ok() == Some(true)))),
+                            "retired manual identity requires a new scoped assignment"
+                        );
                         ensure!(
                             !candidate.streams.keys().contains(member),
                             "mail device already has a stream"
@@ -641,6 +804,30 @@ impl Application for PolicyApplication {
             "fresh application scope or floor differs"
         );
         match &request.query {
+            crate::authority_read::Query::Admission { policy, claim } => {
+                let reserved = state.effective_reservations()?;
+                match crate::authority_admission::disclose(
+                    &state.records,
+                    &state.domains,
+                    &reserved,
+                    request.requester,
+                    *policy,
+                    *claim,
+                    self.config.scope.network,
+                    self.config.scope.incarnation,
+                    at,
+                ) {
+                    Ok(value) => Ok((
+                        result(
+                            "AuthorityAdmissionContext",
+                            0,
+                            &wire::encode(&value.value())?,
+                        )?,
+                        expires,
+                    )),
+                    Err(_) => Ok((refusal("AuthorityAdmissionContext", 3)?, expires)),
+                }
+            }
             crate::authority_read::Query::PolicyContext => {
                 let g = crate::authority_governance::Governance::parse(
                     self.config.scope.network,

@@ -22,7 +22,50 @@ pub struct LastFenceMetadata {
     pub previous_completion: Option<CompletionMetadata>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdmissionOrigin {
+    pub policy: Digest,
+    pub slot: u64,
+    pub assignment: u64,
+    pub ordinal: u64,
+}
+impl AdmissionOrigin {
+    pub fn parse(v: &V) -> Result<Self> {
+        let f = v.array(4)?;
+        let origin = Self {
+            policy: super::id(&f[0])?,
+            slot: f[1].uint()?,
+            assignment: f[2].uint()?,
+            ordinal: f[3].uint()?,
+        };
+        ensure!(
+            origin.slot < 64 && origin.assignment > 0 && origin.ordinal > 0,
+            "invalid scoped stream origin"
+        );
+        Ok(origin)
+    }
+    pub fn value(&self) -> V {
+        V::Array(vec![
+            V::Bytes(self.policy.to_vec()),
+            V::Uint(self.slot),
+            V::Uint(self.assignment),
+            V::Uint(self.ordinal),
+        ])
+    }
+    pub fn initial(&self, network: Digest, incarnation: Digest, requester: Key) -> Result<Digest> {
+        initial_generation_id(network, incarnation, requester)?;
+        Ok(wire::digest(&wire::encode(&V::Array(vec![
+            V::Text("HyperNet/ScopedStreamInitial".into()),
+            V::Uint(1),
+            V::Bytes(network.to_vec()),
+            V::Bytes(incarnation.to_vec()),
+            V::Bytes(requester.to_vec()),
+            self.value(),
+        ]))?))
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamState {
+    pub origin: Option<AdmissionOrigin>,
     pub generation: u64,
     pub generation_id: Digest,
     pub retired_through: u64,
@@ -98,9 +141,20 @@ pub fn initial_generation_id(
 impl OwnStreamMetadata {
     /// Parsing establishes structure; only an exact certified response establishes current metadata.
     pub(crate) fn parse(bytes: &[u8]) -> Result<Self> {
-        ensure!(bytes.len() <= 486, "stream metadata exceeds its bound");
+        ensure!(bytes.len() <= 568, "stream metadata exceeds its bound");
         let value = wire::decode(bytes)?;
-        let f = super::record(&value, 56, 10)?;
+        let fields = value.list(11)?;
+        let version = fields.get(1).context("stream metadata truncated")?.uint()?;
+        ensure!(
+            fields[0].uint()? == 56 && matches!(version, 1 | 2),
+            "stream metadata version differs"
+        );
+        let f = value.array(if version == 1 { 10 } else { 11 })?;
+        let origin = if version == 2 {
+            Some(AdmissionOrigin::parse(&f[10])?)
+        } else {
+            None
+        };
         let scope = Scope::parse(&f[2])?;
         let requester = super::key(&f[3])?;
         let present = f[4].boolean()?;
@@ -109,7 +163,10 @@ impl OwnStreamMetadata {
             let generation = f[5].uint()?;
             let generation_id = super::id(&f[6])?;
             ensure!(generation > 0, "zero stream generation");
-            let initial = initial_generation_id(scope.network, scope.incarnation, requester)?;
+            let initial = origin.as_ref().map_or_else(
+                || initial_generation_id(scope.network, scope.incarnation, requester),
+                |o| o.initial(scope.network, scope.incarnation, requester),
+            )?;
             let last_fence = if f[9] == V::Null {
                 ensure!(
                     generation == 1 && generation_id == initial,
@@ -139,6 +196,7 @@ impl OwnStreamMetadata {
                 })
             };
             Some(StreamState {
+                origin,
                 generation,
                 generation_id,
                 retired_through: retired,
@@ -147,7 +205,8 @@ impl OwnStreamMetadata {
             })
         } else {
             ensure!(
-                f[5] == V::Null
+                origin.is_none()
+                    && f[5] == V::Null
                     && f[6] == V::Null
                     && retired == 0
                     && f[8] == V::Null

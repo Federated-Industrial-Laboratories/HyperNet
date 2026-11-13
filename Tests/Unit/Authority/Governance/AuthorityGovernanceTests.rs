@@ -601,7 +601,14 @@ fn persistent_membership_requires_persistent_ancestors_and_remains_revocable() {
         expected: &[],
     };
     let governance = Governance::parse([1; 32], [2; 32], &records).unwrap();
-    assert!(governance.current_capability([5; 32], &request).is_ok());
+    assert_eq!(
+        governance
+            .current_capability([5; 32], &request)
+            .unwrap()
+            .validity
+            .1,
+        End::UntilWithdrawn
+    );
     let (finite, _, _) = fixture_lifetimes(End::At(100000), End::UntilWithdrawn);
     let finite = Governance::parse([1; 32], [2; 32], &finite).unwrap();
     let current = Requirement {
@@ -609,6 +616,28 @@ fn persistent_membership_requires_persistent_ancestors_and_remains_revocable() {
         ..request
     };
     assert!(finite.current_capability([5; 32], &current).is_err());
+    let mut finite_membership = records.clone();
+    let member_index = finite_membership
+        .iter()
+        .position(|bytes| wire::decode(bytes).unwrap().list(32).unwrap()[0] == V::Uint(125))
+        .unwrap();
+    let mut member = wire::decode(&finite_membership[member_index])
+        .unwrap()
+        .array(12)
+        .unwrap()
+        .to_vec();
+    member[8] = list(vec![V::Uint(1000), V::Uint(100000)]);
+    finite_membership[member_index] = wire::encode(&list(member)).unwrap();
+    let finite_membership = Governance::parse([1; 32], [2; 32], &finite_membership).unwrap();
+    assert_eq!(
+        finite_membership
+            .current_capability([5; 32], &current)
+            .unwrap()
+            .validity
+            .1,
+        End::At(100000),
+        "permanent grants cannot hide a finite current membership"
+    );
     let mut revoked = records;
     let index = revoked
         .iter()

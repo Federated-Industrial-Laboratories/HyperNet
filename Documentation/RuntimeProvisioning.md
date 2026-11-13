@@ -114,3 +114,32 @@ session or managed policy. The network requires three of its four appointed
 replicas for committed authority operations. Hosting roles have separate
 [service setup and activation](ServiceRuntime.md); authority appointment does
 not grant those roles.
+
+## Renew a transport certificate without changing identity
+
+Keep the original issuer directory, identity directories and signed transport
+requests. Certificate renewal keeps their private keys and public identities.
+It produces new public files; it does not overwrite the original issuer or start
+a workload.
+
+```sh
+HyperNet runtime provision renew-issuer --directory /Private/TransportIssuer \
+  --issuer-certificate /Private/CurrentIssuer.pem --issuer-digest CURRENT_SHA256 \
+  --days 365 --output /Private/RenewedIssuer.pem
+HyperNet runtime provision issue --directory /Private/TransportIssuer \
+  --issuer-certificate /Private/RenewedIssuer.pem --issuer-digest RENEWED_SHA256 \
+  --request /Private/Requests/AuthorityOne.json --request-digest REQUEST_SHA256 \
+  --days 90 --output /Private/Peers/AuthorityOneRenewed.json
+```
+
+Omit `--issuer-certificate` to select the original `Authority.pem`. An explicitly
+selected issuer must be a self-signed Ed25519 successor of that original. The
+SPKI, issuer and subject names, and every extension remain identical. Only the
+serial, validity interval and signature may change. Issuer intervals remain
+bounded to 3650 days; leaf issuance remains bounded to 365 days. These finite
+certificates are distinct from permission that lasts until withdrawal.
+
+Apply the issued public material through the reviewed
+[stopped certificate successor](Runtime.md#stopped-certificate-successors).
+Copying certificates over a running installation does not update its signed
+consent, native registration or client pins.

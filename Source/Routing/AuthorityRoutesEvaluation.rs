@@ -161,6 +161,17 @@ impl Context<'_> {
             ensure!(!live, "route deployment is withdrawn");
         }
         if live {
+            r.manifest.current_transport(self.at)?;
+            p.manifest.current_transport(self.at)?;
+            for end in [
+                r.manifest.transport_expiry()?,
+                p.manifest.transport_expiry()?,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                self.expires = self.expires.min(end);
+            }
             let consent = wire::decode(self.governance.record_bytes(105, r.deployment)?)?;
             let f = consent.array(19)?;
             let validity = crate::trust_validity::Validity::parse(&f[16])?;
@@ -378,7 +389,67 @@ pub fn evaluate(
     let mut next = state.clone();
     let mut changed = None;
     let outcome = (|| -> Result<()> {
+        let handover;
+        let command = if let Command::Handover { voucher, expires } = command {
+            let current = c.select(166, voucher.id)?;
+            let old = Voucher::parse(&current.payload)?;
+            if replay {
+                ensure!(
+                    voucher.generation.checked_add(1) == Some(current.reference.generation)
+                        && current.predecessor == Some(voucher.digest)
+                        && old.creation == intent.digest
+                        && old.expires == *expires,
+                    "route handover replay differs from its exact successor"
+                );
+            } else {
+                let usage = if state.records.contains_key(&(167, voucher.id)) {
+                    Some(Usage::parse(&c.select(167, voucher.id)?.payload)?)
+                } else {
+                    None
+                };
+                let (relay_record, relay) = c.service(old.relay.id, true)?;
+                let (destination_record, destination) = c.service(old.destination.id, true)?;
+                ensure!(
+                    relay_record.reference == old.relay
+                        && destination_record.reference == old.destination,
+                    "Live handover cannot change its pinned service certificates"
+                );
+                ensure!(
+                    old.permits_next(
+                        usage.as_ref(),
+                        relay
+                            .profile
+                            .limits
+                            .bytes
+                            .min(destination.profile.limits.bytes)
+                    ),
+                    "exhausted route must expire before ordinary quota renewal"
+                );
+                ensure!(
+                    current.reference == *voucher
+                        && at < old.expires
+                        && old.expires - at <= 60_000
+                        && *expires > old.expires,
+                    "route handover requires its exact live voucher in the handover window"
+                );
+            }
+            handover = Command::Issue {
+                id: voucher.id,
+                relay: old.relay.id,
+                destination: old.destination.id,
+                possession: old.possession,
+                action: old.action,
+                scope: old.scope,
+                connections: old.connections,
+                bytes: old.bytes,
+                expires: *expires,
+            };
+            &handover
+        } else {
+            command
+        };
         match command {
+            Command::Handover { .. } => unreachable!("normalized handover"),
             Command::Context { action, scope } => {
                 c.capability(grant(operation)?, intent.requester, *action, *scope)?;
                 if *action == 26 && scope.0 == 5 {
@@ -487,6 +558,19 @@ pub fn evaluate(
                 expires,
             } => {
                 let grant = grant(operation)?;
+                c.governance.admission().route_template(
+                    intent.requester,
+                    grant.id,
+                    *id,
+                    *relay,
+                    *destination,
+                    *action,
+                    *scope,
+                    *connections,
+                    *bytes,
+                    *expires,
+                    at,
+                )?;
                 c.capability(grant, intent.requester, *action, *scope)?;
                 let (rr, r) = c.service(*relay, true)?;
                 let (dr, d) = c.service(*destination, true)?;
@@ -516,6 +600,7 @@ pub fn evaluate(
                         "relay possession key is an application identity"
                     );
                 }
+                let mut certificate_refresh = false;
                 let baseline = if let Some(previous) = state.records.get(&(166, *id)) {
                     let previous = previous.clone();
                     c.select(166, *id)?;
@@ -523,14 +608,24 @@ pub fn evaluate(
                     if replay {
                         old.baseline
                     } else {
+                        certificate_refresh = (old.relay != rr.reference
+                            || old.destination != dr.reference)
+                            && (old.relay == rr.reference
+                                || rr.reference.generation > old.relay.generation
+                                    && r.profile.manifest.transport_certificates.is_some())
+                            && (old.destination == dr.reference
+                                || dr.reference.generation > old.destination.generation
+                                    && d.profile.manifest.transport_certificates.is_some());
                         ensure!(
                             (at >= old.expires
-                                || (old.expires - at <= 60_000
-                                    && *expires > old.expires
+                                || ((old.expires - at <= 60_000 || certificate_refresh)
+                                    && (*expires > old.expires
+                                        || certificate_refresh && *expires == old.expires)
                                     && *connections == old.connections
                                     && *bytes == old.bytes
-                                    && rr.reference == old.relay
-                                    && dr.reference == old.destination
+                                    && (rr.reference == old.relay
+                                        && dr.reference == old.destination
+                                        || certificate_refresh)
                                     && *grant == old.grant))
                                 && old.sponsor == intent.requester
                                 && old.possession == *possession
@@ -571,7 +666,11 @@ pub fn evaluate(
                 };
                 Voucher::parse(&voucher.value())?;
                 if !replay && let Some(previous) = state.records.get(&(166, *id)) {
-                    let previous = Voucher::parse(&previous.payload)?;
+                    let mut previous = Voucher::parse(&previous.payload)?;
+                    if certificate_refresh {
+                        previous.relay = voucher.relay.clone();
+                        previous.destination = voucher.destination.clone();
+                    }
                     ensure!(
                         at >= previous.expires || voucher.continues(&previous),
                         "early route replacement changes live authority or usage baseline"
@@ -870,7 +969,7 @@ pub fn evaluate(
     validate_versions(&versions, 64)?;
     let governance = versions
         .iter()
-        .filter(|r| r.kind < 132)
+        .filter(|r| r.kind < 132 || matches!(r.kind, 180 | 181))
         .map(|r| Ok(b(c.governance.record_bytes(r.kind, r.id)?)))
         .collect::<Result<Vec<_>>>()?;
     let value = a(vec![
@@ -958,7 +1057,7 @@ pub(crate) fn evaluate_read(
     validate_versions(&versions, 64)?;
     let governance = versions
         .iter()
-        .filter(|r| r.kind < 132)
+        .filter(|r| r.kind < 132 || matches!(r.kind, 180 | 181))
         .map(|r| Ok(b(c.governance.record_bytes(r.kind, r.id)?)))
         .collect::<Result<Vec<_>>>()?;
     let value = a(vec![
@@ -981,4 +1080,206 @@ pub(crate) fn evaluate_read(
         code: 0,
         expires_ms: c.expires,
     })
+}
+
+/// Only the native admission executor calls this after current policy and candidate consent checks.
+pub(crate) fn scoped_vouchers(
+    state: &State,
+    records: &[Vec<u8>],
+    reserved: &Reservations,
+    slot: &crate::authority_admission::Slot,
+    at: u64,
+    creation: Digest,
+) -> Result<State> {
+    let mut next = state.clone();
+    let governance = Governance::parse(state.network, state.incarnation, records)?;
+    let policy = governance
+        .admission()
+        .policies
+        .get(&slot.policy)
+        .context("scoped route policy absent")?
+        .clone();
+    ensure!(
+        slot.active()
+            && governance
+                .admission()
+                .slots
+                .get(&slot.reference.id)
+                .is_some_and(|s| s.reference == slot.reference),
+        "scoped route slot is not current"
+    );
+    for role in &slot.roles {
+        let template = policy.template(role.role)?;
+        for (purpose, destination) in [(4, policy.authority), (5, template.destination)] {
+            let id =
+                crate::authority_admission::identifier(slot.policy, slot.slot, role.role, purpose)?;
+            let grant_id =
+                crate::authority_admission::identifier(slot.policy, slot.slot, role.role, 2)?;
+            let grant = governance
+                .versions()
+                .into_iter()
+                .find(|r| r.kind == 102 && r.id == grant_id)
+                .context("scoped route grant absent")?;
+            let mut c = Context {
+                state: &next,
+                governance: Governance::parse(state.network, state.incarnation, records)?,
+                index: Index::parse(records, reserved, state.network, state.incarnation)?,
+                reserved,
+                at,
+                dependencies: vec![],
+                expires: u64::MAX,
+                selected: BTreeMap::new(),
+            };
+            c.capability(&grant, role.member, 0, (3, destination))?;
+            let (rr, relay) = c.service(policy.relay, true)?;
+            let (dr, target) = c.service(destination, true)?;
+            c.pair(&relay.profile, &target.profile)?;
+            ensure!(
+                relay.profile.mode == 1
+                    && target.profile.mode != 1
+                    && target.profile.relay.is_none_or(|r| r == policy.relay),
+                "scoped route destination or relay changed"
+            );
+            if purpose == 5
+                && let Some(host) = template.page
+            {
+                ensure!(
+                    target.profile.protocol == 2,
+                    "Admission Page destination protocol differs"
+                );
+                let (_, _, expiry) = crate::authority_domains::page::admission_host(
+                    &next, records, reserved, host, at,
+                )?;
+                c.expires = c.expires.min(expiry);
+            }
+            let expires = at.saturating_add(template.voucher_ms).min(c.expires);
+            ensure!(
+                expires > at.saturating_add(60_000),
+                "scoped route consent has insufficient finite headroom"
+            );
+            let old = next
+                .records
+                .get(&(166, id))
+                .map(|r| Voucher::parse(&r.payload))
+                .transpose()?;
+            let same_budget = old.as_ref().is_some_and(|v| {
+                v.sponsor == role.member
+                    && v.possession == role.relay
+                    && v.grant == grant
+                    && v.relay.id == rr.reference.id
+                    && v.destination.id == dr.reference.id
+                    && v.connections == template.connections
+                    && v.bytes == template.bytes
+            });
+            let same = same_budget
+                && old
+                    .as_ref()
+                    .is_some_and(|v| v.relay == rr.reference && v.destination == dr.reference);
+            let usage = next
+                .records
+                .get(&(167, id))
+                .map(|r| Usage::parse(&r.payload))
+                .transpose()?;
+            if same_budget
+                && old.as_ref().is_some_and(|v| v.expires > at)
+                && !old.as_ref().unwrap().permits_next(
+                    usage.as_ref(),
+                    relay.profile.limits.bytes.min(target.profile.limits.bytes),
+                )
+            {
+                ensure!(
+                    same,
+                    "Exhausted live route must expire before certificate and quota refresh"
+                );
+                continue;
+            }
+            if same
+                && old
+                    .as_ref()
+                    .is_some_and(|v| v.expires > at.saturating_add(60_000))
+            {
+                continue;
+            }
+            let baseline = if same_budget && old.as_ref().is_some_and(|v| v.expires > at) {
+                old.as_ref().and_then(|v| v.baseline).unwrap_or((0, 0))
+            } else {
+                usage.map_or((0, 0), |u| (u.connections, u.bytes))
+            };
+            let voucher = Voucher {
+                baseline: Some(baseline),
+                relay: rr.reference,
+                destination: dr.reference,
+                sponsor: role.member,
+                grant,
+                possession: role.relay,
+                action: 0,
+                scope: (3, destination),
+                connections: template.connections,
+                bytes: template.bytes,
+                expires,
+                creation,
+            };
+            Voucher::parse(&voucher.value())?;
+            next.put(Record::next(&next, 166, id, voucher.value())?)?;
+        }
+    }
+    Ok(next)
+}
+
+pub(crate) fn admission_routes(
+    state: &State,
+    records: &[Vec<u8>],
+    reserved: &Reservations,
+    slot: &crate::authority_admission::Slot,
+    at: u64,
+) -> Result<(Vec<VersionRef>, Vec<Vec<u8>>)> {
+    let mut c = Context {
+        state,
+        governance: Governance::parse(state.network, state.incarnation, records)?,
+        index: Index::parse(records, reserved, state.network, state.incarnation)?,
+        reserved,
+        at,
+        dependencies: vec![],
+        expires: u64::MAX,
+        selected: BTreeMap::new(),
+    };
+    let policy = c
+        .governance
+        .admission()
+        .policies
+        .get(&slot.policy)
+        .context("scoped route policy absent")?
+        .clone();
+    for role in &slot.roles {
+        if let Some(host) = policy.template(role.role)?.page {
+            let (dependencies, selected, expiry) =
+                crate::authority_domains::page::admission_host(state, records, reserved, host, at)?;
+            c.dependencies.extend(dependencies);
+            c.expires = c.expires.min(expiry);
+            for bytes in selected {
+                let record = Record::parse(&bytes, state.network, state.incarnation)?;
+                c.selected.insert(record.reference.index(), record);
+            }
+        }
+        for purpose in [4, 5] {
+            let id =
+                crate::authority_admission::identifier(slot.policy, slot.slot, role.role, purpose)?;
+            let r = c.select(166, id)?;
+            let voucher = Voucher::parse(&r.payload)?;
+            c.service(voucher.relay.id, true)?;
+            c.service(voucher.destination.id, true)?;
+            c.capability(&voucher.grant, role.member, voucher.action, voucher.scope)?;
+            ensure!(
+                voucher.possession == role.relay
+                    && voucher.relay.id == policy.relay
+                    && voucher.expires > at.saturating_add(1250),
+                "scoped route is expired or has another assignment"
+            );
+        }
+    }
+    sorted(&mut c.dependencies)?;
+    Ok((
+        c.dependencies,
+        c.selected.into_values().map(|r| r.bytes).collect(),
+    ))
 }

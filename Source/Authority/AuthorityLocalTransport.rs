@@ -12,9 +12,19 @@ use std::{
     },
     path::Path,
 };
+#[derive(Debug)]
+pub(crate) struct InspectionDeadline;
+impl std::fmt::Display for InspectionDeadline {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str("original inspection deadline expired")
+    }
+}
+impl std::error::Error for InspectionDeadline {}
 pub fn remaining(deadline: u64) -> Result<u64> {
     let now = boot_time_ms()?;
-    ensure!(now < deadline, "original inspection deadline expired");
+    if now >= deadline {
+        return Err(InspectionDeadline.into());
+    }
     Ok(deadline - now)
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -285,7 +295,7 @@ fn ready(stream: &UnixStream, event: libc::c_short, deadline: u64) -> Result<()>
             return Err(error.into());
         }
         if status == 0 {
-            return Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into());
+            return Err(InspectionDeadline.into());
         }
         remaining(deadline)?;
         return ready_events(stream, event, descriptor.revents);

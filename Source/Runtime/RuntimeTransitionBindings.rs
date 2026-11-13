@@ -72,13 +72,16 @@ fn same_route(
     successor: &Manifest,
 ) -> Result<()> {
     successor.permits_definition(&new.manifest)?;
+    let certificates_changed = successor.transport_changed(&old.manifest);
+    let identity_matches = new.identity == old.identity
+        || certificates_changed && new.identity.certificate_successor_of(&old.identity).is_ok();
     ensure!(
         new.manifest.generation >= old.manifest.generation
             && new.deployment == old.deployment
             && new.service == old.service
             && new.operator == old.operator
             && new.endpoint == old.endpoint
-            && new.identity == old.identity
+            && identity_matches
             && new.address == old.address
             && new.domain == old.domain
             && new.protocol == old.protocol
@@ -101,10 +104,15 @@ fn same_configuration(
     route: &RegisteredProfile,
     manifest: &Manifest,
 ) -> Result<()> {
+    let relay_matches = old.relay_identity == new.relay_identity
+        || match (&old.relay_identity, &new.relay_identity) {
+            (Some(before), Some(after)) if manifest.transport_certificates.is_some() => {
+                after.certificate_successor_of(before).is_ok()
+            }
+            _ => false,
+        };
     ensure!(
-        old.version == new.version
-            && old.relay_identity == new.relay_identity
-            && old.relay_address == new.relay_address,
+        old.version == new.version && relay_matches && old.relay_address == new.relay_address,
         "Renewal cannot change relay transport or route mode"
     );
     match (&old.application, &new.application) {
@@ -176,8 +184,12 @@ pub(super) fn validate(root: &Path, successor: &Manifest, selection: &Selection)
     same_route(&old_route, &new_route, successor)?;
     let before: Configuration = serde_json::from_slice(&old_configuration)?;
     ensure!(
-        before.application.is_some() == configuration.is_some(),
-        "Application routes require renewed owner/operator consent; non-application routes retain their exact configuration"
+        if before.application.is_some() {
+            configuration.is_some()
+        } else {
+            configuration.is_none() || successor.transport_changed(&old_route.manifest)
+        },
+        "Application routes require renewed owner consent; other configuration changes require an exact certificate successor"
     );
     let configuration = configuration.as_deref().unwrap_or(&old_configuration);
     let after: Configuration = serde_json::from_slice(configuration)?;
@@ -187,18 +199,19 @@ pub(super) fn validate(root: &Path, successor: &Manifest, selection: &Selection)
 pub(super) fn summary(selection: &Selection, successor: &Manifest) -> Result<Value> {
     let (bytes, configuration) = selection.bytes()?;
     let route = RegisteredProfile::parse(&bytes, successor.network, successor.incarnation)?;
-    let application = configuration.as_ref().map(|bytes| -> Result<Value> {
+    let application = configuration.as_ref().map(|bytes| -> Result<Option<Value>> {
         let config: Configuration = serde_json::from_slice(bytes)?;
-        let binding = config.application.ok_or_else(|| anyhow::anyhow!("Application consent absent"))?;
+        let Some(binding) = config.application else { return Ok(None) };
         let registration = streams::Registration::parse(&binding.registration, successor.network, successor.incarnation)?;
-        Ok(json!({"service":hex::encode(registration.id),"owner":hex::encode(registration.owner),
+        Ok(Some(json!({"service":hex::encode(registration.id),"owner":hex::encode(registration.owner),
             "validFromMs":registration.validity.0,"validUntilMs":registration.validity.1,
-            "routeGeneration":registration.route.generation,"configurationSha256":files::hex_digest(bytes)}))
-    }).transpose()?;
+            "routeGeneration":registration.route.generation,"configurationSha256":files::hex_digest(bytes)})))
+    }).transpose()?.flatten();
     Ok(
         json!({"routeSha256":files::hex_digest(&bytes),"operator":hex::encode(route.operator),
         "service":hex::encode(route.identity.service),"manifestGeneration":route.manifest.generation,
         "validFromMs":route.validity.0,"validUntilMs":route.validity.1,"application":application,
+        "configurationSha256":configuration.as_ref().map(|bytes|files::hex_digest(bytes)),
         "samePermanentIdentity":true,"unchangedExposurePrivacyAndBudgets":true}),
     )
 }

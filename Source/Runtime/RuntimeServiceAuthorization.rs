@@ -25,6 +25,7 @@ pub struct Guard {
     clock: Source,
     last_wall: Cell<u64>,
     boot_deadline: Option<u64>,
+    serving_end: crate::trust_validity::End,
     artifacts: BTreeMap<String, Digest>,
 }
 pub struct ApplicationClock {
@@ -213,18 +214,26 @@ impl Guard {
             kernel_boot: manifest.clock.kernel_boot.clone(),
         };
         let observation = clock.health()?.observe()?;
+        manifest.current_transport(observation.wall_ms)?;
+        let transport = manifest.transport_interval()?;
+        let valid_from = transport.map_or(manifest.validity.0, |(start, _)| {
+            manifest.validity.0.max(start)
+        });
+        let serving_end = transport.map_or(manifest.validity.1, |(_, end)| {
+            manifest.validity.1.min(crate::trust_validity::End::At(end))
+        });
         ensure!(
             observation
                 .wall_ms
                 .checked_sub(crate::authority_challenge::DELTA_MS)
-                .is_some_and(|t| t >= manifest.validity.0)
+                .is_some_and(|t| t >= valid_from)
                 && observation
                     .wall_ms
                     .checked_add(crate::authority_challenge::DELTA_MS)
-                    .is_some_and(|t| t < manifest.validity.1),
+                    .is_some_and(|t| t < serving_end),
             "service consent is outside its validity interval"
         );
-        let boot_deadline = match manifest.validity.1 {
+        let boot_deadline = match serving_end {
             crate::trust_validity::End::At(end) => Some(
                 observation
                     .boot_ms
@@ -244,6 +253,7 @@ impl Guard {
             clock,
             last_wall: Cell::new(observation.wall_ms),
             boot_deadline,
+            serving_end,
             artifacts,
         };
         out.check()?;
@@ -294,7 +304,7 @@ impl Guard {
                 && observation
                     .wall_ms
                     .checked_add(crate::authority_challenge::DELTA_MS)
-                    .is_some_and(|t| t < self.manifest.validity.1)
+                    .is_some_and(|t| t < self.serving_end)
                 && self
                     .boot_deadline
                     .is_none_or(|end| observation.boot_ms < end),

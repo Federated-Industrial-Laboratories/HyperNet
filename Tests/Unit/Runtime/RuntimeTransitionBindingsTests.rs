@@ -250,3 +250,64 @@ fn proposal_embeds_exact_bounded_artifacts_and_hashes_change_with_content() {
     changed.route_profile = "00".repeat(32769);
     assert!(changed.bytes().is_err());
 }
+
+#[test]
+fn certificate_route_validation_overlays_reviewed_public_tls_and_retains_private_key_pin() {
+    use crate::consensus::journal::tests::Directory;
+    use crate::runtime_manifest::certificates as tls;
+    let (before, after) = crate::authority_domains::routes::tests::certificate_profiles();
+    let directory = Directory::new();
+    let root = &directory.0;
+    files::directory(&root.join("Config")).unwrap();
+    let mut key = vec![
+        0x30, 0x2e, 0x02, 1, 0, 0x30, 5, 6, 3, 0x2b, 0x65, 0x70, 4, 0x22, 4, 0x20,
+    ];
+    key.extend([110; 32]);
+    let key_pem = format!(
+        "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+        STANDARD.encode(key)
+    );
+    let mut artifacts = std::collections::BTreeMap::new();
+    for (name, bytes) in [
+        (
+            "Certificate.pem",
+            tls::pem(&before.identity.leaf_der).unwrap(),
+        ),
+        (
+            "CertificateAuthority.pem",
+            before.identity.certificate_authority_pem.clone(),
+        ),
+        ("Transport.key", key_pem),
+    ] {
+        files::create(&root.join("Config").join(name), bytes.as_bytes()).unwrap();
+        artifacts.insert(name.to_string(), wire::digest(bytes.as_bytes()));
+    }
+    let profile: services::Profile = serde_json::from_value(json!({"version":1, "root":root,
+        "manifest":before.manifest,"artifacts":artifacts,"authorityControl":root.join("Authority/Control"),
+        "clockDirectory":root.join("Clock"),"selinux":false,"mediaControls":{},"routeTarget":null})).unwrap();
+    let configuration =
+        serde_json::to_vec(&json!({"version":1,"relayIdentity":null,"relayAddress":null})).unwrap();
+    profile
+        .validate_route_successor(&after.manifest, &after.envelope, &configuration)
+        .unwrap();
+    let selection = Selection {
+        route_profile: hex::encode(&after.envelope),
+        application_configuration: Some(hex::encode(&configuration)),
+    };
+    let preview = summary(&selection, &after.manifest).unwrap();
+    assert!(preview["application"].is_null());
+    assert_eq!(
+        preview["configurationSha256"],
+        files::hex_digest(&configuration)
+    );
+    std::fs::write(
+        root.join("Config/Transport.key"),
+        b"substituted private key",
+    )
+    .unwrap();
+    assert!(
+        profile
+            .validate_route_successor(&after.manifest, &after.envelope, &configuration)
+            .is_err()
+    );
+}

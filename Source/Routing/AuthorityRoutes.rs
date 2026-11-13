@@ -8,11 +8,11 @@ use std::net::SocketAddr;
 #[path = "AuthorityRoutesEvaluation.rs"]
 mod evaluation;
 pub use evaluation::evaluate;
-pub(crate) use evaluation::evaluate_read;
+pub(crate) use evaluation::{admission_routes, evaluate_read, scoped_vouchers};
 
 #[cfg(test)]
 #[path = "../../Tests/Unit/Routing/AuthorityRoutesTests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 #[derive(Clone, Debug)]
 pub struct RegisteredProfile {
@@ -70,15 +70,23 @@ impl RegisteredProfile {
     /// Explicit signed consent may extend the same endpoint; no permanent property is replaced.
     pub fn successor_of(&self, previous: &Self) -> Result<()> {
         self.manifest.permits_definition(&previous.manifest)?;
+        let certificates_changed = self.manifest.transport_changed(&previous.manifest);
+        let identity_matches = self.identity == previous.identity
+            || certificates_changed
+                && self
+                    .identity
+                    .certificate_successor_of(&previous.identity)
+                    .is_ok();
         ensure!(
             self.manifest.generation > previous.manifest.generation
                 && self.validity.0 >= previous.validity.0
-                && self.validity.1 > previous.validity.1
+                && (self.validity.1 > previous.validity.1
+                    || certificates_changed && self.validity == previous.validity)
                 && self.deployment == previous.deployment
                 && self.service == previous.service
                 && self.operator == previous.operator
                 && self.endpoint == previous.endpoint
-                && self.identity == previous.identity
+                && identity_matches
                 && self.address == previous.address
                 && self.domain == previous.domain
                 && self.protocol == previous.protocol
@@ -182,6 +190,12 @@ impl RegisteredProfile {
                 && p.validity.1 <= p.manifest.validity.1,
             "route profile differs from the exact consented manifest endpoint"
         );
+        if let Some(transport) = &p.manifest.transport_certificates {
+            ensure!(
+                p.identity.certificate_authority_pem == transport.issuer_pem,
+                "Route issuer differs from exact certificate successor consent"
+            );
+        }
         crate::trust_bootstrap::hex32(&p.domain)?;
         if let Some(address) = p.address {
             ensure!(
@@ -242,6 +256,18 @@ pub struct Voucher {
     pub baseline: Option<(u64, u64)>,
 }
 impl Voucher {
+    /// Admission charges are cumulative; an early handover never refills their allowance.
+    pub fn permits_next(&self, usage: Option<&Usage>, charge: u64) -> bool {
+        let (connections, bytes) = usage.map_or((0, 0), |u| (u.connections, u.bytes));
+        connections
+            .checked_sub(self.baseline.map_or(0, |b| b.0))
+            .and_then(|n| n.checked_add(1))
+            .is_some_and(|n| n <= self.connections)
+            && bytes
+                .checked_sub(self.baseline.map_or(0, |b| b.1))
+                .and_then(|n| n.checked_add(charge))
+                .is_some_and(|n| n <= self.bytes)
+    }
     /// A live session can follow an early credential replacement without receiving a new budget.
     pub fn continues(&self, previous: &Self) -> bool {
         self.sponsor == previous.sponsor
@@ -451,6 +477,10 @@ pub enum Command {
         bytes: u64,
         expires: u64,
     },
+    Handover {
+        voucher: VersionRef,
+        expires: u64,
+    },
     Permit {
         voucher: VersionRef,
         connection: Digest,
@@ -536,6 +566,18 @@ impl Command {
                     expires: f[8].uint()?,
                 }
             }
+            "RouteHandover" => {
+                let f = value.array(4)?;
+                let voucher = version(&f[2])?;
+                ensure!(
+                    f[1].uint()? == 1 && voucher.kind == 166,
+                    "unsupported route handover"
+                );
+                Self::Handover {
+                    voucher,
+                    expires: f[3].uint()?,
+                }
+            }
             "RouteReaderPermit" => {
                 let f = value.array(2)?;
                 crate::authority_route_reader::Reader::parse(f[1].bytes()?, n, i)?;
@@ -600,6 +642,7 @@ impl Command {
             Self::Lookup { .. } => "RouteLookup",
             Self::Withdraw { .. } => "RouteWithdraw",
             Self::Issue { .. } => "RouteIssue",
+            Self::Handover { .. } => "RouteHandover",
             Self::Permit { .. } => "RoutePermit",
             Self::Reader { .. } => "RouteReaderPermit",
             Self::VoucherContext { .. } => "RouteVoucherContext",
@@ -627,7 +670,8 @@ impl Command {
             Self::Register { profile } => profile.identity.service,
             Self::Lookup { service } | Self::Withdraw { service, .. } => *service,
             Self::Issue { id, .. } => *id,
-            Self::Permit { voucher, .. }
+            Self::Handover { voucher, .. }
+            | Self::Permit { voucher, .. }
             | Self::VoucherContext { voucher }
             | Self::RenewContext { voucher } => voucher.id,
             Self::Reader { envelope } => {
@@ -655,7 +699,7 @@ impl Command {
     pub fn mutation_kind(&self) -> Option<u64> {
         match self {
             Self::Register { .. } | Self::Withdraw { .. } => Some(165),
-            Self::Issue { .. } => Some(166),
+            Self::Issue { .. } | Self::Handover { .. } => Some(166),
             Self::Permit { .. } => Some(167),
             Self::Invite { .. } => Some(168),
             _ => None,
@@ -693,6 +737,9 @@ impl Command {
                 a(vec![V::Uint(*connections), V::Uint(*bytes)]),
                 V::Uint(*expires),
             ]),
+            Self::Handover { voucher, expires } => {
+                f.extend([V::Uint(1), reference(voucher), V::Uint(*expires)])
+            }
             Self::Reader { envelope } => f.push(b(envelope)),
             Self::VoucherContext { voucher } | Self::RenewContext { voucher } => {
                 f.push(reference(voucher))

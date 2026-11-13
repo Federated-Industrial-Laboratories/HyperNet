@@ -75,6 +75,7 @@ fn fixture() -> (Directory, Transaction) {
         executable: root.join("Bin/HyperNet"),
         package: None,
         bindings: None,
+        transport: None,
     };
     let transaction = Transaction {
         operation: hex::encode([11; 16]),
@@ -200,4 +201,100 @@ fn historical_service_recovery_rejects_changed_objects_bindings_and_consent() {
             before
         );
     }
+}
+
+#[test]
+fn certificate_bundle_stages_only_exact_public_tls_files_and_rejects_mixed_identity() {
+    use crate::runtime_manifest::certificates as tls;
+    let crypto = tls::tests::fixture();
+    let directory = Directory::new();
+    let root = &directory.0;
+    for relative in ["TransitionFiles", "Work", "Work/Config", "Work/Config/Tls"] {
+        files::directory(&root.join(relative)).unwrap();
+    }
+    files::create(
+        &root.join("Work/Config/Tls/Authority.pem"),
+        crypto.issuer.as_bytes(),
+    )
+    .unwrap();
+    let bundle = json!({"format":"HyperNetTransportCertificates/1", "issuerPem":crypto.next_issuer,
+        "certificates":crypto.renewed.endpoints.iter().map(|e| json!({"endpoint":hex::encode(e.endpoint_id),
+            "serviceKey":hex::encode(e.service_key), "transportKey":hex::encode(e.transport_key),
+            "certificatePem":tls::pem(&e.leaf_der).unwrap()})).collect::<Vec<_>>()});
+    let path = root.join("Bundle.json");
+    files::save(&path, &bundle).unwrap();
+    let mut successor = crypto.renewed.clone();
+    let selection =
+        certificates::prepare(root, false, &crypto.original, &mut successor, Some(&path))
+            .unwrap()
+            .unwrap();
+    assert_eq!(successor, crypto.renewed);
+    let mut proposal = Proposal {
+        root: root.clone(),
+        service: false,
+        predecessor: hex::encode([12; 32]),
+        previous: crypto.original.clone(),
+        successor,
+        executable: root.join("HyperNet"),
+        package: None,
+        bindings: None,
+        transport: Some(selection),
+    };
+    let (_, deadline) = proposal.successor.transport_interval().unwrap().unwrap();
+    assert!(certificates::historical_at(&proposal, deadline - 1).is_err());
+    certificates::historical_at(&proposal, deadline).unwrap();
+    let mut no_transport = proposal.clone();
+    no_transport.transport = None;
+    assert!(certificates::historical_at(&no_transport, deadline).is_err());
+    let mut future = proposal.clone();
+    future.successor.validity.0 = deadline + 1;
+    assert!(certificates::historical_at(&future, deadline).is_err());
+    let mut replacements = BTreeMap::new();
+    certificates::stage_files(root, &proposal, &mut replacements, true).unwrap();
+    assert_eq!(replacements.len(), 2);
+    assert_eq!(
+        read(root, &replacements["Work/Config/Tls/Authority.pem"]).unwrap(),
+        crypto.next_issuer.as_bytes()
+    );
+    assert_eq!(
+        read(root, &replacements["Work/Config/Tls/Certificate.pem"]).unwrap(),
+        tls::pem(&crypto.renewed.endpoints[0].leaf_der)
+            .unwrap()
+            .as_bytes()
+    );
+    assert!(!replacements.keys().any(|name| name.contains("Private")));
+    // Exact retained JSON can be resumed; later input-file edits cannot alter the reviewed proposal.
+    let retained = serde_json::to_vec(&proposal).unwrap();
+    let restored: Proposal = serde_json::from_slice(&retained).unwrap();
+    certificates::validate(
+        &restored.previous,
+        &restored.successor,
+        restored.transport.as_ref().unwrap(),
+        false,
+    )
+    .unwrap();
+    let mut mixed = bundle;
+    mixed["certificates"][0]["transportKey"] = json!(hex::encode([222; 32]));
+    files::save(&path, &mixed).unwrap();
+    let mut changed = crypto.renewed.clone();
+    assert!(
+        certificates::prepare(root, false, &crypto.original, &mut changed, Some(&path)).is_err()
+    );
+    proposal.previous.endpoints[0].leaf_der = crypto.renewed.endpoints[0].leaf_der.clone();
+    assert!(
+        certificates::validate(
+            &proposal.previous,
+            &proposal.successor,
+            proposal.transport.as_ref().unwrap(),
+            false
+        )
+        .is_err()
+    );
+    let selected = &replacements["Work/Config/Tls/Certificate.pem"];
+    std::fs::write(
+        root.join("TransitionFiles").join(&selected.digest),
+        b"mixed staged certificate",
+    )
+    .unwrap();
+    assert!(read(root, selected).is_err());
 }

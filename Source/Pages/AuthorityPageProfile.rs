@@ -2,6 +2,7 @@
 // Hosting and application policy bind existing admissions to finite native Page rights.
 use super::*;
 use crate::runtime_manifest::Manifest;
+use crate::trust_validity::End;
 
 #[derive(Clone, Debug)]
 pub struct HostProfile {
@@ -12,11 +13,19 @@ pub struct HostProfile {
     pub namespaces: Vec<String>,
     pub state_bytes: u64,
     pub maximum_asset_bytes: u64,
-    pub retention_ms: u64,
+    /// Numeric values are durations; UntilWithdrawn is explicit persistent retention.
+    pub retention_ms: End,
     pub content: Option<ContentPolicy>,
     pub envelope: Vec<u8>,
 }
 impl HostProfile {
+    pub fn retention_end(&self, at: u64) -> Result<End> {
+        Ok(match self.retention_ms {
+            End::At(ms) => End::At(at.checked_add(ms).context("Page retention overflow")?),
+            End::UntilWithdrawn => End::UntilWithdrawn,
+        })
+    }
+
     pub fn cache_bytes(&self) -> Result<u64> {
         if self.content.is_none() {
             return Ok(self.state_bytes);
@@ -51,7 +60,7 @@ impl HostProfile {
             namespaces: names(&f[7], 16)?,
             state_bytes: f[8].uint()?,
             maximum_asset_bytes: f[9].uint()?,
-            retention_ms: f[10].uint()?,
+            retention_ms: End::parse(&f[10])?,
             content: if f[11] == V::Null {
                 None
             } else {
@@ -94,7 +103,13 @@ impl HostProfile {
                     } else {
                         markup::media::MAX_PAGE_BYTES
                     }
-                && (1..=MAXIMUM_LIFETIME_MS).contains(&p.retention_ms),
+                && match p.retention_ms {
+                    End::At(ms) => (1..=MAXIMUM_LIFETIME_MS).contains(&ms),
+                    End::UntilWithdrawn =>
+                        p.role == 1
+                            && p.manifest.validity.1 == End::UntilWithdrawn
+                            && p.content.as_ref().is_some_and(|c| !c.opaque),
+                },
             "Page host profile exceeds exact operator consent"
         );
         serialized_bank_bytes(p.cache_bytes()?)?;

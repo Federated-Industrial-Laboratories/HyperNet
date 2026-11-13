@@ -514,6 +514,7 @@ impl Tracker {
                         .and_then(|f| f.previous_completion.as_ref())
                 };
             if i.generation == state.generation
+                && i.generation_id == state.generation_id
                 && i.sequence > state.retired_through
                 && o.original.is_some()
             {
@@ -528,9 +529,40 @@ impl Tracker {
             {
                 o.original(c.into())?;
             }
-            if state.generation > i.generation {
+            if state.generation > i.generation
+                || state.generation_id != i.generation_id
+                    && self
+                        .metadata()?
+                        .and_then(|m| m.state().map(|s| s.origin.clone()))
+                        .flatten()
+                        != state.origin
+            {
                 next.archive_ordinary()?;
             }
+        }
+        if learn.kind != 57
+            && self
+                .metadata()?
+                .and_then(|m| m.state().map(|s| s.origin.clone()))
+                .flatten()
+                != metadata.state().and_then(|s| s.origin.clone())
+            && let Some(f) = next.fence.take()
+        {
+            let SignedRequest::StreamFence(i) =
+                SignedRequest::from_signed(&hex::decode(&f.signed)?)?
+            else {
+                unreachable!()
+            };
+            next.outstanding_unknown.push(Unknown {
+                signed: f.signed,
+                generation: i.expected_generation,
+                generation_id: i.expected_generation_id,
+                sequence: 0,
+                request: i.digest,
+                original: None,
+                effect: Effect::Unclaimed,
+                fence: true,
+            });
         }
         if learn.kind == 57 && matches!(learn.outcome, Some(0 | 1)) {
             next.archive_ordinary()?;
@@ -663,6 +695,19 @@ fn monotonic_state(old: &OwnStreamMetadata, next: &OwnStreamMetadata) -> Result<
     );
     if let Some(a) = old.state() {
         let b = next.state().context("admitted stream disappeared")?;
+        if b.origin != a.origin {
+            let next = b
+                .origin
+                .as_ref()
+                .context("scoped requester origin disappeared")?;
+            ensure!(
+                a.origin
+                    .as_ref()
+                    .is_none_or(|old| next.ordinal > old.ordinal),
+                "scoped requester assignment moved backwards"
+            );
+            return Ok(());
+        }
         ensure!(
             b.generation >= a.generation,
             "stream generation moved backwards"

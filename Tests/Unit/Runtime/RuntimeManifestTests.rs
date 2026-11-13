@@ -3,6 +3,41 @@ use super::*;
 use ed25519_dalek::SigningKey;
 use std::{fs, process::Command, sync::OnceLock};
 
+#[test]
+fn private_peer_routing_has_explicit_wire_consent_and_exact_private_endpoints() {
+    let ordinary = fixture();
+    let old = wire::decode(&ordinary.encode().unwrap()).unwrap();
+    assert_eq!(old.array(23).unwrap()[19].array(8).unwrap().len(), 8);
+    assert!(
+        !serde_json::to_string(&ordinary)
+            .unwrap()
+            .contains("privatePeerRouting")
+    );
+    let mut private = ordinary.clone();
+    private
+        .authority_config
+        .as_mut()
+        .unwrap()
+        .private_peer_routing = true;
+    for (index, endpoint) in private.endpoints.iter_mut().enumerate() {
+        endpoint.address = Ipv4Addr::new(10, 89, 132 + index as u8, 20).into();
+    }
+    let bytes = private.encode().unwrap();
+    assert_eq!(Manifest::parse(&bytes).unwrap(), private);
+    let encoded = wire::decode(&bytes).unwrap();
+    assert_eq!(
+        encoded.array(23).unwrap()[19].array(9).unwrap()[8],
+        a([V::Uint(1)])
+    );
+    let mut invalid = private.clone();
+    invalid.endpoints[1].address = Ipv4Addr::new(192, 0, 2, 1).into();
+    assert!(invalid.validate().is_err());
+    let mut invalid = private.clone();
+    invalid.endpoints[0].address = Ipv4Addr::new(10, 89, 132, 21).into();
+    assert!(invalid.validate().is_err());
+    assert!(private.same_operational_identity(&ordinary).is_err());
+}
+
 pub(crate) fn fixture() -> Manifest {
     static FIXTURE: OnceLock<Manifest> = OnceLock::new();
     FIXTURE
@@ -78,6 +113,7 @@ pub(crate) fn fixture() -> Manifest {
                     read_only: false,
                     storage_admission_bytes: 1073741824,
                 }],
+                transport_certificates: None,
                 authority_config: Some(AuthorityConfig {
                     listen_address: Ipv4Addr::UNSPECIFIED.into(),
                     listen_port: 24443,
@@ -85,6 +121,7 @@ pub(crate) fn fixture() -> Manifest {
                     tls_file_digests: [[26; 32], [27; 32], [28; 32]],
                     subnet_address: Ipv4Addr::new(10, 89, 132, 0).into(),
                     subnet_prefix: 24,
+                    private_peer_routing: false,
                 }),
                 endpoints,
                 clock: Clock {

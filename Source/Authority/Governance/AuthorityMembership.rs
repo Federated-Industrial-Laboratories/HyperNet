@@ -40,7 +40,7 @@ pub fn version(value: &V) -> Result<VersionRef> {
     ensure!(
         matches!(
             result.kind,
-            100 | 101 | 102 | 105 | 114 | 117 | 125 | 126 | 127 | 128 | 129 | 130 | 131
+            100 | 101 | 102 | 105 | 114 | 117 | 125 | 126 | 127 | 128 | 129 | 130 | 131 | 180 | 181
         ),
         "unsupported governance reference"
     );

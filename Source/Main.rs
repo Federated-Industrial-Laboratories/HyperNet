@@ -3,6 +3,8 @@ mod authority_content_disk;
 #[path = "Hosting/AuthorityContentService.rs"]
 mod authority_content_service;
 // SPDX-License-Identifier: MIT
+#[path = "Authority/Admission/AuthorityAdmission.rs"]
+mod authority_admission;
 #[path = "Authority/Governance/AuthorityApplication.rs"]
 mod authority_application;
 #[path = "Authority/Governance/AuthorityApplications.rs"]

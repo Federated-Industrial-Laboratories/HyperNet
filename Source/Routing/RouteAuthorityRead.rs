@@ -68,20 +68,23 @@ impl ReadExchange {
         self,
         mut current: impl FnMut() -> Result<authority_challenge::ClockHealth>,
     ) -> Result<ReadCompletion> {
-        transport::remaining(self.deadline)?;
-        current()?.observe()?;
-        transport::exchange_read(
-            &self.descriptor,
-            &self.signed,
-            &self.challenge,
-            self.deadline,
-            Path::new("/Authority/Control.sock"),
-            &self.prefix,
-            self.head.as_ref(),
-            &mut current,
-        )
-        .map_err(Client::retry_read)
-        .context("obtain fresh Route context and history")
+        let outcome = (|| {
+            transport::remaining(self.deadline)?;
+            current()?.observe()?;
+            transport::exchange_read(
+                &self.descriptor,
+                &self.signed,
+                &self.challenge,
+                self.deadline,
+                Path::new("/Authority/Control.sock"),
+                &self.prefix,
+                self.head.as_ref(),
+                &mut current,
+            )
+        })();
+        outcome
+            .map_err(Client::retry_read)
+            .context("obtain fresh Route context and history")
     }
 }
 
@@ -117,6 +120,8 @@ impl Client<'_> {
             error.context(ReadRetry::HistoryOvertaken)
         } else if error.is::<authority_challenge::ChallengeExpired>() {
             error.context(ReadRetry::ChallengeExpired)
+        } else if error.is::<transport::InspectionDeadline>() {
+            error.context(ReadRetry::InspectionDeadline)
         } else if transport::transport_closed(&error) {
             error.context(ReadRetry::TransportClosed)
         } else {

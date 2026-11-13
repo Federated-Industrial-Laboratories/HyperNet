@@ -176,6 +176,31 @@ impl Profile {
             );
             data.insert(name.into(), bytes);
         }
+        if successor.transport_changed(&self.manifest) {
+            let transport = successor
+                .transport_certificates
+                .as_ref()
+                .context("Certificate successor absent")?;
+            let own = successor
+                .endpoints
+                .iter()
+                .find(|endpoint| {
+                    successor.roles[0]
+                        .bind_endpoint_ids
+                        .contains(&endpoint.endpoint_id)
+                })
+                .context("Certificate successor endpoint absent")?;
+            data.insert(
+                "Certificate.pem".into(),
+                zeroize::Zeroizing::new(
+                    crate::runtime_manifest::certificates::pem(&own.leaf_der)?.into_bytes(),
+                ),
+            );
+            data.insert(
+                "CertificateAuthority.pem".into(),
+                zeroize::Zeroizing::new(transport.issuer_pem.as_bytes().to_vec()),
+            );
+        }
         crate::route_config::validate_import(
             successor,
             &data,

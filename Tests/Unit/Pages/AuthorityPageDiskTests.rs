@@ -86,7 +86,7 @@ fn page_cache_recovers_torn_successor_and_preserves_pending_bundle_within_physic
             first.reference().identity(),
             Entry {
                 object: first.clone(),
-                expires: 100000,
+                expires: 100000.into(),
                 used: 2000,
             },
         )]),
@@ -105,7 +105,7 @@ fn page_cache_recovers_torn_successor_and_preserves_pending_bundle_within_physic
         state_bytes: physical,
         maximum_asset_bytes: crate::authority_objects::PAGE_BUNDLE_BYTES.min(physical as usize)
             as u64,
-        retention_ms: 98000,
+        retention_ms: 98000.into(),
         content: None,
         envelope: vec![],
     };
@@ -246,7 +246,7 @@ fn bridge_pending_extent_recovers_torn_bank_without_exceeding_physical_consent()
         namespaces: vec!["Books".into()],
         state_bytes: physical,
         maximum_asset_bytes: 1024,
-        retention_ms: 10000,
+        retention_ms: 10000.into(),
         content: None,
         envelope: vec![],
     };
