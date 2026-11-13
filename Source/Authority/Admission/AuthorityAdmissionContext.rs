@@ -13,6 +13,18 @@ pub struct Disclosure {
     pub versions: Vec<VersionRef>,
 }
 impl Disclosure {
+    pub(crate) fn domain_context(
+        domains: &[Vec<u8>],
+        n: Digest,
+        i: Digest,
+    ) -> Result<authority_domains::State> {
+        let mut value = authority_domains::State::empty(n, i)
+            .value()
+            .array(7)?
+            .to_vec();
+        value[5] = a(domains.iter().map(|bytes| b(bytes)).collect());
+        authority_domains::State::parse_context(&a(value), n, i)
+    }
     pub fn value(&self) -> V {
         a(vec![
             V::Uint(201),
@@ -384,10 +396,8 @@ fn verify_page_targets(
     i: Digest,
     at: u64,
 ) -> Result<()> {
-    let mut state = authority_domains::State::empty(n, i);
-    for bytes in domains {
-        state.put(authority_domains::Record::parse(bytes, n, i)?)?;
-    }
+    // These are certified current records, not mutations from an empty history.
+    let state = Disclosure::domain_context(domains, n, i)?;
     for role in &slot.roles {
         let template = p.template(role.role)?;
         if let Some(host) = template.page {

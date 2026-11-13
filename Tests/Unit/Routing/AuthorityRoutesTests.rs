@@ -17,6 +17,48 @@ const DESTINATION: Digest = [172; 32];
 const CHARGE: u64 = 65536;
 
 #[test]
+fn admission_fresh_refusal_uses_the_empty_current_read_payload() {
+    use crate::{authority_read as read, consensus::runtime::Application};
+    let fixture = crate::authority_application::tests::Fixture::new();
+    let descriptor = fixture.configuration().descriptor();
+    let request = read::Request::sign(
+        descriptor.scope(),
+        &fixture.requester,
+        fixture.requester.verifying_key().to_bytes(),
+        [201; 32],
+        0,
+        read::Query::Admission {
+            policy: [202; 32],
+            claim: None,
+        },
+    )
+    .unwrap();
+    let request = read::Request::from_signed(&request).unwrap();
+    let (bytes, expires) = fixture
+        .app
+        .read(&fixture.initial, &request, 5000, 10000)
+        .unwrap();
+    let result = crate::authority_proof::OperationResult::parse(&bytes).unwrap();
+    assert_eq!(
+        result.disposition,
+        crate::authority_proof::Disposition::Refuse
+    );
+    assert_eq!(result.code, 3);
+    assert_eq!(expires, 10000);
+    assert_eq!(result.value, wire::encode(&a(vec![])).unwrap());
+    assert!(read::result_versions(&result).unwrap().is_empty());
+    let mut carries_data = result;
+    carries_data.value = wire::encode(&a(vec![
+        V::Uint(201),
+        V::Uint(1),
+        V::Text("AuthorityAdmissionContext".into()),
+        a(vec![]),
+    ]))
+    .unwrap();
+    assert!(read::result_versions(&carries_data).is_err());
+}
+
+#[test]
 fn route_successor_preserves_identity_and_consumes_one_certified_generation() {
     let mut f = Fixture::new();
     f.register();
@@ -1516,6 +1558,58 @@ fn scoped_voucher_issuance_checks_real_service_consent_and_member_capability() {
             assert_eq!(renewed.bytes, allowance.bytes);
             assert!(renewed.expires > 125_000);
             assert_eq!(recovered.records.len(), refreshed.records.len());
+            let disclosure = crate::authority_admission::disclose(
+                &f.records,
+                &recovered,
+                &f.reserved,
+                slot.roles[0].member,
+                slot.policy,
+                Some(slot.claim),
+                N,
+                I,
+                125_000,
+            )
+            .unwrap();
+            assert_eq!(
+                disclosure
+                    .versions
+                    .iter()
+                    .filter(|r| r.kind == 166 && r.generation == 2)
+                    .count(),
+                4,
+            );
+            let mut malformed = recovered.clone();
+            let voucher = malformed
+                .records
+                .values()
+                .find(|r| r.reference.kind == 166)
+                .unwrap();
+            let mut fields = wire::decode(&voucher.bytes)
+                .unwrap()
+                .array(8)
+                .unwrap()
+                .to_vec();
+            let mut payload = fields[7].list(14).unwrap().to_vec();
+            let mut relay = payload[1].array(4).unwrap().to_vec();
+            relay[3] = b(&[255; 32]);
+            payload[1] = a(relay);
+            fields[7] = a(payload);
+            let changed = Record::parse(&wire::encode(&a(fields)).unwrap(), N, I).unwrap();
+            malformed.records.insert(changed.reference.index(), changed);
+            assert!(
+                crate::authority_admission::disclose(
+                    &f.records,
+                    &malformed,
+                    &f.reserved,
+                    slot.roles[0].member,
+                    slot.policy,
+                    Some(slot.claim),
+                    N,
+                    I,
+                    125_000,
+                )
+                .is_err()
+            );
             let already_expanded = Index::parse(&f.records, &f.reserved, N, I)
                 .unwrap()
                 .extend_reservations(&f.reserved);

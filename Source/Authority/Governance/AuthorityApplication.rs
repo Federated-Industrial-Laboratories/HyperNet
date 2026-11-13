@@ -825,7 +825,14 @@ impl Application for PolicyApplication {
                         )?,
                         expires,
                     )),
-                    Err(_) => Ok((refusal("AuthorityAdmissionContext", 3)?, expires)),
+                    Err(_) => Ok((
+                        result(
+                            "AuthorityAdmissionContext",
+                            3,
+                            &wire::encode(&array(vec![]))?,
+                        )?,
+                        expires,
+                    )),
                 }
             }
             crate::authority_read::Query::PolicyContext => {
