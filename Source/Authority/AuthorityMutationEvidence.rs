@@ -207,6 +207,34 @@ impl Entry {
     }
 }
 impl Evidence {
+    /// Exact adoption provenance transfers invitation-owned streams to native assignments.
+    pub fn transferred_manual_streams(&self) -> Result<std::collections::BTreeSet<[u8; 32]>> {
+        let mut keys = std::collections::BTreeSet::new();
+        for entry in self
+            .0
+            .iter()
+            .filter(|entry| entry.created.kind == 125 && entry.created.generation > 1)
+        {
+            let intent = Intent::from_signed(&entry.signed)?;
+            if intent.action != "AuthorityAdmission" {
+                continue;
+            }
+            let operation = crate::authority_admission::Operation::parse(&intent)?;
+            for bytes in operation.retired_legacy(intent.network, intent.incarnation)? {
+                let reference = crate::authority_governance::Governance::record_versions(
+                    intent.network,
+                    intent.incarnation,
+                    std::slice::from_ref(&bytes),
+                )?
+                .remove(0);
+                if reference == entry.created {
+                    keys.insert(wire::decode(&bytes)?.array(12)?[7].fixed()?);
+                }
+            }
+        }
+        Ok(keys)
+    }
+
     pub fn genesis_tier(
         value: &V,
         id: [u8; 32],

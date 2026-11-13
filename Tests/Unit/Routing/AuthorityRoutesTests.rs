@@ -1749,6 +1749,27 @@ fn depleted_handover_preserves_expiry_until_normal_post_expiry_renewal() {
 }
 
 // Real certificates exercise the independent route decoder without synthetic TLS pins.
+pub(crate) fn admission_profiles() -> [RegisteredProfile; 3] {
+    let validity = (1000, 800000).into();
+    let mut fixture = Fixture::with_route_validity(true, None, validity);
+    let mut destination = Fixture::admit_with_validity(
+        &mut fixture.records,
+        &fixture.reserved,
+        &fixture.root,
+        2,
+        true,
+        None,
+        validity,
+    );
+    destination.identity.service = [173; 32];
+    seal(&mut destination, 94);
+    [
+        fixture.profiles[0].clone(),
+        fixture.profiles[1].clone(),
+        destination,
+    ]
+}
+
 pub(crate) fn certificate_profiles() -> (RegisteredProfile, RegisteredProfile) {
     certificate_profiles_until(b"700102000000Z", b"700103000000Z")
 }

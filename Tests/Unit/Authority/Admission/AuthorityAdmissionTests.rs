@@ -10,10 +10,10 @@ const N: Digest = [20; 32];
 const I: Digest = [21; 32];
 const P: Digest = [201; 32];
 const AT: u64 = 5000;
-fn signer(id: u64) -> SigningKey {
+pub(crate) fn signer(id: u64) -> SigningKey {
     SigningKey::from_bytes(&wire::digest(&id.to_be_bytes()))
 }
-fn snapshot(records: &[Vec<u8>], old: Option<&Slot>) -> Snapshot {
+pub(crate) fn snapshot(records: &[Vec<u8>], old: Option<&Slot>) -> Snapshot {
     let g = Governance::parse(N, I, records).unwrap();
     let root = g
         .versions()
@@ -50,7 +50,13 @@ fn snapshot(records: &[Vec<u8>], old: Option<&Slot>) -> Snapshot {
     ]))
     .unwrap()
 }
-fn record(kind: u64, id: Digest, payload: V, snapshot: &Snapshot, old: Option<&[u8]>) -> Vec<u8> {
+pub(crate) fn record(
+    kind: u64,
+    id: Digest,
+    payload: V,
+    snapshot: &Snapshot,
+    old: Option<&[u8]>,
+) -> Vec<u8> {
     wire::encode(&a(vec![
         V::Uint(kind),
         V::Uint(1),
@@ -81,7 +87,7 @@ fn intent_with_expected(op: &Operation, key: &SigningKey, expected: Vec<VersionR
     Operation::parse(&intent).unwrap();
     intent
 }
-fn fixture() -> (Vec<Vec<u8>>, Reservations, Policy) {
+pub(crate) fn fixture() -> (Vec<Vec<u8>>, Reservations, Policy) {
     fixture_with(
         support::Fixture::with_actions(vec![0, 10, 11, 12, 13, 26, 30]),
         800000.into(),
@@ -186,7 +192,7 @@ fn role(role: u64, key: &SigningKey, relay: &SigningKey) -> Role {
         request: wire::sign_envelope(&payload, key).unwrap(),
     }
 }
-fn reserve(
+pub(crate) fn reserve(
     records: &[Vec<u8>],
     p: &Policy,
     slot: u64,
@@ -250,7 +256,7 @@ fn enrol(
     let snap = snapshot(records, Some(old));
     enrol_with_snapshot(records, p, old, keys, snap)
 }
-fn enrol_with_snapshot(
+pub(crate) fn enrol_with_snapshot(
     records: &[Vec<u8>],
     p: &Policy,
     old: &Slot,
@@ -286,7 +292,7 @@ fn enrol_with_snapshot(
         snapshot: snap,
     }
 }
-fn retire(records: &[Vec<u8>], p: &Policy, old: &Slot) -> Operation {
+pub(crate) fn retire(records: &[Vec<u8>], p: &Policy, old: &Slot) -> Operation {
     let snap = snapshot(records, Some(old));
     let mut next = old.clone();
     next.state = 3;
